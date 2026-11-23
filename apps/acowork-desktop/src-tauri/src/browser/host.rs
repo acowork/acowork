@@ -48,6 +48,40 @@ use crate::navigation_policy::{self, NavigationRole};
 /// Webview the frontend listens on (the window's primary webview).
 const MAIN_WEBVIEW: &str = "main";
 
+/// Resolves the preview profile directory inside the app's local data folder.
+fn preview_profile_dir(app: &AppHandle) -> std::path::PathBuf {
+    app.path()
+        .app_local_data_dir()
+        .map(|dir| dir.join(PREVIEW_PROFILE_DIR))
+        // ponytail: no usable local data dir means the app cannot persist
+        // anything anyway; fall back to a temp profile rather than refusing to
+        // open the preview.
+        .unwrap_or_else(|_| std::env::temp_dir().join(PREVIEW_PROFILE_DIR))
+}
+
+/// Serialises webview creation.
+///
+/// `Window::add_child` builds the WebView2 controller on the main thread inside
+/// a nested message pump (`webview2_com::wait_with_pump`). Two creates at once
+/// re-enter each other — the second one runs *inside* the first one's pump, and
+/// neither completion reaches its own loop, which froze the whole UI when three
+/// links were clicked in quick succession. One at a time they simply queue.
+///
+/// ponytail: a single process-wide lock, so a burst of opens creates webviews
+/// strictly sequentially (a few hundred ms each). Shard it per window if that
+/// ever shows up as visible latency.
+static CREATE_GUARD: Mutex<()> = Mutex::new(());
+
+/// Name of the WebView2 profile directory used by preview webviews.
+///
+/// Tauri pins every webview to `app_local_data_dir()` (the main window's
+/// profile). Preview webviews get their own profile instead, so untrusted web
+/// content cannot share cookie storage or a browser process with the app shell
+/// — and so their browser arguments stay free to differ from the main window's
+/// (WebView2 refuses one profile carrying two different option sets, which is
+/// what made `CreateCoreWebView2Controller` fail with ERROR_INVALID_STATE).
+const PREVIEW_PROFILE_DIR: &str = "preview-profile";
+
 /// Emitted whenever a session's observable state changes. Payload:
 /// [`PreviewStateDto`].
 pub const STATE_EVENT: &str = "preview://state";
@@ -184,6 +218,14 @@ pub async fn preview_open(
         .state::<PreviewHost>()
         .with(|registry| registry.open(parsed.to_string(), bounds, now_ms()));
     let label = session.label.clone();
+    tracing::info!(
+        "[preview] open label={label} url={} bounds={}x{}+{}+{}",
+        parsed,
+        bounds.width,
+        bounds.height,
+        bounds.x,
+        bounds.y
+    );
 
     // Engine callbacks need their own handles; everything they touch is a
     // short-lived lock plus an emit, so none of them can deadlock the creator.
@@ -197,6 +239,8 @@ pub async fn preview_open(
         let title_label = label.clone();
         let load_label = label.clone();
         WebviewBuilder::new(&label, WebviewUrl::External(parsed))
+            // Own WebView2 profile — see `PREVIEW_PROFILE_DIR`.
+            .data_directory(preview_profile_dir(&app))
             // Second line of defence: the plugin-level guard already runs for
             // this webview, but keeping the builder's own handler means the
             // role rules hold even if the plugin is ever detached.
@@ -264,35 +308,84 @@ pub async fn preview_open(
             .devtools(cfg!(debug_assertions))
     };
 
-    let created = window.add_child(
-        builder,
-        LogicalPosition::new(bounds.x, bounds.y),
-        LogicalSize::new(bounds.width.max(1.0), bounds.height.max(1.0)),
-    );
+    // Sampled before the attempt: a failed create leaves a container window
+    // behind (see `stray_container`), and only the *new* childless container can
+    // be the one this attempt made.
+    #[cfg(windows)]
+    let containers_before =
+        window
+            .hwnd()
+            .map(|hwnd| super::stray_container::empty_containers(hwnd.0 as isize));
 
-    match created {
-        Ok(_) => {
-            // Evict beyond the memory bound; the newcomer is never a candidate.
-            let evicted = app.state::<PreviewHost>().with(|registry| {
-                let labels = registry.overflow(&label);
-                for stale in &labels {
-                    registry.remove(stale);
-                }
-                labels
-            });
-            for stale in evicted {
-                if let Some(webview) = app.get_webview(&stale) {
-                    let _ = webview.close();
-                }
-            }
-            app.state::<PreviewHost>()
-                .with(|registry| registry.get(&label).map(PreviewStateDto::from))
-                .ok_or_else(|| format!("unknown_preview: {label}"))
-        }
+    let created = {
+        // Held across the create only: the guard exists to keep two WebView2
+        // creations out of each other's message pump, not to serialise the
+        // registry bookkeeping below (see `CREATE_GUARD`).
+        let _creating = CREATE_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        window.add_child(
+            builder,
+            LogicalPosition::new(bounds.x, bounds.y),
+            LogicalSize::new(bounds.width.max(1.0), bounds.height.max(1.0)),
+        )
+    };
+
+    let webview = match created {
+        Ok(webview) => webview,
         Err(error) => {
             app.state::<PreviewHost>()
                 .with(|registry| registry.remove(&label));
-            Err(format!("create_failed: {error}"))
+            // Destroy the window the failed create left over, or it keeps eating
+            // every click over the preview rect for the life of the process.
+            #[cfg(windows)]
+            if let (Ok(hwnd), Ok(before)) = (window.hwnd(), containers_before) {
+                let parent = hwnd.0 as isize;
+                // `DestroyWindow` only works on the thread that owns the window,
+                // and this command runs off the main thread — so hop there. The
+                // cleanup is fire-and-forget: it is owed the moment the create
+                // fails, but the error is what the caller is waiting for.
+                let _ = app.run_on_main_thread(move || {
+                    super::stray_container::destroy_new(parent, &before)
+                });
+            }
+            return Err(format!("create_failed: {error}"));
+        }
+    };
+
+    // The webview exists from here on: nothing below may return without knowing
+    // who owns it.
+
+    // Evict beyond the memory bound; the newcomer is never a candidate.
+    let evicted = app.state::<PreviewHost>().with(|registry| {
+        let labels = registry.overflow(&label);
+        for stale in &labels {
+            registry.remove(stale);
+        }
+        labels
+    });
+    for stale in evicted {
+        tracing::info!("[preview] evict label={stale} (over MAX_LIVE_SESSIONS)");
+        close_webview(&app, &stale);
+    }
+
+    let state = app
+        .state::<PreviewHost>()
+        .with(|registry| registry.get(&label).map(PreviewStateDto::from));
+    match state {
+        Some(state) => Ok(state),
+        None => {
+            // The session was closed while this create was in flight, and
+            // `preview_close` could not have destroyed this webview: it only
+            // reaches webviews Tauri has registered, and this one registered
+            // with `add_child` returning. Leaving it would strand the page on
+            // screen for the life of the process, over a panel nobody can
+            // address.
+            tracing::info!(
+                "[preview] open label={label} closed mid-create; destroying the fresh webview"
+            );
+            destroy_webview(&webview, &label);
+            Err(format!("unknown_preview: {label}"))
         }
     }
 }
@@ -332,6 +425,7 @@ pub fn preview_set_bounds(
 /// Show or hide without changing geometry (inactive tab, native overlay open).
 #[tauri::command]
 pub fn preview_set_visible(app: AppHandle, label: String, visible: bool) -> Result<(), String> {
+    tracing::debug!("[preview] set_visible label={label} visible={visible}");
     let webview = webview_for(&app, &label)?;
     if visible {
         webview.show().map_err(|e| e.to_string())?;
@@ -409,20 +503,42 @@ pub fn preview_history(app: AppHandle, label: String, direction: String) -> Resu
 pub fn preview_close(app: AppHandle, label: String) -> Result<(), String> {
     app.state::<PreviewHost>()
         .with(|registry| registry.remove(&label));
-    if let Some(webview) = app.get_webview(&label) {
-        let _ = webview.close();
-    }
+    close_webview(&app, &label);
     Ok(())
+}
+
+/// Destroy one preview webview, and never let a failure leave it on screen.
+///
+/// `Webview::close` is the whole teardown (manager entry + native window), so a
+/// swallowed error here strands the page as a visible native surface nobody can
+/// address any more — the "关掉的页面还盖在应用上" report. Log the failure and at
+/// least hide it, so the panel stays usable.
+fn close_webview(app: &AppHandle, label: &str) {
+    match app.get_webview(label) {
+        Some(webview) => destroy_webview(&webview, label),
+        None => tracing::info!("[preview] close label={label} already gone"),
+    }
+}
+
+/// The destroy half of [`close_webview`], for callers that already hold the
+/// handle (a create that lost its session before it could register).
+fn destroy_webview(webview: &Webview, label: &str) {
+    match webview.close() {
+        Ok(()) => tracing::info!("[preview] close label={label} ok"),
+        Err(error) => {
+            tracing::error!("[preview] close label={label} FAILED: {error}; hiding instead");
+            let _ = webview.hide();
+        }
+    }
 }
 
 /// Destroy every session (preview panel unmounted, window going away).
 #[tauri::command]
 pub fn preview_close_all(app: AppHandle) -> Result<(), String> {
     let sessions = app.state::<PreviewHost>().with(|registry| registry.drain());
+    tracing::info!("[preview] close_all count={}", sessions.len());
     for session in sessions {
-        if let Some(webview) = app.get_webview(&session.label) {
-            let _ = webview.close();
-        }
+        close_webview(&app, &session.label);
     }
     Ok(())
 }

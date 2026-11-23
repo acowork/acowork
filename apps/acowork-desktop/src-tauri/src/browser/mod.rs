@@ -11,6 +11,7 @@
 //! |---|---|
 //! | `registry` | data model: sessions, phases, bounds, eviction (pure, unit-tested) |
 //! | `host` | Tauri side: webview lifecycle + `preview://` events (commands) |
+//! | `stray_container` | Windows: destroys the window wry leaks when a create fails |
 //!
 //! The policy that decides what a preview may navigate to lives one level up, in
 //! [`crate::navigation_policy`], because the plugin-level navigation guard needs
@@ -18,5 +19,8 @@
 
 pub mod host;
 pub mod registry;
+/// Win32-only compensation for a wry create-failure leak; see the module docs.
+#[cfg(windows)]
+pub mod stray_container;
 
 pub use host::PreviewHost;

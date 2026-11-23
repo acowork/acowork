@@ -61,7 +61,10 @@ prost = "0.13"
 # ClipboardEvent when files are copied, so we read the native clipboard
 # ourselves.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Ole", "Win32_UI_Shell"] }
+# `Win32_UI_WindowsAndMessaging` is for the failed-create sweep in
+# `src/browser/stray_container.rs` (destroy the container window wry leaks); the
+# rest predates it.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # objc2 (not objc 0.2): objc 0.2's sel!/msg_send! macros reference the
