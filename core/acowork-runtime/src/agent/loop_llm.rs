@@ -118,7 +118,11 @@ impl AgentLoop {
                 // chunk event so the UI drops its streaming indicator even
                 // though no content was accumulated. Returns a stopped
                 // ChatResponse so the upstream loop sees the same control
-                // flow shape it would after a mid-stream Stop.
+                // flow shape as after a mid-stream Stop.
+                // ADR-022 §12: defend against a half-open streaming line a
+                // previous call left behind. flush_streaming_line drains any
+                // interleaved segment together with the line, so there is no
+                // separate buffer that could leak across calls.
                 self.session_core
                     .flush_streaming_line(self.session.conversation.as_deref());
                 let _ = self.session_core.try_send_chunk(ChunkEvent::Stopped {
@@ -265,14 +269,15 @@ impl AgentLoop {
                     reasoning_in_progress = true;
                     accumulated_reasoning_content.push_str(&chunk);
 
-                    // ADR-022: Role transition. If we were in an assistant
-                    // streaming line, flush it to JSONL and start a new
-                    // thought line.
-                    self.session_core.flush_and_new_streaming_line(
-                        "thought", self.session.conversation.as_deref(),
+                    // ADR-022 §12: the persistence layer owns the mapping —
+                    // an interleaved delta appends to the open assistant
+                    // line's segment, a genuine thought delta streams on a
+                    // thought line. The loop no longer decides roles.
+                    self.session_core.on_reasoning_delta(
+                        &chunk,
+                        Utc::now().timestamp_millis(),
+                        self.session.conversation.as_deref(),
                     );
-                    self.session_core.append_streaming_delta("thought", &chunk);
-                    self.session_core.notify_new_data_available();
                 }
                 StreamEvent::ToolCallStart(tc) => {
                     // Mark reasoning finished when tool calls start after reasoning
@@ -423,13 +428,16 @@ impl AgentLoop {
                     //   - `flush_streaming_line` writes the JSONL record
                     //     and emits the terminal `record_complete` event so
                     //     the frontend freezes its active stream buffer
-                    //     into `messages[]`.
+                    //     into `messages[]`, then drains the line's
+                    //     interleaved reasoning as one thought record
+                    //     (ADR-022 §12) — all in one atomic exit.
                     //
                     // The downstream `handle_text_response` will take Path 1
-                    // (streaming_flush_count > 0), where its own call to
-                    // `flush_streaming_line` is a no-op because
-                    // `streaming_lines` is already empty — no duplicate
-                    // JSONL write and no duplicate record_complete push.
+                    // (streaming_flush_count > 0), where its own boundary
+                    // flush is a no-op because `streaming_lines` is already
+                    // empty (the line and its segment were drained together)
+                    // — no duplicate JSONL write and no duplicate
+                    // record_complete push.
                     self.session_core.force_flush_stream_delta();
                     self.session_core.flush_streaming_line(self.session.conversation.as_deref());
 
@@ -513,10 +521,15 @@ impl AgentLoop {
                         None => {
                             // Stream ended without a Finished event
                             // (common with OpenAI-compatible APIs like MiniMax).
-                            // ADR-022: No scratch buffer to flush — the provider
-                            // layer's ThinkTagParser already handled tag splitting,
-                            // and each Content/ReasoningContent event was flushed
-                            // to JSONL via flush_and_new_streaming_line.
+                            // ADR-022 §12: no flush here — the open line (with
+                            // its interleaved segment) survives to
+                            // finalize_streaming_line: case 1 flushes it
+                            // (draining the segment as a thought record),
+                            // case 2 removes it (dropping the segment, since
+                            // persist_think_to_conversation already writes the
+                            // full accumulated reasoning). Content events are
+                            // already on the JSONL line; reasoning that opened
+                            // the call is on its own thought line.
                             break;
                         }
                     }

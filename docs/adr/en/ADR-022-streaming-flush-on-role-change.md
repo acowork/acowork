@@ -5,7 +5,7 @@
 
 ## Status
 
-Adopted / awaiting implementation confirmation
+Adopted (see §12, amendment 2026-11-23: interleaved reasoning must not fragment the assistant line)
 
 ## Date
 
@@ -391,3 +391,34 @@ The essence of ADR-022 is not "one more think-parsing rule" but a boundary defin
 
 This pulls the current thought / tool / assistant misplacement problem out of the
 "frontend patch chain" and back into a verifiable, testable, maintainable persistence model.
+
+---
+
+## 12. Amendment (2026-11-23): interleaved reasoning must not fragment the assistant line
+
+**Status**: adopted
+**Incident**: `com.acowork.ponytail` instance `8f7be9a6`, round `r:msg-d828f763` (MiniMax-M3.1-Flash, reproduced twice on 2026-11-23, 11:13 and 11:16).
+
+### 12.1 Facts
+
+The provider normalization layer can deliver a `ReasoningContent` delta **in the middle of an already-open assistant message** (interleaved `reasoning_content` over the OpenAI-compatible protocol). Read literally, §4 treated every such delta as a role change: the assistant line was finalized and flushed, and the next Content delta opened a new line. One sentence was cut mid-word (`"写"` | thought `" delete."` | `"盘链路我自己探一下，不再猜："` — the compound "写盘" split in half), and the frontend, faithfully following §6, rendered each record as its own bubble. **The fragmentation happens on the write side, not in display.**
+
+The test: §4 assumes a role change marks a new semantic segment. An interleaved reasoning delta is not a new assistant segment — it is the previous reasoning stream resuming at an arbitrary byte offset of the text stream (`" delete."` is the continuation of the preceding thought "…yet be").
+
+### 12.2 Decision
+
+1. **Ownership where the lifetime is**: an interleaved thought segment's real lifetime is exactly the streaming line it was interleaved into — born with it, dies with it. It is therefore a field on `StreamingLine` (`interleaved: Option<ThoughtSegment>`, data model in conversation.rs), not a sibling field on `SessionCore`. "Drain / discard" thus becomes structural rather than a convention every call site must remember.
+2. **Mapping owned by the persistence layer**: `SessionCore::on_reasoning_delta` is the single place that decides what a reasoning delta means — an open assistant line appends to its `interleaved` segment (deltas merge, keeping first startTime / last endTime); otherwise the existing thought-line path runs. The stream loop no longer decides roles and has no `continue` escape.
+3. **Single drain exit**: `flush_streaming_line`, after writing the line's own record, atomically persists the line's segment as ONE `thought` record, AFTER the assistant record. Rationale: the assistant line's `line_number` was assigned at creation as the committed count then, and the §6 poll-cursor protocol assumes no committed line ever appears at or below an open streaming line's number; the line is removed from the map first, so appending the thought cannot renumber an open line (the partial-cut bug family). Every boundary (Finished / Error / Stop / Pause / `prepare_tool_calls` / `finalize_streaming_line`) just calls bare `flush_streaming_line` — the line-flush / segment-drain pairing no longer relies on memory.
+4. **Single discard exit**: `remove_streaming_line` drops the segment together with the line — exactly the Path 2 contract (`persist_think_to_conversation` writes the whole accumulated reasoning, interleaved segments included, from the response). A safe default, with no "deliberately do not drain" exception to remember.
+5. **Count semantics**: writing a thought record IS a streaming flush and must bump `streaming_flush_count`. Otherwise a whitespace-only assistant line carrying interleaved reasoning would leave the count at 0 → finalize wrongly takes Path 2 → persist_think writes the same reasoning a second time.
+6. **A third operation**: stop paths where the caller persists the assistant text itself (`handle_stopped`) use `drop_line_persisting_thought` (persist the thought, drop the line text) — distinct from flush (writes the line text too) and remove (drops the segment too).
+7. **Invariants unchanged**: every JSONL line still carries exactly one role; a StreamingLine still never changes role in place. The amendment only redefines what counts as a role transition: interleaved reasoning does not.
+
+### 12.3 Canonical shape and impact
+
+An interleaved round now persists as: `thought(leading) → assistant(merged full text) → thought(interleaved) → tool_call…`. The restorer's handling of the trailing thought (folded into the tool-call round's `reasoning_content`, dropped for text-only rounds) matches the shape the pre-amendment fragmented writes already produced — only the text is now whole. Live UI: during an interleaved pause the assistant bubble simply stalls briefly (no new deltas) instead of splitting; the thought record surfaces via polling at the boundary.
+
+Implementation: `conversation::{StreamingLine.interleaved, ThoughtSegment}`; `SessionCore::{on_reasoning_delta, flush_streaming_line (atomic drain), remove_streaming_line (drops segment), drop_line_persisting_thought, persist_interleaved_segment}`. The independent buffer field and the four patch methods `buffer_interleaved_thought / flush_interleaved_thought / reset_interleaved_thought / flush_line_at_boundary` are deleted — drain / discard of the segment is guaranteed structurally by the line's two exits, so there is no "forgot to drain" state.
+
+§9 test requirements add: `test_interleaved_reasoning_merges_assistant_reply`, `test_interleaved_thought_merges_segments_and_skips_whitespace`, `test_interleaved_segment_dies_with_line_on_path2_remove` (segment dies with the line, no cross-call leak), `test_whitespace_line_with_interleaved_thought_counts_as_flush` (count semantics, prevents Path 2 duplication) (session_core), `restore_folds_interleaved_thought_after_merged_assistant` (restorer, disk shape unchanged).

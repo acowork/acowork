@@ -1,6 +1,6 @@
 # ADR-022: 流式行 Role 变化即 Flush — 让 JSONL 成为如实的实时记录
 
-**状态**：已采纳 / 待实施确认  
+**状态**：已采纳（2026-11-23 修正案见 §12）  
 **日期**：2026-07-01  
 **决策者**：架构讨论  
 **前置**：ADR-021（统一 Session 数据加载）  
@@ -522,3 +522,34 @@ ADR-022 的本质不是“再补一个 think 解析规则”，而是明确边�
 - Frontend：按 JSONL 顺序渲染，streaming 只是未完成行占位。
 
 这能把当前的 thought/tool/assistant 错位问题从“前端补丁链”拉回到一个可验证、可测试、可维护的持久化模型上。
+---
+
+## 12. 修正案（2026-11-23）：交错 reasoning 不得切碎 assistant 行
+
+**状态**：已采纳
+**事故**：`com.acowork.ponytail` 实例 `8f7be9a6`，round `r:msg-d828f763`（MiniMax-M3.1-Flash，2026-11-23 11:13 与 11:16 两次复现）。
+
+### 12.1 事实
+
+provider 归一化层会在一条 **已开动的 assistant 消息中途** 投递 `ReasoningContent` delta（OpenAI 兼容协议的 `reasoning_content` 交错）。按 §4 的字面规则，每个这样的 delta 都构成"role 变化"→ assistant 行被立即终结落盘，下一个 Content delta 另起新行。结果：一句话从词中间劈开（`"写"` | thought `" delete."` | `"盘链路我自己探一下，不再猜："`，"写盘"被切断），前端按 §6 忠实渲染成多个气泡——**碎在写入侧，不在展示侧**。
+
+判据：§4 假设 role 变化标记一个新的语义段；而交错进来的 reasoning delta 不是新的 assistant 语义段，它是上一段 reasoning 流在正文流任意字节偏移处的续片（`" delete."` 正是前一条 thought "…yet be" 的延续）。
+
+### 12.2 决策
+
+**所有权归位**：交错思考段的真实生命周期就是它被插进的那条流式行——随行而生、随行而灭。因此它是 `StreamingLine` 的一个字段（`interleaved: Option<ThoughtSegment>`，数据模型在 conversation.rs），而不是 `SessionCore` 的兄弟字段。由此"排空 / 丢弃"成为结构性质，而非每个调用点必须记住的约定：
+
+1. **映射收进持久化层**：`SessionCore::on_reasoning_delta` 是唯一判定 reasoning delta 语义的地方——开放行是 assistant 就追加进该行的 `interleaved` 段（多 delta 合并，保留首 startTime / 末 endTime），否则走既有 thought 建行路径。流循环不再自行判断 role，也没有 `continue` 逃逸。
+2. **唯一排空出口**：`flush_streaming_line` 写完行记录后**原子地**把该行的交错段落盘为单条 `thought` 记录，且排在 assistant 记录**之后**。理由：assistant 行的 `line_number` 建行时即按当时 committed 行数指派，§6 轮询游标协议假定开放流式行编号之下不会再出现已提交行；行已先从 map 移除，故追加 thought 不会给开放行重新编号（partial-cut bug 家族）。所有边界（Finished / Error / Stop / Pause / `prepare_tool_calls` / `finalize_streaming_line`）只需调裸 `flush_streaming_line`，"flush 行 + 排空段"的配对不再靠记忆。
+3. **唯一丢弃出口**：`remove_streaming_line` 连段一起丢弃——这正是 Path 2 的语义（`persist_think_to_conversation` 从 response 整体落盘累积 reasoning，已含交错段），是安全默认值，无需"刻意不排空"的例外知识。
+4. **计数语义**：写出 thought 记录也算一次 streaming flush，必须递增 `streaming_flush_count`。否则"空白 assistant 行 + 交错 reasoning"会让计数停在 0 → finalize 误走 Path 2 → persist_think 把同一段 reasoning 重复落盘。
+5. **第三种语义**：`handle_stopped` 等"调用方自行持久化 assistant 文本"的停止路径，用 `drop_line_persisting_thought`（落 thought、弃行文本），区别于 flush（连行文本一起写）与 remove（连段一起丢）。
+6. **不变量不变**：每行 JSONL 仍只有一个 role；StreamingLine 生命周期内 role 仍不可原地变更。本修正案只重新定义了"什么算 role 变化"：交错 reasoning 不算。
+
+### 12.3 规范化形状与影响
+
+交错轮次的落盘形状：`thought(前导) → assistant(合并全文) → thought(交错) → tool_call…`。restorer 对尾部 thought 的处理（折入 tool-call 轮的 `reasoning_content`，text-only 轮丢弃）与修正案前碎片写入产生的形状一致，仅正文由碎变整。实时 UI 在交错暂停期 assistant 气泡短暂停更（无新 delta），不再裂成多气泡；交错 thought 于边界后经轮询出现。
+
+实现：`conversation::{StreamingLine.interleaved, ThoughtSegment}`；`SessionCore::{on_reasoning_delta, flush_streaming_line（原子排空）, remove_streaming_line（连段丢弃）, drop_line_persisting_thought, persist_interleaved_segment}`。独立缓冲字段与 `buffer_interleaved_thought / flush_interleaved_thought / reset_interleaved_thought / flush_line_at_boundary` 四个补丁方法已删除——段的排空 / 丢弃由行的两个出口结构性保证，不存在"忘了排空"的状态。
+
+§9 测试要求新增：`test_interleaved_reasoning_merges_assistant_reply`、`test_interleaved_thought_merges_segments_and_skips_whitespace`、`test_interleaved_segment_dies_with_line_on_path2_remove`（段随行消亡，无跨调用泄漏）、`test_whitespace_line_with_interleaved_thought_counts_as_flush`（计数语义，防 Path 2 重复）（session_core）、`restore_folds_interleaved_thought_after_merged_assistant`（restorer，磁盘形状不变）。

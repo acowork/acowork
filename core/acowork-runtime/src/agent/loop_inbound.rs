@@ -378,8 +378,14 @@ impl AgentLoop {
             }
         }
 
-        // ADR-021: Remove streaming line after stop persistence
-        self.session_core.remove_streaming_line();
+        // ADR-021 / ADR-022 §12: the caller persisted the assistant text
+        // above, so drop the streaming line WITHOUT re-writing its text but
+        // DO persist its interleaved thought (else the interrupted turn's
+        // reasoning is lost). The thought lands after the assistant record —
+        // canonical order. No-op when the loop's Stop arm already flushed the
+        // line and drained its segment.
+        self.session_core
+            .drop_line_persisting_thought(self.session.conversation.as_deref());
 
         // Notify frontend via chunk channel
         let _ = self.session_core.try_send_chunk(ChunkEvent::Stopped {
