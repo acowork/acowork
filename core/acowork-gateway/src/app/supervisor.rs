@@ -68,6 +68,50 @@ pub fn start_generic_app_supervisor(cfg: GenericAppConfig, state: SharedState) {
     });
 }
 
+/// The PID record for one app: `data/{app_id}.pid`, next to the `{app_id}.port`
+/// file the app itself writes.
+///
+/// The Gateway's shutdown is one way a child can end; the other is the Gateway
+/// dying without running it (`taskkill /F`, a crash). The record is what makes
+/// the next start able to tell "this app is already running from a previous
+/// Gateway" from "nothing is running", so a restart never stacks a second copy
+/// on the same app id.
+fn pid_file(cfg: &GenericAppConfig) -> PathBuf {
+    cfg.port_file.with_extension("pid")
+}
+
+/// Kill an instance left over from a previous Gateway, if its PID is still
+/// alive. Best-effort: an unreadable or stale record is just removed.
+async fn reap_previous_instance(cfg: &GenericAppConfig) {
+    let path = pid_file(cfg);
+    let Ok(text) = tokio::fs::read_to_string(&path).await else {
+        return;
+    };
+    let Ok(pid) = text.trim().parse::<u32>() else {
+        let _ = tokio::fs::remove_file(&path).await;
+        return;
+    };
+    // A recorded PID only means "our app" while its image name still matches:
+    // the record survives a hard kill, and PIDs get recycled.
+    let expected = cfg
+        .binary
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    match crate::lifecycle::process::process_image_name(pid).await {
+        Some(name) if name.eq_ignore_ascii_case(&expected) => {
+            tracing::warn!(app = %cfg.app_id, pid, "reaping an app left running by a previous Gateway");
+            let _ = crate::lifecycle::process::kill_agent_process(pid).await;
+        }
+        Some(name) => {
+            tracing::debug!(app = %cfg.app_id, pid, image = %name, "stale PID record now names another process");
+        }
+        None => {}
+    }
+    let _ = tokio::fs::remove_file(&path).await;
+}
+
 /// Stop a running generic supervisor and clear its process table entry.
 ///
 /// Returns the PID that was signalled, if any, so uninstall can wait until
@@ -227,6 +271,7 @@ fn expand(value: &str, cfg: &GenericAppConfig) -> String {
 }
 
 async fn spawn_and_monitor(cfg: &GenericAppConfig, state: &SharedState) {
+    reap_previous_instance(cfg).await;
     let _ = std::fs::remove_file(&cfg.port_file);
     let (mut child, pid) = match spawn_app(cfg).await {
         Ok(v) => v,
@@ -343,6 +388,13 @@ async fn spawn_app(cfg: &GenericAppConfig) -> Result<(tokio::process::Child, u32
         .spawn()
         .map_err(|e| format!("failed to spawn app {}: {e}", cfg.app_id))?;
     let pid = child.id().unwrap_or(0);
+    // Owned by the Gateway's lifetime first (kills it even on a hard exit),
+    // then recorded so a Gateway that dies without running that path is
+    // reclaimed on the next start.
+    acowork_core::process::contain_in_lifetime_job(pid);
+    if pid != 0 {
+        let _ = tokio::fs::write(pid_file(cfg), pid.to_string()).await;
+    }
     tracing::info!(app = %cfg.app_id, pid, port = cfg.port_hint, "app process spawned");
     Ok((child, pid))
 }
@@ -366,6 +418,22 @@ async fn check_health(port: u16, path: &str) -> bool {
     {
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
+    }
+}
+
+/// Stop every running app: signal the supervisors first (so none of them
+/// restarts what is about to be killed) and then kill the processes.
+///
+/// Called from the Gateway's shutdown path. Without it the apps outlive a
+/// restart, keep their old ports and — on Windows — keep the lock on
+/// `versions/<v>/bin/<app>.exe` that blocks the next install or build.
+pub async fn stop_all_apps(state: &SharedState) {
+    let app_ids: Vec<String> = {
+        let guard = stop_map();
+        guard.as_ref().map(|m| m.keys().cloned().collect()).unwrap_or_default()
+    };
+    for app_id in app_ids {
+        stop_app(&app_id, state).await;
     }
 }
 

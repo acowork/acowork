@@ -6,6 +6,7 @@
 //! | Public path | Upstream | Auth |
 //! |---|---|---|
 //! | `/api/apps/{id}/ui/*` | `/ui/*` (app's own bundle) | public static bytes |
+//! | `/api/apps/{id}/fonts/*` | `/fonts/*` (machine fonts it serves) | public static bytes |
 //! | `/api/apps/{id}/api/*` | `/*` (app's own REST) | app session ticket |
 //! | `/api/apps/{id}/session` | — | one-time ticket → cookie exchange |
 //!
@@ -99,11 +100,7 @@ async fn app_proxy_handler(
             .into_response();
     }
 
-    let (channel, upstream_path) = if rest == "ui" || rest.starts_with("ui/") {
-        ("ui", normalize_ui_path(&rest, &manifest.ui.path))
-    } else if let Some(tail) = rest.strip_prefix("api/") {
-        ("api", tail.to_string())
-    } else {
+    let Some((channel, upstream_path)) = channel_for(&rest, &manifest.ui.path) else {
         return (
             StatusCode::NOT_FOUND,
             axum::Json(serde_json::json!({ "error": "unknown app channel" })),
@@ -186,6 +183,23 @@ async fn app_proxy_handler(
                 .into_response()
         }
     }
+}
+
+/// Which upstream channel a `/api/apps/{id}/…` path belongs to.
+///
+/// `ui` and `fonts` are public static bytes (bundle and the machine fonts an app serves for
+/// the documents it opens); `api` is the app's own REST and stays behind the session ticket.
+/// Anything else is not an app channel at all — the Gateway never becomes a generic proxy.
+pub(crate) fn channel_for(rest: &str, declared_ui_path: &str) -> Option<(&'static str, String)> {
+    if rest == "ui" || rest.starts_with("ui/") {
+        return Some(("ui", normalize_ui_path(rest, declared_ui_path)));
+    }
+    // The machine fonts a document names: the app reads them itself and never ships them in
+    // a package (the licence forbids it). Same public treatment as its bundle, no user data.
+    if rest == "fonts" || rest.starts_with("fonts/") {
+        return Some(("ui", rest.to_string()));
+    }
+    rest.strip_prefix("api/").map(|tail| ("api", tail.to_string()))
 }
 
 /// `/ui/` → the app's declared ui path; `/ui/foo.css` keeps its tail.

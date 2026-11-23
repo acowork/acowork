@@ -50,7 +50,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
+mod lifetime;
 mod tree;
+pub use lifetime::contain_in_lifetime_job;
 use tree::TreeGuard;
 
 // ── Public types ──────────────────────────────────────────────────────────

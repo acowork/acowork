@@ -213,14 +213,22 @@ pub struct AppNavSpec {
 /// How Desktop previews this app's Agent artefacts (ADR-118).
 ///
 /// Distinguishes the preview channel, not whether a file exists:
-/// `library` (DOC/PM) opens a library resource; `visual` (FigCraft) opens a
-/// workspace file in this app's iframe; `none` uses Monaco / ImageViewer.
+/// `library` (DOC/PM) opens a library resource; `visual` (FigCraft and other
+/// craft apps) opens a workspace file in this app's iframe; `none` uses
+/// Monaco / ImageViewer.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppCanvasSpec {
     #[serde(default)]
     pub kind: String,
     #[serde(default)]
     pub preview_path: String,
+    /// Workspace file extensions this visual app owns (no leading dot).
+    /// Desktop uses the list to pick the preview iframe. When the app is
+    /// enabled it also takes over formats that otherwise have a built-in
+    /// viewer (`docx` / `xlsx` / `pptx` / `pdf`). Empty keeps the FigCraft
+    /// fallback: id `figcraft` still matches `.figcraft`.
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +377,13 @@ pub fn validate_manifest(m: &AppManifest) -> Result<(), String> {
     if m.ui.canvas.preview_path.contains("..") {
         return Err("ui.canvas.preview_path must not contain '..'".to_string());
     }
+    for ext in &m.ui.canvas.extensions {
+        if !is_valid_canvas_extension(ext) {
+            return Err(format!(
+                "ui.canvas.extensions entries must be 1-16 lowercase [a-z0-9] characters with no leading dot, got {ext:?}"
+            ));
+        }
+    }
     if let Some(pkg) = &m.package {
         validate_package_spec(pkg, &m.process.binary)?;
     }
@@ -476,6 +491,14 @@ pub fn is_valid_app_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// A canvas extension is the suffix without a dot (`docx`, `figcraft`).
+pub fn is_valid_canvas_extension(ext: &str) -> bool {
+    (1..=16).contains(&ext.len())
+        && ext
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
 /// In-memory registry: built-in declarations + user-installed declarations,
@@ -851,8 +874,45 @@ preview_path = "/?file={workspace_file}"
         let m = AppManifest::from_toml(text).unwrap();
         assert_eq!(m.ui.canvas.kind, "visual");
         assert_eq!(m.ui.canvas.preview_path, "/?file={workspace_file}");
+        assert!(m.ui.canvas.extensions.is_empty());
         assert!(m.mcp.auto_inject);
         assert!(AppManifest::from_toml(PM_APP_TOML).unwrap().ui.canvas.kind.is_empty());
+    }
+
+    #[test]
+    fn visual_canvas_extensions_parse_and_reject_dots() {
+        let text = r#"
+id = "wordcraft"
+version = "1.0.0"
+name = "WordCraft"
+icon = "wordcraft"
+
+[process]
+runtime = "generic"
+binary = "wordcraft-acowork"
+port_hint = 18091
+health_path = "/health"
+
+[mcp]
+path = "/mcp"
+gateway_path = "/api/apps/wordcraft/mcp"
+
+[ui]
+path = "/ui/"
+
+[ui.nav]
+label = "WordCraft"
+
+[ui.canvas]
+kind = "visual"
+preview_path = "/?file={workspace_file}"
+extensions = ["docx", "doc"]
+"#;
+        let m = AppManifest::from_toml(text).unwrap();
+        assert_eq!(m.ui.canvas.extensions, vec!["docx", "doc"]);
+
+        let bad = text.replace("extensions = [\"docx\", \"doc\"]", "extensions = [\".docx\"]");
+        assert!(AppManifest::from_toml(&bad).is_err());
     }
 
     #[test]

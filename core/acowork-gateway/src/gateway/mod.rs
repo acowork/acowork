@@ -1789,6 +1789,13 @@ impl Gateway {
                     }
                 }
 
+                // Installed generic apps (craft apps) are spawned by this
+                // process too, so they are as owned as the services above —
+                // same reason, same failure otherwise: an app that outlives
+                // the Gateway keeps its port, and on Windows keeps the lock on
+                // `versions/<v>/bin/<app>.exe` that blocks the next install.
+                crate::app::supervisor::stop_all_apps(&shared_state).await;
+
                 // ADR-055 §6.11: shut down the local Node Agent.
                 if let Some(supervisor) = &local_node_supervisor {
                     supervisor.shutdown().await;
