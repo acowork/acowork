@@ -7565,7 +7565,7 @@ mod tests {
                         && message_id == "m1"
                         && params_json == r#"{"a":1}"#
                         && answerable_by == "u-owner"
-                        && *interrupt
+                        && *interrupt == Some(true)
                 }
                 ("stop", InboundMessage::Stop { reason }) => reason == "user_requested",
                 ("continue", InboundMessage::ContinueExecution { session_id, reason }) => {

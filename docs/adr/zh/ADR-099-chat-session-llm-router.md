@@ -266,3 +266,14 @@ D2 说 router turn 无状态——这指的是**对话状态**；它的 token �
 - 集成：MockProvider 驱动回答/转交/新建/降级四条路径；选定会话内发生压缩时不新建 successor（原地继续）；群聊多话题并行；PM 任务进入群聊候选且终态后消失；agent-agent 映射不受影响。
 - E2E：router 关闭保持现有断言；开启后验证 1:1 与群聊 @ 的 `agent_message` 与 `turn_started`；PM task-dispatch 直达 `conv:task:`。
 - 回归：`cargo clippy --all-targets -- -D warnings`、`cargo test`、桌面端 `npm test`。
+
+## 修订（2026-11-24）：Chat 路由投递的打断语义由发送方在 origin 上限内声明
+
+commit b3643bb1 取消了 Chat 侧排队（会话 running 时用户消息插队进当前会话），但 `supersedes()` 当时按 **origin** 硬编码，而 Chat 的两条路由投递路径（`gateway_loop::deliver_intent_turn`、`chat_router::deliver_turn`）共用 `TurnOrigin::Chat` 且只认这个 origin，`PendingIntent` 又在 `record_pending_intent` 之后无条件入队 —— 于是 Chat 里所有经 Intent 传输的入口（执行卡片回复框、主 composer、`@` 续投）重新落回 waiting 队列，只有执行面 composer 保住了插队。
+
+- **声明位**：`IntentEnvelope` 新增 `interrupt: Option<bool>`（三态，缺省 = 跟随 origin 上限），并作为 wire 字段 `Intent.interrupt = 18` 过 MQTT（proto3 `optional` 保住显式 `false`）。Gateway 从 `POST /api/intents/chat-message` 与 `/mentions` 的请求体透传；`intent_send`、PM 派发、响应回投、cron 与 sweeper 回执一律不填。
+- **上限**：`TurnPolicy` 新增 `supersede: bool`，它是 origin 的授权上限（仅 Chat = true）；`TurnPolicy::supersedes(&Option<bool>)` 负责解析声明 —— Chat 缺省即插队、显式 `false` 才是人主动排队，其余 origin 无论声明什么都排队。peer 因此无法用一条 `action=interrupt` 的 intent 打断别人的会话（`intent_send` 的 params 是发送方任意数据）。
+- **顺序不变量收口**：新增 `RoutedIntent::{Supersede, Queue(PendingIntent), NextTurn}` 与 `SessionManager::send_routed_intent`。"先交接再打断"与"先记队列行再投递"原先散落在两处内联，正是漏判 origin 的地方；现在只有 `Queue` 变体携带 `PendingIntent`，排队行不可能在没排队时出现，插队也不可能退化成"先记一行再等下一轮"。
+- 打断仍走 `InboundMessage::User { superseding_turn: true }`，因此上一轮记为 `aborted`、部分思考随该条记录持久化（`loop_inbound.rs`）—— 与执行面 composer 的插队是同一条路，两处行为必然一致。
+- **执行面 HTTP 传输一并统一**：`POST /sessions/{sid}/messages` 的 `interrupt` 由 `bool`（缺省 false = 排队）改为 `Option<bool>`（缺省 = 跟随 origin 上限），`dispatch_inbound` 的 ChatMessage 臂改经 `TurnOrigin::Chat.policy().supersedes(..)` 判定，不再裸 `if interrupt`。此前同一条产品规则有两种表示、缺省语义相反：Intent 传输缺省打断、HTTP 传输缺省排队，任何省略该字段的生产者都会在 HTTP 侧重演 waiting 缺陷。现在两条传输共用一个缺省。桌面 composer 行为不变（它只在 `sending` 时显式传 `true`）。
+- `record_pending_intent` 收为私有：唯一调用者是 `send_routed_intent`，"先记行再投递"由模块边界强制，而非注释约定。

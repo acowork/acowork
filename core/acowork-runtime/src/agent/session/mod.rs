@@ -13,6 +13,6 @@ pub mod session_task;
 pub(crate) mod session_tool_layer;
 
 pub use session_manager::{
-    SessionLifecycleState, SessionManager, SessionManagerConfig, SessionOpenOutcome,
+    RoutedIntent, SessionLifecycleState, SessionManager, SessionManagerConfig, SessionOpenOutcome,
 };
 pub use session_task::{PulledAttachment, SessionMessage};

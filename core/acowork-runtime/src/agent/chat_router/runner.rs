@@ -58,7 +58,7 @@ use crate::agent::session::chat_candidates::{
     self, CandidateSurface, SessionCandidate,
 };
 use crate::agent::session::intent_routing::SessionSeed;
-use crate::agent::session::{SessionManager, SessionMessage};
+use crate::agent::session::{RoutedIntent, SessionManager, SessionMessage};
 use crate::agent_config::ChatRouterConfig;
 
 /// Per-result ceiling for an information tool fed back to the model. Generous
@@ -2207,20 +2207,29 @@ async fn deliver_turn(
         .map_err(|e| format!("session creation failed: {e}"))?;
     let (content, context_refs) =
         dispatch_parts(opened_new, background.as_deref(), text, referenced_rounds);
-    // §5.5.5 pending queue: record BEFORE delivering. The
-    // only place that drops this row is the SessionTask
-    // dequeue, which can run only once the send below has
-    // happened — so recording first guarantees the row is
-    // present when removal fires. Recording after the send
-    // raced: an idle session woke and started the turn at
-    // once, its empty removal ran first, and the row pushed
-    // right after (the session now `is_active`) sat in the
-    // queue forever. A busy session is active now (row
-    // recorded, cleared at dequeue); an idle one is not
-    // (record is a no-op — it starts immediately).
-    guard.record_pending_intent(
-        &session_id,
-        crate::agent::session_state::PendingIntent {
+    // Delivery, decided by the one resolver the deterministic route uses too
+    // (`gateway_loop::deliver_intent_turn` → `RoutedIntent::resolve`): a routed
+    // Chat turn is a person's own words, typed into a surface that may be
+    // showing a running turn, so it takes effect now and aborts that turn
+    // (ADR-044 §4.5) rather than parking as "waiting" — the defect this closed.
+    // A sender may still ask for the queue with `interrupt: false`; an origin the
+    // router might one day take that must not abort a run keeps the queue arm,
+    // which carries §5.5.5's ordering rule: record BEFORE delivering, since the
+    // only place that drops the row is the SessionTask dequeue, which can run
+    // only once the send has happened. Recording after raced an idle session that
+    // woke, ran its empty removal first, and left the row pushed right after
+    // stuck forever.
+    let delivery = RoutedIntent::resolve(
+        acowork_core::intent::TurnOrigin::parse(&envelope.kind),
+        envelope.interrupt,
+        // A router-bound turn always answers a Chat row, so the queue arm
+        // always has a coordinate to point a waiting line at. This is enforced
+        // at the router's entry, not assumed here: `chat_turn_text` admits an
+        // envelope only when its origin is `router_eligible` (Chat alone) AND
+        // `source_chat_session_id` is non-empty — a PM dispatch, cross-agent
+        // request or response never reaches this function.
+        true,
+        || crate::agent::session_state::PendingIntent {
             message_id: envelope.message_id.clone(),
             from: envelope.from.clone(),
             // The queue row is the only place the human
@@ -2242,7 +2251,7 @@ async fn deliver_turn(
         },
     );
     guard
-        .send_to_session(
+        .send_routed_intent(
             &session_id,
             SessionMessage::Intent {
                 content,
@@ -2296,6 +2305,7 @@ async fn deliver_turn(
                 // there is no envelope to re-render for a human.
                 display: None,
             },
+            delivery,
         )
         .map_err(|e| format!("delivery failed: {e}"))?;
     Ok((session_id, opened_new))
@@ -2564,6 +2574,7 @@ mod tests {
             // declared coordinate is that row.
             chat_row_id: "m-1".into(),
             aware_users: Vec::new(),
+            interrupt: None,
         }
     }
 

@@ -895,20 +895,21 @@ pub(crate) struct SendMessageBody {
     #[serde(default)]
     pub(crate) params_json: String,
     /// "I was looking at a running turn and I want this message to take effect
-    /// now." Absent (the default, i.e. every client before this field existed)
-    /// keeps the plain `enqueue` semantic: the message becomes the next turn
-    /// when the current one ends.
+    /// now." Tri-state, matching `IntentEnvelope::interrupt`: absent (`None`)
+    /// expresses no choice and the Runtime resolves it from the turn's origin
+    /// — a human Chat turn takes effect now. `Some(false)` is an explicit "let
+    /// it finish, queue this"; `Some(true)` asks for the abort outright.
     ///
     /// The desktop composer used to synthesize this from two user actions —
     /// type into the local queue, then press the stop button a second time —
     /// which is exactly one user intent spread over two round trips, in an
     /// order the client could not guarantee. Here it is one request; the
-    /// ordering (hand the message off **before** aborting the running turn, and
-    /// only abort the generation that was running when the message arrived) is
-    /// resolved by `gateway_loop::dispatch_inbound`, which is the layer that
-    /// knows both facts.
+    /// ceiling is `TurnOrigin::Chat.policy()` and the ordering (hand the
+    /// message off **before** aborting the running turn, and only abort the
+    /// generation that was running when the message arrived) is owned by
+    /// `SessionManager::send_to_session_superseding`.
     #[serde(default)]
-    pub(crate) interrupt: bool,
+    pub(crate) interrupt: Option<bool>,
 }
 
 /// Make sure `sid` has a live session task before an action is dispatched to it.
@@ -1305,6 +1306,41 @@ pub(crate) async fn post_compress_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One-step send at the HTTP boundary: `interrupt` is tri-state, and absent
+    /// means "no choice declared", NOT "queue". The ChatMessage arm resolves it
+    /// through `TurnOrigin::Chat.policy().supersedes(..)`, so an omitted field
+    /// interrupts exactly like the Intent transport — one absent-default across
+    /// both, which is what keeps a producer that omits the field from replaying
+    /// the waiting-queue defect on this transport (2026-11-24).
+    #[test]
+    fn an_omitted_interrupt_declares_nothing_rather_than_asking_to_queue() {
+        let chat = acowork_core::intent::TurnOrigin::Chat.policy();
+
+        let absent: SendMessageBody =
+            serde_json::from_value(serde_json::json!({ "content": "hi" }))
+                .expect("a body without interrupt parses");
+        assert_eq!(absent.interrupt, None);
+        assert!(
+            chat.supersedes(absent.interrupt),
+            "absent resolves to the human Chat default: take effect now"
+        );
+
+        let queued: SendMessageBody =
+            serde_json::from_value(serde_json::json!({ "interrupt": false }))
+                .expect("an explicit false parses");
+        assert_eq!(queued.interrupt, Some(false));
+        assert!(
+            !chat.supersedes(queued.interrupt),
+            "an explicit false is a person asking to let the run finish"
+        );
+
+        let now: SendMessageBody =
+            serde_json::from_value(serde_json::json!({ "interrupt": true }))
+                .expect("an explicit true parses");
+        assert_eq!(now.interrupt, Some(true));
+        assert!(chat.supersedes(now.interrupt));
+    }
 
     /// Build a meta straight from JSON so the fixture tracks the real
     /// on-disk shape (and its serde defaults) instead of a literal struct.

@@ -205,6 +205,17 @@ pub struct DeliveryRequest {
     /// `message_id` / `in_reply_to`. Empty = this delivery has no Chat row (an
     /// agent-to-agent request, a cron wake), and the turn is an *origin*.
     pub chat_row_id: String,
+    /// One-step send, as the sender asked for it (wire field 18): `Some(true)`
+    /// take effect now, `Some(false)` park it in the target's pending queue,
+    /// `None` express no choice and let the target resolve it from the turn's
+    /// origin.
+    ///
+    /// The Gateway forwards the declaration verbatim and does NOT decide it: the
+    /// ceiling is the receiver's origin policy, and a Gateway that pre-resolved
+    /// the flag would put the answerability rule in two places. A peer's
+    /// `intent_send` never sets it (`intent_send` has no such tool parameter), so
+    /// an agent cannot ask to abort the work a human is watching.
+    pub interrupt: Option<bool>,
 }
 
 /// Wake-then-deliver one Intent, recording the delivery fact in the
@@ -299,6 +310,7 @@ fn intent_payload(req: &DeliveryRequest) -> acowork_core::mqtt_proto::Intent {
         has_human_participant: req.chat_grant.has_human,
         chat_attachment_ids: req.chat_attachment_ids.clone(),
         chat_row_id: req.chat_row_id.clone(),
+        interrupt: req.interrupt,
         aware_users: req.aware_users.clone(),
     }
 }
@@ -455,6 +467,7 @@ mod tests {
             has_human: None,
             chat_attachment_ids: Vec::new(),
             chat_row_id: String::new(),
+            interrupt: None,
         }
     }
 

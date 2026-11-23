@@ -94,6 +94,10 @@ pub enum ControlAction {
         /// the new session's meta at creation; inert on a follow-up to an
         /// existing session. Empty = no extra readers.
         aware_users: Vec<String>,
+        /// One-step send as the sender declared it (wire field 18):
+        /// `None` = no choice, let the origin decide; `Some(..)` = the choice,
+        /// which the receiver clamps against that origin's ceiling.
+        interrupt: Option<bool>,
     },
 }
 
@@ -132,6 +136,7 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             chat_attachment_ids: intent.chat_attachment_ids,
             chat_row_id: intent.chat_row_id,
             aware_users: intent.aware_users,
+            interrupt: intent.interrupt,
         },
     };
 

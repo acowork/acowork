@@ -500,6 +500,7 @@ pub async fn run_cron_scheduler(
                 has_human: None,
                 chat_attachment_ids: Vec::new(),
                 chat_row_id: String::new(),
+                interrupt: None,
             };
 
             let mailbox = {

@@ -276,6 +276,7 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
                 chat_row_id: String::new(),
                 aware_users: vec![],
                 params_json: r#"{"target":"A"}"#.into(),
+                interrupt: None,
             })),
         };
         gw.publish_control_command(INSTANCE_A, cmd)

@@ -66,6 +66,42 @@ pub struct TurnPolicy {
     /// `message_id` coordinate — enforced at the single consumer
     /// ([`TurnOrigin::write_back`]).
     pub write_back: bool,
+    /// A turn routed into a session that is **already running one** aborts that
+    /// turn and takes its place, rather than parking in the session's inbox to
+    /// become the next one.
+    ///
+    /// This is the origin's share of the one-step-send rule (ADR-044 §4.5): the
+    /// human was looking at a running turn and typed, so their words are the
+    /// newest fact the agent holds, and waiting for the older turn to finish
+    /// misstates what the person asked for. Only a person's own turn may do
+    /// that — a peer's `intent_send` or a PM wake-up aborting the work a human
+    /// is watching would let a third party destroy it, so those keep the
+    /// ADR-099 §5.5.5 pending queue.
+    ///
+    /// The flag picks the delivery primitive, never the sequencing: the ordering
+    /// that keeps the abort off this message's own turn is owned by
+    /// `SessionManager::send_routed_intent`.
+    ///
+    /// It is a CEILING, not a verdict: the sender may declare a narrower choice
+    /// for one turn (the Intent wire's `interrupt` field), never a wider one.
+    /// Resolve the pair with [`TurnPolicy::supersedes`].
+    pub supersede: bool,
+}
+
+impl TurnPolicy {
+    /// Resolve what the sender asked for against what this origin may do.
+    ///
+    /// * `None` — no choice declared (every pre-upgrade producer, and a Chat
+    ///   send that never looked at the run's state): the origin's default
+    ///   decides, so a person's turn takes effect now and a peer's parks.
+    /// * `Some(true)` — honored only where the origin may abort a run at all.
+    ///   A peer's claim to interrupt the work a human is watching is clamped
+    ///   down, not obeyed: `intent_send` is not a stop button.
+    /// * `Some(false)` — a person's explicit "let it finish, queue this". The
+    ///   ceiling has nothing to say here: a non-human origin parks anyway.
+    pub fn supersedes(&self, declared: Option<bool>) -> bool {
+        self.supersede && declared.unwrap_or(true)
+    }
 }
 
 impl TurnOrigin {
@@ -103,27 +139,37 @@ impl TurnOrigin {
                 render_envelope: false,
                 responder: false,
                 write_back: true,
+                // The person typed this into a surface that may be showing a
+                // running turn; their words take effect now (ADR-044 §4.5).
+                supersede: true,
             },
             // A PM task: the task IS the conversation (§6.2), so the
             // route is keyed, not router-chosen. Otherwise identical to
             // a chat turn — it is human input and must behave like one.
+            // The one difference is delivery: nobody was watching a running
+            // turn when the service pushed it, so it never aborts one.
             Self::PmTask => TurnPolicy {
                 router_eligible: false,
                 render_envelope: false,
                 responder: false,
                 write_back: true,
+                supersede: false,
             },
             Self::AgentRequest => TurnPolicy {
                 router_eligible: false,
                 render_envelope: true,
                 responder: true,
                 write_back: true,
+                // A peer's message is not the human's: it must never be the
+                // reason a run they are watching stops.
+                supersede: false,
             },
             Self::AgentResponse => TurnPolicy {
                 router_eligible: false,
                 render_envelope: true,
                 responder: false,
                 write_back: false,
+                supersede: false,
             },
         }
     }
@@ -458,6 +504,46 @@ mod tests {
         assert!(!p.render_envelope, "a PM task turn renders human text");
         assert!(!p.router_eligible, "the task key beats the router (§6.2)");
         assert!(p.write_back, "the project group owes a terminal row");
+        assert!(
+            !p.supersede,
+            "a PM wake-up parks instead of aborting the run a human is watching"
+        );
+    }
+
+    #[test]
+    fn only_a_human_chat_turn_supersedes_the_running_turn() {
+        // The waiting-queue defect (2026-11-24): a Chat message typed into a
+        // busy session used to park in the pending queue on every transport,
+        // while the execution composer's own send aborted the turn. The origin
+        // table is where that difference is decided, once.
+        assert!(TurnOrigin::Chat.policy().supersede);
+        for origin in [
+            TurnOrigin::PmTask,
+            TurnOrigin::AgentRequest,
+            TurnOrigin::AgentResponse,
+        ] {
+            assert!(
+                !origin.policy().supersede,
+                "{origin:?} is not a person typing into a live surface"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sender_chooses_under_the_ceiling_never_over_it() {
+        let chat = TurnOrigin::Chat.policy();
+        let peer = TurnOrigin::AgentRequest.policy();
+        // Undeclared = the origin default, so an older client still gets the
+        // unified behaviour instead of the old queue.
+        assert!(chat.supersedes(None));
+        assert!(!peer.supersedes(None));
+        // An explicit choice is honored inside the ceiling …
+        assert!(!chat.supersedes(Some(false)));
+        assert!(chat.supersedes(Some(true)));
+        // … and clamped outside it. A peer cannot make `intent_send` a stop
+        // button for a run the human is watching.
+        assert!(!peer.supersedes(Some(true)));
+        assert!(!TurnOrigin::PmTask.policy().supersedes(Some(true)));
     }
 
     #[test]

@@ -677,6 +677,7 @@ async fn dispatch_task(
         // — the delivery is made under its id, so the receiving Runtime threads
         // the round's reference row under the sentence that asked for the work.
         chat_row_id: message_id.clone(),
+        interrupt: None,
         // ADR-076 §决策 4 (rev.): no extra awareness list needed — the
         // initiator is now the human project owner (read + write), and every
         // other member of the project reads the session through the bound
@@ -1465,6 +1466,7 @@ async fn deliver_intent(
         // reference row says so instead of naming a coordinate no transcript
         // holds.
         chat_row_id: String::new(),
+        interrupt: None,
         aware_users,
     };
     let outcome = delivery::wake_and_deliver(
@@ -1696,6 +1698,7 @@ async fn doc_review_receipt(
         chat_attachment_ids: Vec::new(),
         // No durable Chat row exists for this delivery.
         chat_row_id: String::new(),
+        interrupt: None,
         aware_users: Vec::new(),
     };
     let outcome = delivery::wake_and_deliver(
@@ -1932,6 +1935,7 @@ async fn deliver_response(
         // turn owes no write-back (`TurnOrigin::AgentResponse`) and threads
         // nothing.
         chat_row_id: String::new(),
+        interrupt: None,
     };
     let outcome = delivery::wake_and_deliver(
         &ctx,
@@ -2048,6 +2052,12 @@ pub struct MentionRequest {
     /// while the addressed turn still goes out. Empty = the Gateway mints one.
     #[serde(default)]
     pub message_id: Option<String>,
+    /// One-step send, group form — see [`ChatMessageRequest::interrupt`]. A
+    /// fan-out declares it once for the utterance: the human made one choice
+    /// when they pressed send, and per-target interruption would be a second
+    /// decision nobody asked about.
+    #[serde(default)]
+    pub interrupt: Option<bool>,
 }
 
 /// One `@session` reference attached to a human utterance (ADR-106 revision
@@ -2818,6 +2828,7 @@ async fn deliver_mentions(
             // no row — the declared coordinate is what the Runtime threads the
             // round's reference row and any card under.
             chat_row_id: row_id.clone(),
+            interrupt: req.interrupt,
             // Group fan-out stays with the router: which of the mentioned
             // agents owns which execution session is not something the
             // Gateway can attribute to a single id (ADR-100).
@@ -2953,6 +2964,18 @@ pub struct ChatMessageRequest {
     /// Agent; the bytes are never copied into the Chat store.
     #[serde(default)]
     pub attached_items: Vec<serde_json::Value>,
+    /// One-step send (ADR-044 §4.5): what the human asked this message to do
+    /// while the run it addresses is still going. `true` = take effect now and
+    /// abort that run; `false` = park it in the session's pending queue
+    /// (ADR-099 §5.5.5); absent = let the Runtime resolve it from the turn's
+    /// origin, which for a Chat turn means interrupt.
+    ///
+    /// Forwarded verbatim to the envelope, never resolved here: the ceiling is
+    /// the receiver's origin policy, and a Gateway that decided it would put one
+    /// rule in two places (and would let this service's version gate a behaviour
+    /// the Runtime owns).
+    #[serde(default)]
+    pub interrupt: Option<bool>,
 }
 
 /// Stream an attachment pinned to a durable user_message to its target Runtime.
@@ -3334,6 +3357,7 @@ async fn deliver_chat_message(
         // Gateway generated the id, put it in the row and delivers under it, so
         // the declared coordinate and `message_id` are one value.
         chat_row_id: message_id.clone(),
+        interrupt: req.interrupt,
     };
     let outcome = delivery::wake_and_deliver(
         &ctx,

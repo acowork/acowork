@@ -183,6 +183,7 @@ fn integration_control_message_flow() {
                 chat_row_id: String::new(),
                 aware_users: vec![],
                 params_json: r#"{"hello":"e2e"}"#.into(),
+                interrupt: None,
             })),
         };
         gw.publish_control_command(TEST_INSTANCE_ID, cmd)
@@ -285,6 +286,7 @@ fn integration_control_intent_flow() {
                 chat_row_id: String::new(),
                 aware_users: vec![],
                 params_json: String::new(),
+                interrupt: None,
             })),
         };
         gw.publish_control_command(TEST_INSTANCE_ID, cmd)
@@ -331,6 +333,7 @@ fn integration_control_intent_flow() {
                                     chat_row_id: String::new(),
                                     aware_users: vec![],
                                     params_json: String::new(),
+                                    interrupt: None,
                                 })),
                             },
                         )
@@ -419,6 +422,7 @@ fn integration_multiple_messages() {
                     chat_row_id: String::new(),
                     aware_users: vec![],
                     params_json: format!(r#"{{"seq":{i}}}"#),
+                    interrupt: None,
                 })),
             };
             gw.publish_control_command(TEST_INSTANCE_ID, cmd)

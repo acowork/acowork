@@ -24,7 +24,7 @@ use crate::agent::loop_::SessionChunkEvent;
 use crate::agent::session::session_handle::SessionHandle;
 use crate::agent::session::session_task::{SessionMessage, SessionTask};
 use crate::agent::session_state::{
-    SessionState, SessionStatus, SharedLatestSession, SharedSessionSnapshots,
+    PendingIntent, SessionState, SessionStatus, SharedLatestSession, SharedSessionSnapshots,
 };
 use crate::agent_config::AgentConfig;
 use crate::cancellation::CancelHandle;
@@ -58,6 +58,55 @@ pub enum SessionOpenOutcome {
     AlreadyActive,
     /// Session was on disk (Closed); we just resumed it into memory.
     ResumedFromDisk,
+}
+
+/// How a routed intent turn enters its execution session — the delivery half of
+/// the "what happens while a turn is running" rule, decided once from
+/// `TurnOrigin::policy()` and applied by [`SessionManager::send_routed_intent`]
+/// on every transport that routes a turn in.
+///
+/// The queue row travels inside the `Queue` arm because writing it is only
+/// correct as part of one operation with the handoff (see the ordering note on
+/// that method); a caller that could record it separately is a caller that will
+/// eventually record it after the send.
+pub enum RoutedIntent {
+    /// A person's own turn (ADR-044 §4.5): take effect now by aborting the turn
+    /// that was running when it arrived. Nothing is queued, so nothing is
+    /// shown as waiting.
+    Supersede,
+    /// A peer or service turn (ADR-099 §5.5.5): become the next turn, and let
+    /// the execution UI show it while the session is busy.
+    Queue(PendingIntent),
+    /// Become the next turn with nothing to show: the session is idle, or the
+    /// turn owes no Chat row that a queue line could point at.
+    NextTurn,
+}
+
+impl RoutedIntent {
+    /// Decide the arm from the two facts that exist about a routed turn — the
+    /// sender's declaration under the origin's ceiling, and whether the turn
+    /// owes its Chat a row a queue line can point at.
+    ///
+    /// A pure function for the same reason the desktop's composer button is one
+    /// (`composerButtonState`): the rule must be drivable from a test without a
+    /// running session, and two transports that each restate it drift.
+    ///
+    /// `row` is built only when the queue arm is taken. A preview computed for a
+    /// turn that interrupts its own session is work spent on a row nobody reads.
+    pub fn resolve(
+        origin: acowork_core::intent::TurnOrigin,
+        declared: Option<bool>,
+        owes_chat_row: bool,
+        row: impl FnOnce() -> PendingIntent,
+    ) -> Self {
+        if origin.policy().supersedes(declared) {
+            RoutedIntent::Supersede
+        } else if owes_chat_row {
+            RoutedIntent::Queue(row())
+        } else {
+            RoutedIntent::NextTurn
+        }
+    }
 }
 
 /// Configuration for SessionManager.
@@ -2196,15 +2245,54 @@ impl SessionManager {
 
     /// Record a routed intent in the target session's pending queue so the
     /// execution UI can show it while the session is still busy (ADR-099,
+    /// Deliver a **routed** intent turn: the two delivery semantics an inbound
+    /// turn can have, chosen by the caller from the origin policy
+    /// (`TurnOrigin::policy().supersede`) and never re-derived per transport.
+    ///
+    /// Both transports that route a turn into an execution session — the Chat
+    /// Router's `deliver_turn` and the deterministic `deliver_intent_turn` —
+    /// go through here, because the sequencing rules are identical and two
+    /// copies of them drift:
+    ///
+    /// * [`RoutedIntent::Queue`] records the pending row **before** the handoff
+    ///   (ADR-099 §5.5.5). Recording after raced an idle session that woke,
+    ///   started its turn and ran its empty dequeue removal first, leaving the
+    ///   row pushed right after stuck in the queue forever.
+    /// * [`RoutedIntent::Supersede`] hands the message over **before** aborting
+    ///   the running turn (ADR-044 §4.5), so the human's words are never the
+    ///   casualty of a full or closed channel. It writes no queue row: a turn
+    ///   that takes effect immediately is not waiting.
+    pub fn send_routed_intent(
+        &mut self,
+        session_id: &str,
+        msg: SessionMessage,
+        delivery: RoutedIntent,
+    ) -> Result<()> {
+        match delivery {
+            RoutedIntent::Supersede => self.send_to_session_superseding(session_id, msg),
+            RoutedIntent::Queue(intent) => {
+                self.record_pending_intent(session_id, intent);
+                self.send_to_session(session_id, msg)
+            }
+            RoutedIntent::NextTurn => self.send_to_session(session_id, msg),
+        }
+    }
+
     /// design 27 §5.5.5).
     ///
     /// Only meaningful for a session that is already running a turn: an idle
     /// session dequeues the intent immediately and the message appears in its
+    /// Private on purpose: the only caller is [`Self::send_routed_intent`],
+    /// which owns the record-before-handoff ordering. A public entry here
+    /// would let a transport write the row after the send — the race that
+    /// left rows stuck in the queue forever — so the invariant is enforced by
+    /// the module boundary, not by a comment.
+    ///
     /// history, so no queue row is needed. Best-effort — a session without a
     /// persistent conversation (ephemeral) simply has nowhere to record.
     /// Pushes one state change so the projection is live without waiting for
     /// the next turn boundary.
-    pub fn record_pending_intent(
+    fn record_pending_intent(
         &self,
         session_id: &str,
         intent: crate::agent::session_state::PendingIntent,
@@ -7564,6 +7652,56 @@ mod tests {
     /// An evicted / never-registered session has no generation to abort; the
     /// delivery itself is still attempted and reports its own error.
     #[tokio::test]
+    /// The waiting-queue defect (2026-11-24): a Chat message typed into the
+    /// execution card's reply box parked in the pending queue while the same
+    /// words in the execution composer aborted the turn. `RoutedIntent::resolve`
+    /// is where the two transports stop disagreeing, so the whole matrix is
+    /// pinned here — no running session needed, because the decision is pure.
+    #[test]
+    fn a_routed_turn_interrupts_only_for_a_person_under_the_ceiling() {
+        use acowork_core::intent::TurnOrigin;
+        let row = || crate::agent::session_state::PendingIntent {
+            message_id: "m-1".into(),
+            from: "user:u-1".into(),
+            preview: "p".into(),
+            from_chat: true,
+        };
+        // A human Chat turn: interrupt by default, park on request.
+        assert!(matches!(
+            RoutedIntent::resolve(TurnOrigin::Chat, None, true, row),
+            RoutedIntent::Supersede
+        ));
+        assert!(matches!(
+            RoutedIntent::resolve(TurnOrigin::Chat, Some(true), true, row),
+            RoutedIntent::Supersede
+        ));
+        assert!(matches!(
+            RoutedIntent::resolve(TurnOrigin::Chat, Some(false), true, row),
+            RoutedIntent::Queue(_)
+        ));
+        // A peer or a PM wake-up: the declaration cannot buy the abort, and the
+        // queue row is what the execution UI shows instead.
+        for origin in [
+            TurnOrigin::AgentRequest,
+            TurnOrigin::AgentResponse,
+            TurnOrigin::PmTask,
+        ] {
+            assert!(matches!(
+                RoutedIntent::resolve(origin, Some(true), true, row),
+                RoutedIntent::Queue(_)
+            ));
+            assert!(matches!(
+                RoutedIntent::resolve(origin, None, true, row),
+                RoutedIntent::Queue(_)
+            ));
+            // Nothing to point a waiting line at → plain next turn, no row.
+            assert!(matches!(
+                RoutedIntent::resolve(origin, Some(true), false, row),
+                RoutedIntent::NextTurn
+            ));
+        }
+    }
+
     async fn superseding_send_without_a_registered_generation_still_delivers() {
         let (mut manager, mut inbox, _slot, sid) = manager_with_one_session(4);
         manager.cancel_handles.remove(&sid);
@@ -7575,3 +7713,110 @@ mod tests {
         assert!(inbox.try_recv().is_ok(), "message must be delivered");
     }
 }
+
+    // ── `send_routed_intent`: the composition, not just the resolver ──────
+    //
+    // `RoutedIntent::resolve` is pinned above as a pure function. These drive
+    // the real method, because the reason it exists is the ORDER of its two
+    // effects, and a resolver test cannot see that.
+
+    /// Give the injected session a real conversation and a busy status, so a
+    /// queue row has somewhere to land (`record_pending_intent` is a no-op on
+    /// an idle session or one without a conversation). Returns the conversation
+    /// to read the queue back, and the TempDir to keep the JSONL alive.
+    fn busy_session_with_conversation(
+        manager: &mut SessionManager,
+        sid: &str,
+    ) -> (
+        Arc<crate::conversation::ConversationSession>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("temp work dir");
+        let (conv, _meta_rx, _state_rx) = crate::conversation::ConversationSession::new(
+            dir.path(),
+            sid,
+            crate::conversation::SessionConfig {
+                agent_id: "com.test.supersede".to_string(),
+                workspace_id: None,
+                model: Some("test-model".to_string()),
+                provider: Some("mock".to_string()),
+            },
+            8,
+            SessionManager::new_committed_lines(),
+        )
+        .expect("conversation on disk");
+        let conv = Arc::new(conv);
+        let handle = manager.sessions.get_mut(sid).expect("the injected session");
+        handle.conversation = Some(Arc::clone(&conv));
+        // A watch receiver keeps its last value after the sender drops, so the
+        // busy status survives without holding the sender.
+        let (_busy_tx, busy_rx) = tokio::sync::watch::channel(SessionStatus::Thinking);
+        handle.status_rx = busy_rx;
+        (conv, dir)
+    }
+
+    fn routed_row(message_id: &str) -> crate::agent::session_state::PendingIntent {
+        crate::agent::session_state::PendingIntent {
+            message_id: message_id.to_string(),
+            from: "user:nicholas".to_string(),
+            preview: "waiting".to_string(),
+            from_chat: true,
+        }
+    }
+
+    /// The queue row is recorded **before** the handoff, and unconditionally:
+    /// a refused message still leaves the row. This is what fails if the arm
+    /// is refactored to `send_to_session(..)?; record_pending_intent(..)` —
+    /// the early return skips the record, and the idle-session race the
+    /// ordering exists for (dequeue removal running before the row is pushed)
+    /// comes back. A full channel is the deterministic way to refuse a handoff.
+    #[tokio::test]
+    async fn routed_queue_records_the_row_even_when_the_handoff_is_refused() {
+        let (mut manager, mut inbox, _slot, sid) = manager_with_one_session(1);
+        let (conv, _dir) = busy_session_with_conversation(&mut manager, &sid);
+        manager
+            .send_to_session(&sid, one_step_chat_message("first"))
+            .expect("first handoff fills the capacity-1 channel");
+
+        let err = manager
+            .send_routed_intent(
+                &sid,
+                one_step_chat_message("queued"),
+                RoutedIntent::Queue(routed_row("m-queued")),
+            )
+            .expect_err("a full channel must refuse the message");
+        assert!(err.to_string().contains("full"), "{err}");
+
+        let queue = conv.pending_intents();
+        assert_eq!(queue.len(), 1, "the row is recorded before the handoff");
+        assert_eq!(queue[0].message_id, "m-queued");
+        // The refused message itself is not in the inbox — no partial delivery.
+        assert!(inbox.try_recv().is_ok(), "the first message is still queued");
+        assert!(inbox.try_recv().is_err(), "the refused message must not appear");
+    }
+
+    /// A turn that takes effect immediately is not waiting: the Supersede arm
+    /// writes no queue row even though the session is busy and the turn owes
+    /// its Chat a row. This is the user-visible half of the waiting-queue
+    /// defect — the pending box must stay empty for a person's own message.
+    #[tokio::test]
+    async fn routed_supersede_writes_no_queue_row_and_aborts_the_running_turn() {
+        let (mut manager, mut inbox, slot, sid) = manager_with_one_session(4);
+        let (conv, _dir) = busy_session_with_conversation(&mut manager, &sid);
+        let running = slot.lock().clone();
+
+        manager
+            .send_routed_intent(
+                &sid,
+                one_step_chat_message("now"),
+                RoutedIntent::Supersede,
+            )
+            .expect("handoff must succeed");
+
+        assert!(
+            conv.pending_intents().is_empty(),
+            "a turn that starts immediately was never waiting"
+        );
+        assert!(running.is_cancelled(), "the running turn is superseded");
+        assert!(inbox.try_recv().is_ok(), "the message must be delivered");
+    }

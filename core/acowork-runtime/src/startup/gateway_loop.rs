@@ -215,6 +215,7 @@ fn control_action_to_inbound(
             chat_attachment_ids,
             chat_row_id,
             aware_users,
+            interrupt,
         } => {
             let params: serde_json::Value =
                 serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
@@ -239,6 +240,7 @@ fn control_action_to_inbound(
                     chat_attachment_ids,
                     chat_row_id,
                     aware_users,
+                    interrupt,
                 })),
             ))
         }
@@ -1114,11 +1116,20 @@ async fn dispatch_inbound(
                     ),
                     speaker,
                 };
-                // `interrupt` only picks the delivery primitive. The ordering
-                // that keeps the abort off this message's own turn — capture
-                // the generation, hand off, abort only on success — belongs to
+                // `interrupt` only picks the delivery primitive, and it is
+                // resolved through the SAME origin ceiling the routed Intent
+                // transports use (`RoutedIntent::resolve`): a human Chat turn
+                // takes effect now unless the sender explicitly asked to queue.
+                // One absent-default across both transports — a producer that
+                // omits the field cannot regress to the queue here while the
+                // Intent path interrupts. The ordering that keeps the abort off
+                // this message's own turn — capture the generation, hand off,
+                // abort only on success — belongs to
                 // `send_to_session_superseding`, not to this routing arm.
-                let sent = if interrupt {
+                let sent = if acowork_core::intent::TurnOrigin::Chat
+                    .policy()
+                    .supersedes(interrupt)
+                {
                     guard.send_to_session_superseding(&session_id, message)
                 } else {
                     guard.send_to_session(&session_id, message)
@@ -1665,6 +1676,7 @@ async fn deliver_intent_turn(
 ) -> crate::error::Result<()> {
     use crate::agent::inbound::IntentEnvelope;
     use crate::agent::intent_turn::render_intent_message;
+    use crate::agent::session::RoutedIntent;
     use crate::agent::session::SessionMessage;
 
     let IntentEnvelope {
@@ -1685,6 +1697,7 @@ async fn deliver_intent_turn(
         // Consumed at creation in `resolve_legacy_route`, not here — the
         // session this turn runs in is already routed and stamped.
         aware_users: _,
+        interrupt,
     } = *env;
 
     // A PM dispatch's wake-up playbook is model-facing and ephemeral: it
@@ -1721,44 +1734,44 @@ async fn deliver_intent_turn(
     // never have to interpret the machine format.
     let display = crate::agent::intent_turn::render_intent_display(&kind, &action, &params);
 
-    // §5.5.5 pending queue: which intents must be shown in the execution
-    // side's pending list while that session is busy. A Chat-sourced turn that
-    // owes its chat a write-back is exactly that set. ADR-106 retired the
-    // routing reaction row this pointer used to feed: the chat coordinate and
-    // the participant who can answer are carried on the turn's surface, and the
-    // round's reference row is what tells the chat where the message went.
-    let pending_from_chat = if !source_chat_session_id.is_empty()
-        && crate::agent::intent_turn::turn_kind_semantics(&kind, &message_id).1
-    {
-        Some((message_id.clone(), from.clone()))
-    } else {
-        None
-    };
-    // §5.5.5 pending queue: record BEFORE delivering, mirroring the router
-    // path (runner.rs). Recording after the send raced with an idle session
-    // that woke and started the turn at once — its empty removal ran first,
-    // leaving the row we then pushed stuck in the queue forever. A busy
-    // session is active now (row recorded, cleared at dequeue); an idle one
-    // is not (record is a no-op — it starts immediately).
-    if let Some((pending_message_id, pending_from)) = pending_from_chat.as_ref() {
-        session_manager.lock().await.record_pending_intent(
-            &target.0,
-            crate::agent::session_state::PendingIntent {
-                message_id: pending_message_id.clone(),
-                from: pending_from.clone(),
-                preview: crate::agent::session_state::pending_preview(
-                    &crate::agent::session_state::preview_source(
-                        params.get("message").and_then(|v| v.as_str()).unwrap_or(""),
-                        &context_refs,
-                        // The queue is a human surface: it names the waiting
-                        // turn the way the round it opens will.
-                        display.as_ref(),
-                    ),
+    // Delivery: whose turn is this, and what does a busy session do with it?
+    // Two facts, resolved in one place: what the SENDER declared on the envelope
+    // (`interrupt`, the same choice the execution composer's HTTP send makes) and
+    // what this ORIGIN is allowed to do (`TurnPolicy::supersede`, the ceiling).
+    //
+    // A person's own Chat turn therefore takes effect NOW by default (ADR-044
+    // §4.5): the run that was going when they typed is superseded and no queue row
+    // is written — a turn that starts immediately was never waiting. This is the
+    // arm the waiting-queue defect was about: a reply typed into a running block
+    // landed in the pending list even though the same words in the execution
+    // composer aborted the turn. `interrupt: false` is the sender's explicit
+    // "let it finish, queue this"; a peer's `intent_send` claiming `true` is
+    // clamped down, because a third party must never be the reason a run the
+    // human is watching stops. ADR-106 retired the routing reaction row the
+    // queue pointer used to feed: the chat coordinate and the participant who can
+    // answer are carried on the turn's surface, and the round's reference row is
+    // what tells the chat where the message went.
+    let origin = acowork_core::intent::TurnOrigin::parse(&kind);
+    let delivery = RoutedIntent::resolve(
+        origin,
+        interrupt,
+        !source_chat_session_id.is_empty()
+            && crate::agent::intent_turn::turn_kind_semantics(&kind, &message_id).1,
+        || crate::agent::session_state::PendingIntent {
+            message_id: message_id.clone(),
+            from: from.clone(),
+            preview: crate::agent::session_state::pending_preview(
+                &crate::agent::session_state::preview_source(
+                    params.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+                    &context_refs,
+                    // The queue is a human surface: it names the waiting
+                    // turn the way the round it opens will.
+                    display.as_ref(),
                 ),
-                from_chat: true,
-            },
-        );
-    }
+            ),
+            from_chat: true,
+        },
+    );
     let opened_new = target.1;
     // ADR-100 follow-up: this turn's Chat obligations, produced from the same
     // envelope fields the route already read. One producer for every
@@ -1770,7 +1783,7 @@ async fn deliver_intent_turn(
         &from,
         has_human,
     );
-    session_manager.lock().await.send_to_session(
+    session_manager.lock().await.send_routed_intent(
         &target.0,
         SessionMessage::Intent {
             content,
@@ -1799,6 +1812,7 @@ async fn deliver_intent_turn(
             context_refs,
             display,
         },
+        delivery,
     )
 }
 
@@ -1923,6 +1937,7 @@ mod tests {
             chat_attachment_ids: Vec::new(),
             chat_row_id: String::new(),
             aware_users: Vec::new(),
+            interrupt: None,
         })
         .expect("Intent must map");
         assert_eq!(
@@ -1961,6 +1976,7 @@ mod tests {
             chat_attachment_ids: Vec::new(),
             chat_row_id: String::new(),
             aware_users: Vec::new(),
+            interrupt: None,
         })
         .expect("Intent must still map");
 
@@ -1993,6 +2009,7 @@ mod tests {
             chat_attachment_ids: Vec::new(),
             chat_row_id: "m-1".into(),
             aware_users: Vec::new(),
+            interrupt: None,
         })
     }
 

@@ -141,6 +141,17 @@ pub struct IntentEnvelope {
     /// via `set_aware_users`; a follow-up to an existing session ignores it.
     #[serde(default)]
     pub aware_users: Vec<String>,
+    /// One-step send, declared by the sender for THIS turn (wire field 18):
+    /// `Some(true)` take effect now, `Some(false)` park it in the pending queue,
+    /// `None` express no choice and let the origin decide.
+    ///
+    /// A request, not a permission. Both delivery sites resolve it through
+    /// `TurnOrigin::parse(&kind).policy().supersedes(..)`, so a peer's
+    /// `intent_send` cannot abort the run a human is watching, and an older
+    /// sender (absent = `None`) keeps the unified behaviour rather than falling
+    /// back to the queue.
+    #[serde(default)]
+    pub interrupt: Option<bool>,
     // ADR-100 Rev. 8: the execution-view pin (`for_execution_session`) is gone.
     // A message composed inside an execution session is a session-scoped write
     // (`InboundMessage::ChatMessage` over HTTP), never an Intent envelope, so
@@ -279,17 +290,24 @@ pub enum InboundMessage {
         /// that turn finishes (plan: one-step send, superseding the desktop's
         /// former "queue, then press stop again" two-click flow).
         ///
-        /// `false` — the default, and every producer before this field existed
-        /// — is the plain `enqueue` semantic: the message waits in the session
-        /// task's inbox and becomes the next turn.
+        /// Tri-state, and the SAME representation the Intent transport carries
+        /// (`IntentEnvelope::interrupt`): `None` = the sender expressed no
+        /// choice, so the turn's origin decides — a human Chat turn takes
+        /// effect now. `Some(false)` is an explicit "let it finish, queue
+        /// this"; `Some(true)` asks for the abort outright. One rule with one
+        /// absent-default, so a producer that omits the field cannot regress
+        /// to the queue on this transport while the Intent transport
+        /// interrupts (the waiting-queue defect, 2026-11-24).
         ///
-        /// `true` is resolved by `gateway_loop::dispatch_inbound`, which owns
-        /// the ordering: capture the running request's cancel generation,
-        /// hand the message off, and only then cancel that captured
-        /// generation. The turn that was running when the message arrived
-        /// ends; the message itself opens the next one.
+        /// Resolved by `gateway_loop::dispatch_inbound` through
+        /// `TurnOrigin::Chat.policy().supersedes(..)` — the same ceiling the
+        /// routed transports use — and the ordering (capture the running
+        /// request's cancel generation, hand the message off, only then cancel
+        /// that captured generation) is owned by
+        /// `SessionManager::send_to_session_superseding`. The turn that was
+        /// running when the message arrived ends; the message opens the next.
         #[serde(default)]
-        interrupt: bool,
+        interrupt: Option<bool>,
     },
     /// ADR-029 + ADR-052: agent-level builtin-tool enabled-flag update.
     ///
@@ -466,6 +484,7 @@ mod tests {
             chat_attachment_ids: Vec::new(),
             chat_row_id: String::new(),
             aware_users: Vec::new(),
+            interrupt: None,
         }));
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: InboundMessage = serde_json::from_str(&json).unwrap();
@@ -589,6 +608,7 @@ mod tests {
             chat_attachment_ids: Vec::new(),
             chat_row_id: String::new(),
             aware_users: Vec::new(),
+            interrupt: None,
         }));
         let (msg, truncated) = msg.enforce_size_limit();
         assert!(truncated);

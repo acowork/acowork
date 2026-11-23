@@ -422,6 +422,7 @@ fn capture_intent(topic: &str, what: &str) -> IntentEnvelope {
         has_human: intent.has_human_participant,
         chat_attachment_ids: intent.chat_attachment_ids,
         chat_row_id: intent.chat_row_id,
+        interrupt: intent.interrupt,
         aware_users: intent.aware_users,
     }
 }

@@ -1157,6 +1157,18 @@ message Intent {
   /// Runtime's `is_readable_by` treats this as a read-only grant — it never
   /// confers write. Additive field 17.
   repeated string aware_users = 17;
+  /// One-step send (ADR-044 §4.5), the Intent transport's share of it: the
+  /// sender declares what should happen while the target session is running a
+  /// turn. `true` = take effect now, aborting that turn; `false` = park it in
+  /// the target's pending queue (ADR-099 §5.5.5).
+  ///
+  /// Absent = the sender expressed no choice, and the target falls back to the
+  /// turn's origin default: a human Chat turn interrupts, every other origin
+  /// parks. The declaration is a REQUEST, never a permission — the receiver
+  /// clamps it against `TurnOrigin::policy().supersede`, so a peer cannot abort
+  /// the run a human is watching by setting it. Additive field 18; pre-upgrade
+  /// senders read as absent.
+  optional bool interrupt = 18;
 }
 
 // ── Memory (§3.2) — Phase 2/3 stubs ───────────────────────────────────

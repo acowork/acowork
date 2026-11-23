@@ -422,6 +422,17 @@ export interface ChatAddress {
    *  verbatim, so it fills `roundId`/`terminal` too and the Gateway must not
    *  re-decide the material of a sentence already written. */
   refs?: ChatRefPick[];
+  /** One-step send (ADR-044 §4.5): what this message should do while the run it
+   *  addresses is still going. `true` = take effect now, aborting that run;
+   *  `false` = park it in the session's pending queue (ADR-099 §5.5.5);
+   *  `undefined` = declare nothing and let the backend resolve it from the
+   *  turn's origin — for a human Chat turn that means interrupt.
+   *
+   *  The surface sends a value only when it KNOWS: an explicit "let it finish"
+   *  is `false`, and an omitted field is not "no opinion", it is the default.
+   *  Omitting is therefore always safe, which is what keeps an older client from
+   *  regressing to the queue. */
+  interrupt?: boolean;
 }
 
 /** One `@session` reference as the client states it. `roundId`/`terminal` are
@@ -528,6 +539,10 @@ function sendChatMessage(
     ...(address?.targetSession ? { target_session: address.targetSession } : {}),
     ...(address?.forceNew ? { force_new: true } : {}),
     ...(address?.messageId ? { message_id: address.messageId } : {}),
+    // One-step send: only an explicit choice rides the wire. Absent means
+    // "the backend's origin default", which for a human Chat turn is interrupt —
+    // so omitting is what keeps an older surface on the unified behaviour.
+    ...(address?.interrupt === undefined ? {} : { interrupt: address.interrupt }),
     // ADR-046 workspace references picked with "Add to Chat". The Gateway
     // forwards them to whichever execution session takes this routed turn
     // (design 27 §4.2.1) — they are paths, not bytes, so nothing is copied
@@ -582,6 +597,9 @@ function fanoutMentions(
     ...(Object.keys(targetSessions).length > 0 ? { target_sessions: targetSessions } : {}),
     ...(forceNewFor.length > 0 ? { force_new_for: forceNewFor } : {}),
     ...(address?.messageId ? { message_id: address.messageId } : {}),
+    // One-step send, group form: one declaration for the utterance, never
+    // per target (see the 1:1 entry).
+    ...(address?.interrupt === undefined ? {} : { interrupt: address.interrupt }),
     // ADR-106 revision 2026-11-04: `@session` reference material (see the 1:1
     // entry). A reference is not a delivery, so it never overlaps the (now
     // answer-only) `target_sessions`.
