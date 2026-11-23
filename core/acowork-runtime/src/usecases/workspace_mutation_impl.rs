@@ -608,7 +608,10 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
                 rel_path
             )));
         }
-        std::fs::write(&abs_path, body.content.as_bytes())
+        let bytes = body
+            .bytes()
+            .map_err(|e| WorkspaceError::InvalidPath(format!("{e}; {} is not written", rel_path)))?;
+        std::fs::write(&abs_path, &bytes)
             .map_err(|e| WorkspaceError::Persist(format!("failed to write file: {}", e)))?;
 
         // ADR-058: echo the post-write disk metadata so the Desktop's
@@ -616,7 +619,7 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         // after save (used for external-modification conflict checks).
         let (modified, size) = std::fs::metadata(&abs_path)
             .map(|m| (metadata_modified_rfc3339(&m), m.len()))
-            .unwrap_or((None, body.content.len() as u64));
+            .unwrap_or((None, bytes.len() as u64));
 
         let mut entry = serde_json::json!({"written": true, "path": rel_path, "size": size});
         if let Some(m) = modified {
@@ -922,6 +925,50 @@ mod tests {
         RuntimeWorkspaceMutationService::new(dir.path().to_path_buf())
     }
 
+    /// A hosted app's visual canvas saves through `contentBase64` (ADR-118):
+    /// the bytes land on disk verbatim, and a broken payload is refused
+    /// instead of truncating the file.
+    #[tokio::test]
+    async fn base64_body_writes_binary_bytes() {
+        use base64::Engine as _;
+        let temp = tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("package/prompts")).unwrap();
+        let package = temp.path().join("package");
+        std::fs::write(package.join("prompts/system.md"), "old").unwrap();
+        let svc = RuntimeWorkspaceMutationService::new_with_package_dir(temp.path().to_path_buf(), package.clone());
+        let binary = vec![0x50u8, 0x4b, 0x03, 0x04, 0x00, 0xff];
+
+        svc.write_file(
+            FilePathQuery {
+                workspace_id: Some("__agent_package__".into()),
+                path: "prompts/system.md".into(),
+            },
+            crate::usecases::workspace_mutation::WriteFileBody {
+                content: "ignored".into(),
+                content_base64: Some(base64::engine::general_purpose::STANDARD.encode(&binary)),
+            },
+        )
+        .await
+        .expect("binary write");
+        assert_eq!(std::fs::read(package.join("prompts/system.md")).unwrap(), binary);
+
+        let bad = svc
+            .write_file(
+                FilePathQuery {
+                    workspace_id: Some("__agent_package__".into()),
+                    path: "prompts/system.md".into(),
+                },
+                crate::usecases::workspace_mutation::WriteFileBody {
+                    content_base64: Some("not base64!!".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("invalid base64 must not write");
+        assert_eq!(bad.http_status(), 400);
+        assert_eq!(std::fs::read(package.join("prompts/system.md")).unwrap(), binary);
+    }
+
     #[tokio::test]
     async fn package_workspace_allows_edits_but_blocks_escape_and_root_delete() {
         let temp = tempdir().expect("tempdir");
@@ -941,6 +988,7 @@ mod tests {
             },
             crate::usecases::workspace_mutation::WriteFileBody {
                 content: "new".into(),
+                ..Default::default()
             },
         )
         .await
