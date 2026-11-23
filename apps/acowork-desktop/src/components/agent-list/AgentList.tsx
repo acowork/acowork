@@ -604,8 +604,7 @@ export function AgentList({ width }: AgentListProps) {
     };
   }, [nodeGroups, searching, showStaleNodes]);
 
-  // `total` lets the row draw the divider correctly within each node group.
-  const renderAgentItem = (agent: AgentInfo, index: number, total: number) => {
+  const renderAgentItem = (agent: AgentInfo) => {
     // ADR-073: the sidebar row is an INSTANCE. `id` is the
     // canonical addressing key (instance_id, with legacy
     // agent_id fallback); `agent.agent_id` is display-only.
@@ -637,7 +636,6 @@ export function AgentList({ width }: AgentListProps) {
           selectedAgentId === id
             ? "bg-accent-strong/90 text-white"
             : listRowHover,
-          index < total - 1 && "row-divider-b"
         )}
         onClick={() => selectAgent(id)}
         onDoubleClick={() => {
@@ -694,7 +692,7 @@ export function AgentList({ width }: AgentListProps) {
                     renders its row name at `text-xs`, and the agent name was
                     the lone 14px outlier, so the chat column read as a
                     different scale from the rest of the nav. */}
-                <span className={cn("truncate font-medium text-xs", selectedAgentId === id ? "text-white" : agent.alive ? "text-text-secondary " : "text-text-tertiary ")}>{agent.name}</span>
+                <span className={cn("truncate font-medium text-xs", selectedAgentId === id ? "text-white" : agent.alive ? "text-text " : "text-text-secondary ")}>{agent.name}</span>
                 <span
                   title={busyAgentIds.has(id) && agent.alive ? t("agentList.dotBusy") : agent.alive ? t("agentList.dotOnline") : t("agentList.dotOffline")}
                   aria-label={busyAgentIds.has(id) && agent.alive ? t("agentList.dotBusy") : agent.alive ? t("agentList.dotOnline") : t("agentList.dotOffline")}
@@ -894,7 +892,7 @@ export function AgentList({ width }: AgentListProps) {
                       </button>
                     )}
                   {!collapsed &&
-                    group.agents.map((agent, index) => renderAgentItem(agent, index, group.agents.length))}
+                    group.agents.map((agent) => renderAgentItem(agent))}
                 </Fragment>
               );
             })}
@@ -956,7 +954,7 @@ export function AgentList({ width }: AgentListProps) {
                 <span className={cn("ml-auto", COUNT_BADGE_NEUTRAL_CN)}>{visibleGroupsChats.length}</span>
               </button>
             </div>
-            {!groupsCollapsed && visibleGroupsChats.map((g, index) => {
+            {!groupsCollapsed && visibleGroupsChats.map((g) => {
               const unread = selfUserId ? (g.unread?.[selfUserId] ?? 0) : 0;
               const active = activeGroupId === g.session_id;
               return (
@@ -977,7 +975,6 @@ export function AgentList({ width }: AgentListProps) {
                     "relative flex cursor-pointer items-center rounded-md px-3 py-2 transition-colors duration-150",
                     isCollapsed ? "gap-0" : "gap-3",
                     active ? "bg-accent-strong/90 text-white" : listRowHover,
-                    index < visibleGroupsChats.length - 1 && "row-divider-b",
                   )}
                 >
                   {/* Member composite at the agent / user 40px footprint —
@@ -1000,7 +997,7 @@ export function AgentList({ width }: AgentListProps) {
                       <span
                         className={cn(
                           "truncate font-medium text-xs",
-                          active ? "text-white" : "text-text-secondary",
+                          active ? "text-white" : "text-text",
                         )}
                       >
                         {g.title || g.session_id.slice(0, 8)}

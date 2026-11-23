@@ -294,7 +294,7 @@ function approvalMatchesSession(
  *   execution block by default and retired the "auto-expand the newest work"
  *   state machine for the same reason.
  * - Collapsed: "Exploring... (N steps)" + chevron.
- * - Expanded: max-height 144px container with ThinkBlock and ToolCallItem.
+ * - Expanded: max-height 288px container with ThinkBlock and ToolCallItem.
  * - Streaming: auto-scrolls to bottom while expanded.
  * - Open (auto): a PENDING TOOL AUTHORIZATION opens the block — a control
  *   hidden behind a fold is not answerable (ADR-106 D8, same rule the
@@ -504,8 +504,8 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
       {expanded && (
         <OverlayScrollbar
           ref={contentRef}
-          maxHeight={144}
-          containerClassName="flex-none max-h-60 ml-2 mt-1 rounded-md border-l-2 border-border-strong bg-transparent"
+          maxHeight={288}
+          containerClassName="flex-none max-h-72 ml-2 mt-1 rounded-md border-l-2 border-border-strong bg-transparent"
           className="pl-3 pr-2 py-2 overscroll-contain"
           onViewportWheel={(event) => {
             if (event.deltaY !== 0) event.stopPropagation();

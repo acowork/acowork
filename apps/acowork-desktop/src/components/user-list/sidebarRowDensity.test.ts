@@ -3,7 +3,7 @@
  *
  * Why this file exists:
  *   The agent sidebar and the user list are the same list language — same
- *   `row-divider-b` hairline, same `listRowHover`, same `px-3`. They each
+ *   `listRowHover`, same `px-3`. They each
  *   spelled their own `py-*`, so the two groups sat at different densities
  *   and moving between them felt like a different app. Both bind the same
  *   padding here; one drifting back reintroduces that split.

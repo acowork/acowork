@@ -668,9 +668,9 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                 {expanded && (
                   <OverlayScrollbar
                     ref={contentRef}
-                    /** Twice `ExploreBlock`'s cap: that list is one-line tool
-                     *  labels, this one unfolds a whole question/answer pair per
-                     *  round, so 144px showed barely one row of prose. */
+                    /** Same cap as `ExploreBlock`'s expanded pane: this one
+                     *  unfolds a whole question/answer pair per round, which
+                     *  the explore list's old 144px showed barely one row of. */
                     maxHeight={288}
                     containerClassName="flex-none ml-2 mt-1 mb-2 rounded-md border-l-2 border-border-strong bg-surface/60"
                     className="pl-3 pr-2 py-2 overscroll-contain"

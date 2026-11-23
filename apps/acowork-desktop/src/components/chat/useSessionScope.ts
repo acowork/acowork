@@ -61,6 +61,9 @@ export interface SessionScopeAPI {
 
   todosCollapsed: boolean;
   setTodosCollapsed: (v: boolean) => void;
+
+  queueCollapsed: boolean;
+  setQueueCollapsed: (v: boolean) => void;
 }
 
 /**
@@ -92,6 +95,9 @@ export function useSessionScope(
   // Todos start collapsed: the header row already carries progress + current
   // task, so the list only expands when the user clicks the toggle.
   const [todosCollapsed, setTodosCollapsed] = useState(true);
+  // Same interaction as todos: the queue starts collapsed and its header row
+  // carries the first message, so the list only expands on click.
+  const [queueCollapsed, setQueueCollapsed] = useState(true);
 
   // ── Reset on session change ──
   useLayoutEffect(() => {
@@ -126,6 +132,7 @@ export function useSessionScope(
     setShowImageUnsupportedDialog(false);
     setImageCapableModels([]);
     setTodosCollapsed(true);
+    setQueueCollapsed(true);
     onSessionChange?.();
   }, [currentSessionId, onSessionChange]);
 
@@ -141,5 +148,7 @@ export function useSessionScope(
     setImageCapableModels,
     todosCollapsed,
     setTodosCollapsed,
+    queueCollapsed,
+    setQueueCollapsed,
   };
 }

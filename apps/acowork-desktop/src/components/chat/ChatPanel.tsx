@@ -2,7 +2,7 @@ import React, { useEffect, useInsertionEffect, useLayoutEffect, useRef, useState
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentStore } from "../../stores/agentStore";
-import { useChatStore, type ConnectionStatus, STUCK_FORCE_RECONNECT_MS } from "../../stores/chatStore";
+import { useChatStore, type ConnectionStatus, type QueuedMessage, STUCK_FORCE_RECONNECT_MS } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSkillStore } from "../../stores/skillStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
@@ -48,6 +48,16 @@ import { useToast } from "../common/ToastProvider";
  * uses these to populate `image_upload.width` / `.height` so the runtime
  * doesn't have to re-decode the blob just to render a thumbnail.
  */
+/** Title line for a queued message: its text, else its attachment names. */
+function queuedText(msg: QueuedMessage): string {
+  return (
+    msg.content ||
+    msg.attachedItems
+      .map((item) => (item.type === "file_upload" || item.type === "image_upload" ? item.filename : item.name))
+      .join(", ")
+  );
+}
+
 function measureImage(src: string): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const img = new window.Image();
@@ -2560,42 +2570,59 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
             "mx-12 mb-0 border border-b-0 border-border-outer bg-surface-subtle/80 overflow-hidden",
             todos.length > 0 || pendingIntents.length > 0 ? "" : "rounded-t-md"
           )}>
-            <div className="flex items-center px-2.5 py-1.5 border-b border-border-divider">
-              <span className="text-10 font-medium text-text-tertiary  uppercase tracking-wider">
-                {t("chatPanel.messageQueue", { count: queuedMessages.length })}
+            <button
+              className={cn(
+                "flex items-center w-full px-2.5 py-1.5 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-colors",
+                !session.queueCollapsed && "border-b border-border-divider"
+              )}
+              onClick={() => session.setQueueCollapsed(!session.queueCollapsed)}
+            >
+              {session.queueCollapsed ? (
+                <ChevronRight className="h-3 w-3 mr-1 text-text-tertiary  shrink-0" />
+              ) : (
+                <ChevronDown className="h-3 w-3 mr-1 text-text-tertiary  shrink-0" />
+              )}
+              <span className="min-w-0 truncate text-10 font-medium text-text-tertiary  uppercase tracking-wider">
+                <span className="inline whitespace-nowrap">
+                  {t("chatPanel.messageQueue", { count: queuedMessages.length })}
+                </span>
+                <span className="inline-block w-8"/>
+                <span className="normal-case text-text-tertiary  truncate">{queuedText(queuedMessages[0]!)}</span>
               </span>
-            </div>
-            <div className="max-h-[7.5rem] overflow-y-auto">
-              {queuedMessages.map((msg, i) => (
-                <div
-                  key={i}
-                  className={`group flex items-start gap-1.5 px-2.5 py-1.5 border-b border-border-divider last:border-b-0 ${listRowHover}`}
-                >
-                  <span className="shrink-0 text-10 mt-0.5 text-text-tertiary  select-none">{i + 1}.</span>
-                  <span className="flex-1 min-w-0 text-xs text-text-secondary truncate leading-relaxed">
-                    {msg.content || msg.attachedItems.map((item) => item.type === "file_upload" || item.type === "image_upload" ? item.filename : item.name).join(", ")}
-                  </span>
-                  <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      type="button"
-                      onClick={() => handleEditQueued(i)}
-                      className="rounded-sm p-0.5 text-text-tertiary hover:text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
-                      aria-label={`Edit message ${i + 1}`}
-                    >
-                      <Pencil size={12} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveQueued(i)}
-                      className="rounded-sm p-0.5 text-text-tertiary hover:text-danger-icon hover:bg-danger-surface"
-                      aria-label={`Remove message ${i + 1}`}
-                    >
-                      <X size={12} />
-                    </button>
+            </button>
+            {!session.queueCollapsed && (
+              <div className="max-h-[7.5rem] overflow-y-auto">
+                {queuedMessages.map((msg, i) => (
+                  <div
+                    key={i}
+                    className={`group flex items-start gap-1.5 px-2.5 py-1.5 border-b border-border-divider last:border-b-0 ${listRowHover}`}
+                  >
+                    <span className="shrink-0 text-10 mt-0.5 text-text-tertiary  select-none">{i + 1}.</span>
+                    <span className="flex-1 min-w-0 text-xs text-text-secondary truncate leading-relaxed">
+                      {queuedText(msg)}
+                    </span>
+                    <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        type="button"
+                        onClick={() => handleEditQueued(i)}
+                        className="rounded-sm p-0.5 text-text-tertiary hover:text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
+                        aria-label={`Edit message ${i + 1}`}
+                      >
+                        <Pencil size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveQueued(i)}
+                        className="rounded-sm p-0.5 text-text-tertiary hover:text-danger-icon hover:bg-danger-surface"
+                        aria-label={`Remove message ${i + 1}`}
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
