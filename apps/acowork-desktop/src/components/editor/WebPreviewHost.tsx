@@ -9,6 +9,7 @@ import {
     setPreviewVisible,
     type PreviewBounds,
     type PreviewError,
+    type PreviewState,
 } from "../../lib/previewHost";
 import { isParkedBounds, sameBounds, toPreviewBounds } from "../../lib/previewGeometry";
 import { usePreviewSessionStore } from "../../stores/previewSessionStore";
@@ -36,6 +37,56 @@ interface WebPreviewHostProps {
  * IPC storm.
  */
 const MAX_AUTO_RECREATES = 2;
+
+/**
+ * Creates in flight, per session key.
+ *
+ * The create effect cannot claim the store binding before its `await`, so two
+ * mounts of the same key both see "no session yet" and both ask the backend to
+ * open one. React's `StrictMode` — on in `main.tsx` — mounts every effect twice
+ * in development, which makes that not a rare race but the *normal* path. The
+ * second native webview then fails (`WebView2` refuses concurrent controller
+ * creation: `ERROR_INVALID_STATE`), and both attempts leave the panel unusable.
+ *
+ * Sharing the promise makes the create idempotent without making the effect
+ * synchronous: the second caller waits on the first one's result instead of
+ * opening a second webview.
+ */
+const inFlightCreates = new Map<string, Promise<PreviewState>>();
+
+/**
+ * Live hosts per session key — the ownership rule for a session.
+ *
+ * A session belongs to its `sessionKey` while at least one host mounted for that
+ * key is alive. A create can resolve after the host that started it is gone
+ * (tab closed, or a `StrictMode` unmount), and by then `FileEditorPanel`'s tab
+ * disposer has already run and found nothing to close: the session would outlive
+ * every owner, keeping a webview alive behind a key nobody can address twice
+ * (the backend only reaps it on eviction). So the creating host asks this map
+ * whether the key still has an owner before deciding to destroy what it made.
+ *
+ * A counter, not the store's `labels`, because the store binding is only written
+ * *after* a create resolves — which is exactly the moment being decided.
+ */
+const liveHosts = new Map<string, number>();
+
+function enterHost(sessionKey: string): void {
+    liveHosts.set(sessionKey, (liveHosts.get(sessionKey) ?? 0) + 1);
+}
+
+function leaveHost(sessionKey: string): void {
+    const remaining = (liveHosts.get(sessionKey) ?? 1) - 1;
+    if (remaining > 0) liveHosts.set(sessionKey, remaining);
+    else liveHosts.delete(sessionKey);
+}
+
+function openOnce(sessionKey: string, url: string, bounds: PreviewBounds): Promise<PreviewState> {
+    const pending = inFlightCreates.get(sessionKey);
+    if (pending) return pending;
+    const created = openPreview(url, bounds).finally(() => inFlightCreates.delete(sessionKey));
+    inFlightCreates.set(sessionKey, created);
+    return created;
+}
 
 /**
  * Owns the lifecycle and geometry of one native preview webview.
@@ -116,6 +167,7 @@ export function WebPreviewHost({
     // ── 2. Create or re-attach the session ────────────────────────────────
     useEffect(() => {
         let cancelled = false;
+        enterHost(sessionKey);
         const store = usePreviewSessionStore.getState();
         const existing = store.labels[sessionKey];
 
@@ -145,11 +197,17 @@ export function WebPreviewHost({
 
             const bounds = boundsRef.current ?? { x: 0, y: 0, width: 0, height: 0 };
             try {
-                const state = await openPreview(url, bounds);
+                const state = await openOnce(sessionKey, url, bounds);
                 if (cancelled) {
-                    // Unmounted while the webview was being created: close it so
-                    // a stray native surface cannot outlive its React owner.
-                    void closePreview(state.label).catch(() => {});
+                    // This mount went away while its create was in flight. If the
+                    // key still has a live host (a `StrictMode` twin, or the tab
+                    // re-mounted), that host adopts the session on the same
+                    // promise — closing it here would yank the page out from
+                    // under it. With no host left, this session has no owner at
+                    // all: destroy it, or the tab disposer can never find it.
+                    if (!liveHosts.has(sessionKey)) {
+                        void closePreview(state.label).catch(() => {});
+                    }
                     return;
                 }
                 attach(sessionKey, state);
@@ -163,6 +221,7 @@ export function WebPreviewHost({
 
         return () => {
             cancelled = true;
+            leaveHost(sessionKey);
         };
         // `attach`/`setSourceUrl` are stable store actions and `recreate` is
         // memoised on `sessionKey`; the disabled rule would otherwise recreate a

@@ -148,6 +148,83 @@ describe("WebPreviewHost", () => {
         expect(h.openPreview).not.toHaveBeenCalled();
     });
 
+    it("opens one webview when two mounts of the same tab race to create it", async () => {
+        // The real-world shape of this: `StrictMode` mounts every effect twice,
+        // and both mounts see an empty store because the first create has not
+        // resolved yet. Two native creates is what WebView2 refuses
+        // (`ERROR_INVALID_STATE`), and each refusal used to leave a stray window
+        // over the panel.
+        let resolveOpen!: (state: ReturnType<typeof sessionState>) => void;
+        h.openPreview.mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    resolveOpen = resolve;
+                }),
+        );
+
+        render(<WebPreviewHost sessionKey="tab-1" url={URL_UNDER_TEST} active />);
+        render(<WebPreviewHost sessionKey="tab-1" url={URL_UNDER_TEST} active />);
+
+        await waitFor(() => expect(h.openPreview).toHaveBeenCalledTimes(1));
+        resolveOpen(sessionState("preview-1"));
+
+        await waitFor(() =>
+            expect(h.setPreviewVisible).toHaveBeenCalledWith("preview-1", true),
+        );
+        expect(h.openPreview).toHaveBeenCalledTimes(1);
+        expect(usePreviewSessionStore.getState().labels["tab-1"]).toBe("preview-1");
+    });
+
+    it("destroys the session when this mount dies mid-create and nobody claims it", async () => {
+        // A session whose owner vanished mid-create has no address any more:
+        // leaving it alive strands a native surface (hidden, but forever) and
+        // eats a MAX_LIVE_SESSIONS slot.
+        let resolveOpen!: (state: ReturnType<typeof sessionState>) => void;
+        h.openPreview.mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    resolveOpen = resolve;
+                }),
+        );
+
+        const view = render(<WebPreviewHost sessionKey="tab-1" url={URL_UNDER_TEST} active />);
+        await waitFor(() => expect(h.openPreview).toHaveBeenCalledTimes(1));
+
+        view.unmount();
+        resolveOpen(sessionState("preview-1"));
+
+        await waitFor(() =>
+            expect(h.closePreview).toHaveBeenCalledWith("preview-1"),
+        );
+        expect(usePreviewSessionStore.getState().labels["tab-1"]).toBeUndefined();
+    });
+
+    it("leaves the session alone when another host for the key is still mounted", async () => {
+        // StrictMode shape: mount A starts the create, unmounts, mount B is
+        // already awaiting the same in-flight promise. A must not close what B
+        // is about to adopt.
+        let resolveOpen!: (state: ReturnType<typeof sessionState>) => void;
+        h.openPreview.mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    resolveOpen = resolve;
+                }),
+        );
+
+        const first = render(<WebPreviewHost sessionKey="tab-1" url={URL_UNDER_TEST} active />);
+        await waitFor(() => expect(h.openPreview).toHaveBeenCalledTimes(1));
+        const second = render(<WebPreviewHost sessionKey="tab-1" url={URL_UNDER_TEST} active />);
+
+        first.unmount();
+        resolveOpen(sessionState("preview-1"));
+
+        await waitFor(() =>
+            expect(usePreviewSessionStore.getState().labels["tab-1"]).toBe("preview-1"),
+        );
+        expect(h.closePreview).not.toHaveBeenCalled();
+        second.unmount();
+    });
+
     it("reports a typed error when the session cannot be created", async () => {
         h.openPreview.mockRejectedValue("blocked_scheme: ftp://example.com/");
         const onError = vi.fn();
