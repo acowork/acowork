@@ -1158,7 +1158,7 @@ RAG 不属记忆面，仍由 Runtime 持有：
 | PUT | `/api/agents/{id}/workspaces/{ws_id}/prompt-file` | 设置注入 prompt 文件 | `/workspaces/{ws_id}/prompt-file` |
 | GET | `/api/agents/{id}/workspaces/file` | 读取文件（带元数据） | `/workspaces/file` |
 | POST | `/api/agents/{id}/workspaces/file` | 创建文件 | `/workspaces/file` |
-| PUT | `/api/agents/{id}/workspaces/file` | 写入文件 | `/workspaces/file` |
+| PUT | `/api/agents/{id}/workspaces/file` | 写入文件（body `{content}` 写文本；`{contentBase64}` 写二进制字节，托管应用预览保存走它，ADR-118） | `/workspaces/file` |
 | DELETE | `/api/agents/{id}/workspaces/file` | 删除文件 | `/workspaces/file` |
 | POST | `/api/agents/{id}/workspaces/dir` | 创建目录 | `/workspaces/dir` |
 | DELETE | `/api/agents/{id}/workspaces/dir` | 删除目录 | `/workspaces/dir` |

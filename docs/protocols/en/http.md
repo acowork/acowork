@@ -748,7 +748,7 @@ Mapping and gating rules:
 | PUT | `/api/agents/{id}/workspaces/{ws_id}/prompt-file` | Set injection prompt file | `/workspaces/{ws_id}/prompt-file` |
 | GET | `/api/agents/{id}/workspaces/file` | Read file (with metadata) | `/workspaces/file` |
 | POST | `/api/agents/{id}/workspaces/file` | Create file | `/workspaces/file` |
-| PUT | `/api/agents/{id}/workspaces/file` | Write file | `/workspaces/file` |
+| PUT | `/api/agents/{id}/workspaces/file` | Write file (body `{content}` writes text; `{contentBase64}` writes binary bytes — the hosted-app preview save path, ADR-118) | `/workspaces/file` |
 | DELETE | `/api/agents/{id}/workspaces/file` | Delete file | `/workspaces/file` |
 | POST | `/api/agents/{id}/workspaces/dir` | Create directory | `/workspaces/dir` |
 | DELETE | `/api/agents/{id}/workspaces/dir` | Delete directory | `/workspaces/dir` |

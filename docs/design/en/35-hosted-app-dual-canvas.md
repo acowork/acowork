@@ -1,7 +1,7 @@
 # Design Doc 35: Dual canvas for hosted apps (user surface / workspace file / preview)
 
-**Version**: 1.1 (2026-11-19; agent document is a workspace file, matching image generation)
-**Status**: Accepted, not yet implemented (first `visual` app: FigCraft)
+**Version**: 1.2 (2026-11-21; formats are routed by `ui.canvas.extensions`, plus save-back and the page host mode)
+**Status**: Accepted, implemented (FigCraft / WordCraft / GridCraft / DeckCraft / PdfCraft / VectorCraft / LightCraft)
 **Authoritative decision**: [ADR-118](../../adr/en/ADR-118-hosted-app-dual-canvas.md)
 **Depends on**: [ADR-116](../../adr/en/ADR-116-hosted-application-framework.md) · [Design doc 34](./34-hosted-application-framework.md)
 
@@ -68,9 +68,14 @@ Keep every section from doc 34. Add:
 kind = "visual"
 
 preview_path = "/?file={workspace_file}"
+
+# Workspace extensions this app owns (no leading dot). Desktop uses the
+# list to pick the preview iframe. Declaring docx / xlsx / pptx / pdf
+# takes those over from the built-in viewers when the app is enabled.
+extensions = ["figcraft"]
 ```
 
-`kind` is the **preview channel**, not "whether there is a file". Images are `none` (ImageViewer exists); `.figcraft` is `visual`; a DOC document is `library`.
+`kind` is the **preview channel**, not "whether there is a file". Images are `none` (ImageViewer exists); a `visual` app that declared the extension uses its iframe; a DOC document is `library`.
 
 ---
 
@@ -138,9 +143,21 @@ Opening uses the existing "open workspace file" slot:
 
 | Extension | Viewer |
 |---|---|
-| png / jpg / … | `ImageViewer` (existing) |
-| pdf / md / … | existing previewers |
+| png / jpg / … with no app claiming them | `ImageViewer` (existing) |
+| png / jpg / heic / raw / psd … (`lightcraft` enabled) | `AppFrame` on LightCraft |
+| svg / svgz / ai / eps / dxf / cdr / emf … (`vectorcraft` enabled) | `AppFrame` on VectorCraft |
+| docx / doc / odt / rtf / tex (`wordcraft` enabled) | `AppFrame` on WordCraft |
+| xlsx / xls / xlsm / ods / csv / tsv / scjson (`gridcraft` enabled) | `AppFrame` on GridCraft |
+| pptx / ppt / potx / ppsx / `deckcraft` (`deckcraft` enabled) | `AppFrame` on DeckCraft |
+| pdf (`pdfcraft` enabled) | `AppFrame` on PdfCraft |
 | `figcraft` (and extensions declared `kind = visual`) | `AppFrame` on that app's `preview_path`, file bytes handed to the app |
+
+The pick is data-driven: `pickVisualApp(apps, fileName)` matches the file's
+extension against the **enabled** apps' `ui.canvas.extensions` and takes the
+lowest `nav_order`. An extension no installed app claims keeps its built-in
+viewer (`ImageViewer`, the Office wrappers, `Monaco`) — installing an app is
+what takes a format over, and uninstalling it gives the format back. Nothing
+is hard-coded per extension in the Desktop.
 
 `.figcraft` is added to `isWorkspacePreviewable`. Closing preview does not affect MCP.
 
@@ -148,7 +165,39 @@ Opening uses the existing "open workspace file" slot:
 
 After `save_file`, the preview re-fetches bytes. The iframe MUST NOT be the only open engine copy.
 
-### 6.4 Why not in the bubble
+### 6.4 Save back to the workspace file
+
+A preview is not read-only: the user edits in the iframe and presses the app's
+own Save. The bytes have to land on the workspace file, or the tab loses them.
+
+The app's host contract decides how it hands them over — every Craft web shell
+has one (page mode on `data-host="page"`): it emits a `<app>:save` message with
+`{ name, bytes, saveAs, id? }` instead of downloading. The injected adapter
+script forwards it to the Desktop:
+
+```json
+{ "channel": "acowork", "type": "saveFile", "name": "report.docx",
+  "bytes": "<Uint8Array>", "saveAs": false, "id": "…" }
+```
+
+`AppFrame` writes it through `PUT /api/agents/{id}/workspaces/file` and answers
+`{ "type": "saved" | "saveFailed", "id": "…", "error": "…" }`, which the adapter
+turns back into the app's `<app>:saved` / `<app>:failed` message.
+
+Two rules:
+
+1. The write body carries `contentBase64`, not `content`. The text field would
+   corrupt a `.docx`; the Runtime decodes the base64 and writes the bytes
+   verbatim (and refuses an undecodable payload instead of truncating the file).
+2. A save whose name or extension differs from the opened file (Save As,
+   Export to PDF) is refused with a message — silently writing those bytes into
+   the opened `.docx` would destroy it. Creating the sibling file is a
+   follow-up; until then the app's own download path still works for copies.
+
+Neither side is trusted blindly: the name comes from the app, the path from the
+tab, and the Desktop only writes the path it opened.
+
+### 6.5 Why not in the bubble
 
 `VirtualRowList` unmounts rows. Images already use "card + open"; `.figcraft` does too.
 
@@ -156,7 +205,29 @@ After `save_file`, the preview re-fetches bytes. The iframe MUST NOT be the only
 
 ## 7. Theme and locale
 
-`AppFrame` `postMessage`s on load / `ready` and when the light/dark class changes. The adapter injects a listener; FigCraft maps to `view.themeLight` / `view.themeDark`. Do not use `system` inside the iframe (that follows the OS). Do not patch upstream `index.html`.
+`AppFrame` `postMessage`s on load / `ready` and when the light/dark class changes. The adapter injects the listener; each app keeps its own light/dark command, so the adapter only carries the mapping:
+
+| App | Command |
+|---|---|
+| FigCraft | `view.themeLight` / `view.themeDark` |
+| WordCraft | `ui.theme` `{ value: "light" \| "dark" }` |
+| GridCraft | `view.darkMode` `{ on: bool }` |
+| DeckCraft | `view.dark` `{ on: bool }` |
+| PdfCraft | `view.theme.light` / `view.theme.dark` |
+| LightCraft | `view.theme` `{ theme: "paper" \| "charcoal" }` |
+| VectorCraft | none — the drawing's own colours are the subject, the chrome has no light theme |
+
+Do not use `system` inside the iframe (that follows the OS, not the ACowork shell). Do not patch upstream `index.html`; injection happens when the adapter serves `/ui/`.
+
+### 7.1 Host mode: page, not parent
+
+The ACowork iframe sandbox **includes** `allow-same-origin`, but its origin is the **Gateway** (`http://127.0.0.1:19876`), never the Desktop window's — so to the app the parent is still a stranger. Every Craft web shell refuses its `?host=parent` transport in that case. The adapter therefore opts the page into the shell's **page** transport instead:
+
+- the injected script sets `data-host="page"` on the app's canvas **before** the wasm app starts (it reads the attribute once, at startup) — a `MutationObserver` on `documentElement` catches the canvas during parse;
+- the app's host messages then travel as DOM `CustomEvent`s on that canvas (`<app>:ready`, `<app>:open`, `<app>:save`, `<app>:failed`), which need no origin at all;
+- the adapter script bridges those events to the `{channel:"acowork"}` `postMessage` contract above.
+
+VectorCraft has no host mode; its `window.vectorcraft` page API is used instead (`openFile(name, bytes)` for the open, the saved-file list for the save).
 
 ---
 
@@ -197,7 +268,7 @@ Co-edit: only after the app UI embeds chat. Platform chat never co-edits automat
 Doc 34 hosting rules, plus:
 
 1. Choose `ui.canvas.kind` (preview channel, not "has a file")
-2. `visual`: artifact in the agent workspace; MCP paths confined to that root; declare extension + `preview_path`
+2. `visual`: artifact in the agent workspace; MCP paths confined to that root; declare `extensions` + `preview_path`
 3. `library`: write the app store; do not "unify" onto workspace files
 4. MCP does not attach to the left-nav iframe
 5. Preview is not a chat bubble

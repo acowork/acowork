@@ -1,7 +1,7 @@
 # 设计文档 35：托管应用双画布（用户界面 / 工作区文件 / 预览）
 
-**版本**：1.1（2026-11-19；Agent 的稿改为工作区文件，对齐生成图片流程）
-**状态**：已接受，待实现（首个 `visual` 应用：FigCraft）
+**版本**：1.2（2026-11-21；按 `ui.canvas.extensions` 数据驱动接管 Office / PDF / 图片格式，新增保存回写与 page host 模式）
+**状态**：已接受，已实现（FigCraft / WordCraft / GridCraft / DeckCraft / PdfCraft / VectorCraft / LightCraft）
 **权威决策**：[ADR-118](../../adr/zh/ADR-118-hosted-app-dual-canvas.md)
 **前置**：[ADR-116](../../adr/zh/ADR-116-hosted-application-framework.md) · [设计文档 34](./34-hosted-application-framework.md)
 **English counterpart**：[Design Doc 35](../en/35-hosted-app-dual-canvas.md)
@@ -70,9 +70,13 @@ kind = "visual"
 
 # visual：把工作区文件投进预览 iframe 的路径模板。
 preview_path = "/?file={workspace_file}"
+
+# 本应用拥有的工作区扩展名（无前导点）。Desktop 用它选预览 iframe。
+# 声明 docx / xlsx / pptx / pdf 且应用已启用时，接管内置查看器。
+extensions = ["figcraft"]
 ```
 
-`kind` 区分的是**预览通道**，不是「有没有文件」。图片是 `none`（已有 ImageViewer）；`.figcraft` 是 `visual`（需要 FigCraft iframe）；DOC 文档是 `library`。
+`kind` 区分的是**预览通道**，不是「有没有文件」。图片是 `none`（已有 ImageViewer）；声明了扩展名的 `visual` 应用用自己的 iframe；DOC 文档是 `library`。
 
 `[mcp].auto_inject = true` 仍是进入 catalog 的开关。`visual` 应用要让 Agent 改文件，必须打开它。
 
@@ -146,13 +150,20 @@ DOC / PM 不要改成「先写 workspace 再上传」。它们的产物就是库
 
 | 扩展名 | 查看器 |
 |---|---|
-| png / jpg / … | `ImageViewer`（已有） |
-| pdf / md / … | 已有预览器 |
-| `figcraft`（及 `ui.canvas.kind = visual` 声明的扩展名） | `AppFrame` 加载该应用 `preview_path`，把文件字节交给应用（host `figcraft:open` 或 adapter 注入 `openFile`） |
+| png / jpg / … 且没有应用认领 | `ImageViewer`（已有） |
+| png / jpg / heic / raw / psd …（`lightcraft` 已启用） | `AppFrame` 加载 LightCraft |
+| svg / svgz / ai / eps / dxf / cdr / emf …（`vectorcraft` 已启用） | `AppFrame` 加载 VectorCraft |
+| docx / doc / odt / rtf / tex（`wordcraft` 已启用） | `AppFrame` 加载 WordCraft |
+| xlsx / xls / xlsm / ods / csv / tsv / scjson（`gridcraft` 已启用） | `AppFrame` 加载 GridCraft |
+| pptx / ppt / potx / ppsx / `deckcraft`（`deckcraft` 已启用） | `AppFrame` 加载 DeckCraft |
+| pdf（`pdfcraft` 已启用） | `AppFrame` 加载 PdfCraft |
+| `figcraft`（以及声明 `kind = visual` 的扩展名） | `AppFrame` 加载该应用 `preview_path`，把文件字节交给应用 |
+
+选择是数据驱动的：`pickVisualApp(apps, fileName)` 用扩展名去匹配**已启用**应用的 `ui.canvas.extensions`，按 `nav_order` 取先者。没有已安装应用认领的扩展名继续用内置查看器（`ImageViewer`、Office 包装器、Monaco）——装上应用才接管某个格式，卸掉就还回去。Desktop 侧不按扩展名硬编码。
 
 要求：
 
-1. 同一 `AppFrame` sandbox（无 `allow-same-origin`）。
+1. 同一 `AppFrame` sandbox（含 `allow-same-origin`；它是应用存偏好的前提，见 ADR-116 §1.4）。
 2. ticket 仍在 fragment。
 3. 预览读的是 workspace 文件 API 的字节，不是「进程里匿名会话」。
 4. 关掉预览不影响 MCP。
@@ -164,7 +175,27 @@ DOC / PM 不要改成「先写 workspace 再上传」。它们的产物就是库
 
 保存到工作区后，预览重新拉字节或接收 snapshot。不要把 iframe 当成唯一打开中的引擎副本。
 
-### 6.4 为什么不在气泡里
+### 6.4 保存回写工作区文件
+
+预览不是只读的：用户在 iframe 里改完，按应用自己的 Save，字节必须落回工作区文件，否则这个标签页就是丢数据。
+
+交回方式由应用自己的 host 契约决定（每个 Craft web 壳都有，page 模式即 `data-host="page"`）：它发一条 `<app>:save` 消息 `{ name, bytes, saveAs, id? }`，而不是走浏览器下载。注入的 adapter 脚本转给 Desktop：
+
+```json
+{ "channel": "acowork", "type": "saveFile", "name": "report.docx",
+  "bytes": "<Uint8Array>", "saveAs": false, "id": "…" }
+```
+
+`AppFrame` 通过 `PUT /api/agents/{id}/workspaces/file` 写入，并回 `{ "type": "saved" | "saveFailed", "id": "…", "error": "…" }`，adapter 再还原成应用的 `<app>:saved` / `<app>:failed`。
+
+两条硬规则：
+
+1. 写 body 用 `contentBase64`，不用 `content`。文本字段会把 `.docx` 写坏；Runtime 解码 base64 后原样落盘（解不出来就拒绝，不截断文件）。
+2. 名字或扩展名与打开的文件不一致的保存（Save As、导出 PDF）直接拒绝并提示——把那些字节静默写进打开的 `.docx` 等于毁文件。新建同名兄弟文件是后续项；在那之前应用的下载路径仍可用于复制件。
+
+两边都不盲目信任：名字来自应用，路径来自标签页，Desktop 只写它自己打开的那条路径。
+
+### 6.5 为什么不在气泡里
 
 同 ADR-118：`VirtualRowList` 会卸行。图片已经是「卡片 + 点开/灯箱」，`.figcraft` 同样。
 
@@ -178,9 +209,31 @@ DOC / PM 不要改成「先写 workspace 再上传」。它们的产物就是库
 { "channel": "acowork", "type": "theme", "theme": "light|dark", "accent": "#…", "locale": "zh-CN" }
 ```
 
-Adapter 注入脚本监听，映射到应用主题命令（FigCraft：`view.themeLight` / `view.themeDark`）。iframe 内不要用 `system`（会跟 OS 而不是 ACowork 壳）。
+Adapter 注入脚本监听，映射到应用自己的主题命令，adapter 只承载映射表：
+
+| 应用 | 命令 |
+|---|---|
+| FigCraft | `view.themeLight` / `view.themeDark` |
+| WordCraft | `ui.theme` `{ value: "light" \| "dark" }` |
+| GridCraft | `view.darkMode` `{ on: bool }` |
+| DeckCraft | `view.dark` `{ on: bool }` |
+| PdfCraft | `view.theme.light` / `view.theme.dark` |
+| LightCraft | `view.theme` `{ theme: "paper" \| "charcoal" }` |
+| VectorCraft | 无 —— 画面颜色才是对象，chrome 没有浅色主题 |
+
+iframe 内不要用 `system`（会跟 OS 而不是 ACowork 壳）。
 
 不要改上游 `index.html`；注入发生在 adapter serve `/ui/` 时。
+
+### 7.1 host 模式用 page，不用 parent
+
+ACowork 的 iframe sandbox 带 `allow-same-origin`，但它的源是 **Gateway**（`http://127.0.0.1:19876`），不是 Desktop 窗口的源，所以对应用来说父窗口仍是一个陌生窗口；所有 Craft web 壳都会拒绝这种 `?host=parent` 传输。所以 adapter 依旧让页面走壳自己的 **page** 传输：
+
+- 注入脚本在 wasm 应用启动**之前**给应用的 canvas 打上 `data-host="page"`（该属性只在启动时读一次）——用 `documentElement` 上的 `MutationObserver` 在解析期抓到 canvas；
+- 于是应用侧的 host 消息以 DOM `CustomEvent` 的形式在 canvas 上收发（`<app>:ready` / `<app>:open` / `<app>:save` / `<app>:failed`），完全不需要 origin；
+- adapter 脚本再把这些事件与 `{channel:"acowork"}` 的 `postMessage` 契约对接（见上）。
+
+VectorCraft 没有 host 模式，改用它的 `window.vectorcraft` page API（打开用 `openFile(name, bytes)`，保存走已保存文件列表）。
 
 ---
 

@@ -33,7 +33,7 @@
 | 4 | Process | `runtime = "legacy"` (PM/DOC) keeps the proven ADR-064 supervisors with their bespoke args and identity-injection tests; `runtime = "generic"` uses the framework's configuration-driven supervisor. Both project into one `resolve_app_port()` |
 | 5 | Network | Apps bind `127.0.0.1` only. Desktop and Agents always go through the Gateway: `/api/apps/{id}/ui/*`, `/api/apps/{id}/api/*`, and `{mcp.gateway_path}`. `/api/pm\|doc/*` remain byte-compatible aliases — zero changes in Desktop and agent manifests |
 | 6 | MCP | Still HTTP (stateless Streamable HTTP subset, single `POST /mcp`). The two hardcoded pm/doc pushes in `build_available_mcps()` become a registry walk: disabling an app removes it from the catalog on the next hot push; a new app with `auto_inject` needs no code change. memory keeps its ADR-101 branch |
-| 7 | Front end | The app serves `/ui/`; Desktop contributes only an iframe container and a narrow `postMessage` bridge (theme / locale / accent / ready / notify). The sandbox deliberately omits `allow-same-origin` |
+| 7 | Front end | The app serves `/ui/`; Desktop contributes only an iframe container and a narrow `postMessage` bridge (theme / locale / accent / ready / notify). The sandbox **includes** `allow-same-origin` (§1.4): without it the frame has an opaque origin and `localStorage` / `IndexedDB` throw `SecurityError`, so an app cannot keep preferences or user-added fonts. The origin it gets is the **Gateway's**, not the Desktop window's, so the parent DOM and the bearer token stay out of reach |
 | 8 | Auth | The authenticated main window mints a short-lived HMAC **app session ticket**, passed through the iframe URL **fragment** (never query string, logs or Referer). The app page sends it in `X-App-Session`; the Gateway verifies per request and injects trusted identity. Optional one-time exchange for an `HttpOnly; SameSite=Strict; Path=/api/apps/{id}/` cookie |
 | 9 | Identity | The proxy strips client-asserted `X-Actor` / `x-actor-admin` / `x-app-id` / `Authorization` / cookie and injects `X-App-Id` / `X-App-User` / `X-Actor` / `x-actor-admin=false` / `X-App-Platform-Url`, preserving ADR-064 Phase 3 anti-spoofing |
 | 10 | Platform API | Minimal `/api/platform/{identity,context,agents,notify}`, **default-deny** against `permissions.platform` in `app.toml`. Called by the app backend with the supervisor-injected internal service token + `X-App-Id`; the webview never holds a platform credential |
@@ -50,7 +50,40 @@
 6. **No host API that mutates platform state** — the core guard-rail of the "application" positioning.
 7. memory's embedded right-panel UI is out of scope; it must not be declared as an `app.toml` app until that UI contract exists.
 
+### 1.4 The iframe sandbox and `allow-same-origin`
+
+`AppFrame`'s `sandbox` is `allow-scripts allow-same-origin allow-forms allow-popups allow-downloads`.
+
+**Why `allow-same-origin` is required**: with an opaque origin the browser treats the frame as belonging to no origin at all, and `localStorage.setItem` / `indexedDB.open` throw `SecurityError` (measured with a probe inside the exact same sandbox). A hosted app is a stateful editor — interface language, "don't show this again" for missing fonts, and the fonts a user adds (IndexedDB; a multi-megabyte CJK face does not fit in localStorage) all have to persist. Without the flag those features are permanently broken inside ACowork while working in a plain browser.
+
+**What it does not hand over**: the frame's origin is the Gateway (`http://127.0.0.1:19876`), not the Desktop window's origin (Tauri `tauri://localhost`, dev `localhost:5173`). The parent DOM is unreadable; the bearer token lives in the Desktop origin's `localStorage`; the Gateway API accepts only that bearer, and the app holds nothing but its own app session ticket from the URL fragment.
+
+**Known ceiling (accepted)**: every hosted app shares the Gateway origin, so app A's and app B's `localStorage` are the same origin — a malicious app could in principle read another app's stored preferences. Mitigation path, only if it earns its keep: the injected host script namespaces `localStorage` with the app id, or each app gets its own origin. Recorded so that "why can apps see each other's storage" never has to be re-derived.
+
 ---
+
+### 1.5 System fonts for a hosted app
+
+A Craft document (`.docx` / `.pptx` / `.xlsx`) **names its fonts and embeds no glyphs**: the body asks for "宋体" or "Calibri" and the font program is not in the file. The renderer therefore needs the font itself, and wasm cannot read `%WINDIR%\Fonts`; the browser's `queryLocalFonts` (what `Load System Installed Fonts…` calls) does not exist in WebView2 and would need a user gesture anyway. The result: Chinese documents draw as tofu and the user is told to go install fonts. (PDFs are unaffected — they embed a subset, which is why PdfCraft never had this problem.)
+
+**Mechanism** (no change to `craft-web-host`, no new bridge message types):
+
+```
+app ready ──fontsWanted {have:[families]}──▶ AppFrame
+AppFrame ──system_fonts(have)──▶ Tauri command (reads %WINDIR%\Fonts, returns only what is missing)
+AppFrame ──fonts {fonts:[{name,data(base64)}]}──▶ app bridge
+app bridge ──window.<app>.execute("font.add",{data,name})──▶ app engine (existing command)
+```
+
+- **When**: once, when the app reports `ready` (the canvas `<app>:ready` event) — not on a user action, and not when a document reports missing fonts, because by then the user has already seen the boxes. `have` comes from the app's own `font.list`, so every later launch transfers nothing (installed fonts live in the app's own IndexedDB) and the host keeps no "already injected" state.
+- **Default set** (installed one at a time, in this order, once per machine). The same role is a different font on each platform, so each has its own table:
+  - Windows: SimSun, DengXian, Microsoft YaHei, Calibri, Arial, Times New Roman — about 58 MB (`%WINDIR%\Fonts`)
+  - macOS: Songti SC, PingFang SC (where Windows has 微软雅黑), Hiragino Sans GB, Helvetica, Arial, Times New Roman (`/System/Library/Fonts`, `Supplemental`, `/Library/Fonts`, `~/Library/Fonts`)
+  - Linux: Noto Serif CJK SC (the 宋体 stand-in), Noto Sans CJK SC, Liberation Sans / Serif, Noto Sans / Serif, DejaVu Sans (`/usr/share/fonts`, `/usr/local/share/fonts`, `~/.local/share/fonts`, `~/.fonts`, searched recursively)
+  - A face that is not in the table, or not installed on this machine, is skipped silently; a name that does not match just injects one font less.
+- **Invariant**: the host does not guess what an app supports. It works where `font.add` exists; where it does not (gridcraft / pdfcraft / vectorcraft / lightcraft) the bridge is a silent no-op and the package behaves exactly as before in a plain browser.
+- **Ceilings**: SimHei / KaiTi / FangSong are not in the default set. The font database used to drop a font's localized family names (installing `宋体` as `SimSun` still left `宋体` unresolvable, so the "missing font" notice stayed and the text went through script fallback); fixed in wordcraft (`fontdb/user.rs` now keeps `local_names` as the bundled and system paths always did). DeckCraft uses an older font database without that layer: glyphs are right, but the missing-font *name* is still reported — left for later.
+
 
 ## 2. Background
 

@@ -4,7 +4,7 @@
 > these files are translations maintained alongside it. When the two disagree, the Chinese
 > document governs.
 
-**Coverage**: 103 / 103 documents translated.
+**Coverage**: 113 / 113 documents translated.
 
 Numbering notes: `037` is unused; `061` and `062` each have two files (a decision and its
 companion report), so the count exceeds the number of unique ADR numbers.
@@ -148,6 +148,8 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 116 | [ADR-116](./ADR-116-hosted-application-framework.md) | Hosted Application Framework (Applications, Not Plug-ins) — PM / DOC as the Blueprint | Accepted | [zh](../zh/ADR-116-hosted-application-framework.md) |
 | 117 | [ADR-117](./ADR-117-pm-storage-read-path-and-sqlite-triggers.md) | PM Storage Evolution — Fix the Read Path, Then Converge on a SQLite-Only Backend | Decided and terminalised | [zh](../zh/ADR-117-pm-storage-read-path-and-sqlite-triggers.md) |
 | 118 | [ADR-118](./ADR-118-hosted-app-dual-canvas.md) | Dual Canvas for Hosted Apps — User Surface vs Agent Workspace File | Accepted (not yet implemented; FigCraft is the first `visual` app) | [zh](../zh/ADR-118-hosted-app-dual-canvas.md) |
+| 119 | [ADR-119](./ADR-119-chunked-resumable-upload.md) | Chunked Resumable Upload — One Binary-Chunk Channel for user→agent, Hosted-App Save, and agent→agent Intent Attachments | Accepted (2026-11-23; v1.1 same-day review revisions: transfer store pinned to the user service, Q1–Q4 + Q2-bis settled; per-file default 1 GiB configurable) | [zh](../zh/ADR-119-chunked-resumable-upload.md) |
+| 120 | [ADR-120](./ADR-120-gateway-unified-cache-management.md) | Unified Gateway Cache Management — Service-Self-Reported Disk Usage, a Cache-Management Card, and a Global Watermark Alarm | Accepted (2026-11-23; alarm-only watermark at 90%, no write gate; four red lines: self-report, cache-only deletion, services decide quantities, Gateway forwards only) | [zh](../zh/ADR-120-gateway-unified-cache-management.md) |
 
 ---
 
