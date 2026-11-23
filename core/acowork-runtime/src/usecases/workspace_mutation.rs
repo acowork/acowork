@@ -91,10 +91,30 @@ pub struct CreateFileBody {
 
 /// Body for `write_file` (only `content` is in the body — path +
 /// workspace_id are in the querystring).
+///
+/// `contentBase64` carries binary bytes instead of `content` as text — the
+/// write-back path of a hosted app's visual canvas (ADR-121): WordCraft
+/// hands back a `.docx` byte array, not a string. When both fields are
+/// present `contentBase64` wins.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct WriteFileBody {
     #[serde(default)]
     pub content: String,
+    #[serde(default, rename = "contentBase64")]
+    pub content_base64: Option<String>,
+}
+
+impl WriteFileBody {
+    /// The bytes to write: the base64 field decoded, or the text as UTF-8.
+    pub fn bytes(&self) -> Result<Vec<u8>, String> {
+        use base64::Engine as _;
+        match self.content_base64.as_deref().filter(|s| !s.is_empty()) {
+            Some(b64) => base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| format!("invalid 'contentBase64': {e}")),
+            None => Ok(self.content.clone().into_bytes()),
+        }
+    }
 }
 
 /// Body for `delete_file` + `create_dir` + `delete_dir`.

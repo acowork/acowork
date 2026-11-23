@@ -98,6 +98,32 @@ async fn call(
     (status, json, text)
 }
 
+/// A package larger than the Gateway's 64 MiB router cap still reaches the
+/// installer: the install route's body limit is the package limit
+/// (`MAX_APP_PACKAGE_BYTES`). Regression for vectorcraft (81 MiB), which the
+/// router refused with a bare 413 the browser reported as "Failed to fetch".
+#[tokio::test]
+async fn a_package_over_the_router_body_cap_reaches_the_installer() {
+    let port = start_mock_app().await;
+    let body = Body::from(vec![0u8; 65 * 1024 * 1024]);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/apps/install")
+        .header("authorization", format!("Bearer {SERVICE_TOKEN}"))
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .unwrap();
+    let response = build_router(test_state(port))
+        .oneshot(request)
+        .await
+        .unwrap();
+    assert_ne!(
+        response.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "the 64 MiB router cap refused a package the installer accepts"
+    );
+}
+
 /// Registry exposes both built-in apps with their declared contract.
 #[tokio::test]
 async fn lists_pm_and_doc_from_registry() {
@@ -257,4 +283,29 @@ async fn platform_api_enforces_declared_capabilities() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
     assert_eq!(body["error"], "capability_not_declared");
+}
+
+/// The app proxy's channel table: `ui` and `fonts` are public bytes, `api` is the app's own
+/// REST, and nothing else gets through. A font request is what makes a `.pptx` paint without
+/// tofu, so it must not fall into "unknown app channel".
+#[test]
+fn app_proxy_channel_for_ui_fonts_api_and_junk() {
+    use crate::app::proxy::channel_for;
+
+    assert_eq!(channel_for("ui", "/ui").map(|(c, p)| (c, p)), Some(("ui", "/ui/".to_string())));
+    assert_eq!(
+        channel_for("ui/app.css", "/ui").map(|(c, p)| (c, p)),
+        Some(("ui", "/ui/app.css".to_string()))
+    );
+    assert_eq!(
+        channel_for("fonts/宋体", "/ui").map(|(c, p)| (c, p)),
+        Some(("ui", "fonts/宋体".to_string()))
+    );
+    assert_eq!(channel_for("fonts", "/ui").map(|(c, _)| c), Some("ui"));
+    assert_eq!(
+        channel_for("api/projects", "/ui").map(|(c, p)| (c, p)),
+        Some(("api", "projects".to_string()))
+    );
+    assert!(channel_for("secrets", "/ui").is_none());
+    assert!(channel_for("apifoo", "/ui").is_none());
 }

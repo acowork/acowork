@@ -54,7 +54,7 @@ import { PmSettingsPanel } from "../../views/pm/PmSettingsPanel";
 import { DocsView } from "../../views/DocsView";
 import { DocSettingsPanel } from "../../views/doc/DocSettingsPanel";
 import { ExtensionsView } from "../../views/ExtensionsView";
-import { AppFrame } from "../apps/AppFrame";
+import { AppFrame, type AppFrameSaveFile } from "../apps/AppFrame";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { listApps, type AppDto } from "../../lib/apps-api";
 import { MqttDebugControls } from "../debug/MqttDebugControls";
@@ -72,6 +72,8 @@ import { log } from "../../lib/logger";
 // ceiling, the effect below and the tests all rank the same numbers.
 import { MIN_FILE_WIDTH, MIN_RIGHT_WIDTH, clampFileWidth, filePaneCeiling, fitPanesToViewport, initialFileWidth, sharedFilePaneWidth } from "./panelClamp";
 import { initFilePanelAutoState, reduceFilePanelAuto } from "./filePanelAutoCollapse";
+import { saveHostedAppFile as saveAppFile } from "../../lib/workspaceFileSave";
+import { SaveAsDialog } from "../apps/SaveAsDialog";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
@@ -635,6 +637,18 @@ export function AppLayout() {
   }, [statusMsg]);
 
   const { t } = useTranslation();
+
+  /**
+   * Save from a hosted app opened on its own (the left-nav canvas): no workspace
+   * file is bound to the tab, so every save asks where the file goes. Without a
+   * handler the app's Save reaches an `AppFrame` that answers "this surface does
+   * not store files".
+   */
+  const onSaveHostedApp = useCallback(
+    ({ name, bytes }: AppFrameSaveFile) =>
+      saveAppFile({ bound: null, saveAs: true, name, bytes }),
+    [],
+  );
 
   // ── Glass tint color ──────────────────────────────────────────────
   // Read both `theme` and `osTheme` from the store. The store keeps
@@ -1629,7 +1643,7 @@ export function AppLayout() {
           <div className="flex flex-1 overflow-hidden rounded-xl">
             <div className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 overflow-hidden")}>
               {hostedAppDto ? (
-                <AppFrame app={hostedAppDto} />
+                <AppFrame app={hostedAppDto} onSaveFile={onSaveHostedApp} />
               ) : (
                 <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
                   {hostedAppId ? `Opening ${hostedAppId}…` : "No app selected"}
@@ -1775,6 +1789,11 @@ export function AppLayout() {
       {/* ADR-081: app-wide global search dialog (Ctrl+Shift+F). Fixed
           overlay; mounted regardless of current view. */}
       <GlobalSearchDialog onNavigate={(view) => setCurrentView(view)} />
+
+      {/* ADR-121 §6.4: the Save As target picker a hosted app's save asks for.
+          Mounted once here; both the editor preview and the app canvas open it
+          through `saveAsStore`. */}
+      <SaveAsDialog />
 
     </div>
   );

@@ -243,16 +243,18 @@ fn is_public_path(path: &str) -> bool {
     }
     // ADR-116: app webview channels. Same reason as the workspace preview —
     // an iframe document and its sub-resource loads cannot carry an
-    // `Authorization` header. Three channels only: `ui` (static bundle
-    // bytes), `api` (app REST, session ticket verified in `app::proxy` before
-    // a byte is forwarded), and `session` (one-time ticket → cookie exchange).
+    // `Authorization` header. Four channels only: `ui` (static bundle
+    // bytes), `fonts` (the machine fonts the app serves for the documents it
+    // opens — the copy the user already owns, never a package's bytes),
+    // `api` (app REST, session ticket verified in `app::proxy` before a byte
+    // is forwarded), and `session` (one-time ticket → cookie exchange).
     // Control-plane paths (`/api/apps`, `/api/apps/{id}/enable|disable`,
     // `/api/apps/{id}/session-ticket`) deliberately do NOT match here and
     // stay behind the bearer gate.
     if let Some(rest) = path.strip_prefix("/api/apps/") {
         if let Some((id, tail)) = rest.split_once('/') {
             let channel = tail.split('/').next().unwrap_or("");
-            if !id.is_empty() && matches!(channel, "ui" | "api" | "session") {
+            if !id.is_empty() && matches!(channel, "ui" | "fonts" | "api" | "session") {
                 return true;
             }
         }
@@ -970,5 +972,25 @@ mod tests {
             b"<none>",
             "forged chat scope must not survive to the Runtime"
         );
+    }
+
+    /// The app webview channels reach the browser without a bearer token (an iframe and its
+    /// sub-resources cannot set one). A font request has to be one of them or every hosted app
+    /// draws tofu: its `fetch('/fonts/<family>')` would be answered 401, not a font.
+    #[test]
+    fn app_webview_channels_are_public_fonts_included() {
+        for path in [
+            "/api/apps/deckcraft/ui/",
+            "/api/apps/deckcraft/ui/app.css",
+            "/api/apps/deckcraft/fonts/SimSun",
+            "/api/apps/deckcraft/fonts/宋体",
+            "/api/apps/deckcraft/session",
+        ] {
+            assert!(super::is_public_path(path), "{path} must be reachable without a token");
+        }
+        // Control plane and anything unrecognised stay behind the gate.
+        for path in ["/api/apps", "/api/apps/deckcraft/enable", "/api/apps/deckcraft/secret"] {
+            assert!(!super::is_public_path(path), "{path} must stay bearer-gated");
+        }
     }
 }

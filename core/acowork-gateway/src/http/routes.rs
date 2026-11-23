@@ -79,6 +79,15 @@ pub struct AppState {
     /// Design doc 24 §6.3: relay tunnel client — runtime enable/disable
     /// and status for the outbound WSS tunnel to an acowork-relay.
     pub relay_client: Option<std::sync::Arc<crate::relay::RelayClient>>,
+    /// ADR-055 Phase 5a: the long-lived per-node credential store
+    /// (`{data_dir}/node_tokens.json`). `DELETE /api/nodes/{id}` needs it
+    /// to REVOKE the token — without that the deletion is bookkeeping
+    /// only, and the device keeps a valid MQTT CONNECT password and a
+    /// valid `X-ACowork-Node-Token` for an id the Gateway just forgot.
+    pub node_tokens: Option<crate::mqtt::SharedNodeTokenStore>,
+    /// Replay guard (ADR-059 §7.2): node teardown forgets the entry so
+    /// a deleted id cannot be brought back by a stale retained replay.
+    pub node_replay_guard: Option<Arc<crate::mqtt::dispatch::NodeReplayGuard>>,
     /// ADR-087: node ownership table (`{data_dir}/node_owners.json`).
     /// Shared with the MQTT dispatch (enroll writes rows).
     pub node_owners: Option<crate::gateway::ownership::SharedOwnershipStore>,
@@ -124,6 +133,8 @@ impl AppState {
             operation_store: None,
             ip_allowlist: crate::security::IpAllowlist::default(),
             relay_client: None,
+            node_tokens: None,
+            node_replay_guard: None,
             node_owners: None,
             agent_owners: None,
             pending_installs: None,

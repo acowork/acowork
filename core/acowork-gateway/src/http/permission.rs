@@ -102,6 +102,11 @@ pub fn extract_target<'a>(method: &Method, path: &'a str) -> Target<'a> {
                 match (method.as_str(), rest) {
                     ("PATCH", "visibility" | "guests" | "owner") => Target::Node(id),
                     ("PATCH", "") => Target::Node(id), // rename
+                    // Deleting a node is a manage op on the node row
+                    // (`ceiling` maps `Manage` onto `can_manage`). The
+                    // offline-only and not-local rules are handler
+                    // concerns, not permission tiers, so they stay out here.
+                    ("DELETE", "") => Target::Node(id),
                     ("POST", "claim") => Target::Node(id),
                     // Permission dialog read side — manage tier (a guest
                     // may see the list; attribution writes are gated

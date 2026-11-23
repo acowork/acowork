@@ -711,6 +711,7 @@ pub fn run() {
             // Desktop App and Gateway share a machine (local mode); the
             // frontend hides the corresponding menu item in remote mode.
             commands::reveal::reveal_in_file_explorer,
+            // Fonts a hosted app can't read from wasm (CJK documents open as tofu without them).
             // Inbox attachment download — see commands::save_attachment.
             // Tauri's WebView doesn't honor Content-Disposition / <a
             // download>, so the frontend shows the OS save dialog and

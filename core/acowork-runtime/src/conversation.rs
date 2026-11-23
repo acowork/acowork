@@ -3732,6 +3732,26 @@ pub struct PaginatedMessages {
 
 // ── ADR-021: StreamingStateMap types ───────────────────────────────────────
 
+/// ADR-022 §12: a reasoning segment the provider interleaved into an OPEN
+/// assistant message (a `reasoning_content` delta arriving mid-reply).
+///
+/// Its lifetime is exactly the streaming line it was interleaved into: it
+/// is born when the first such delta lands on an open assistant line and
+/// dies with that line — persisted as one `thought` record when the line
+/// flushes, or discarded when the line is removed (Path 2, where
+/// `persist_think_to_conversation` already owns the full reasoning). Living
+/// on the line makes "flush drains it / remove drops it" structural rather
+/// than a convention every call site must remember.
+#[derive(Debug, Clone)]
+pub struct ThoughtSegment {
+    /// Concatenation of every interleaved reasoning delta (arrival order).
+    pub content: String,
+    /// Epoch ms of the first delta (→ thought metadata `startTime`).
+    pub start_ms: i64,
+    /// Epoch ms of the most recent delta (→ thought metadata `endTime`).
+    pub end_ms: i64,
+}
+
 /// An incomplete line: a message currently being streamed by the LLM
 /// but not yet flushed to the JSONL file.
 ///
@@ -3756,6 +3776,11 @@ pub struct StreamingLine {
     /// Unix epoch milliseconds when streaming started (for timing metadata
     /// in metadata: {startTime, endTime} written to JSONL on flush).
     pub started_at_ms: i64,
+    /// ADR-022 §12: reasoning interleaved into this line mid-reply, if any.
+    /// Only ever `Some` on an `assistant` line. Drained by
+    /// `flush_streaming_line` (persisted as a `thought` record after the
+    /// line's own record) and dropped by `remove_streaming_line`.
+    pub interleaved: Option<ThoughtSegment>,
 }
 
 /// Delta portion of a streaming line returned to the frontend.
@@ -4434,6 +4459,7 @@ pub fn read_messages_since(
             accumulated_content: sl.accumulated_content.clone(),
             started_at: sl.started_at.clone(),
             started_at_ms: sl.started_at_ms,
+            interleaved: sl.interleaved.clone(),
         })
     };
     let streaming = streaming.map(|sl| {
@@ -4558,6 +4584,7 @@ pub fn read_messages_since_cursor(
             accumulated_content: sl.accumulated_content.clone(),
             started_at: sl.started_at.clone(),
             started_at_ms: sl.started_at_ms,
+            interleaved: sl.interleaved.clone(),
         })
     };
     let streaming = streaming.and_then(|sl| {
@@ -7239,6 +7266,7 @@ mod tests {
                 accumulated_content: content.to_string(),
                 started_at: chrono::Utc::now().to_rfc3339(),
                 started_at_ms: chrono::Utc::now().timestamp_millis(),
+                interleaved: None,
             },
         );
         map
@@ -7862,6 +7890,7 @@ mod tests {
                     accumulated_content: "Hello".to_string(),
                     started_at: chrono::Utc::now().to_rfc3339(),
                     started_at_ms: 0,
+                    interleaved: None,
                 },
             );
         }
@@ -7907,6 +7936,7 @@ mod tests {
                     accumulated_content: "Next".to_string(),
                     started_at: chrono::Utc::now().to_rfc3339(),
                     started_at_ms: 0,
+                    interleaved: None,
                 },
             );
         }
@@ -8051,6 +8081,7 @@ mod tests {
                     accumulated_content: String::new(),
                     started_at: chrono::Utc::now().to_rfc3339(),
                     started_at_ms: 0,
+                    interleaved: None,
                 },
             );
         }
@@ -8124,6 +8155,7 @@ mod tests {
                     accumulated_content: "final answer".to_string(),
                     started_at: chrono::Utc::now().to_rfc3339(),
                     started_at_ms: 0,
+                    interleaved: None,
                 },
             );
         }

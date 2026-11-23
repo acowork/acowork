@@ -883,6 +883,12 @@ impl Gateway {
         }
         let enrollment_tokens = crate::mqtt::new_shared_enrollment_store(&data_dir_path);
         let node_tokens = crate::mqtt::new_shared_node_token_store(&data_dir_path);
+        // ADR-059 §7.2 replay guard. Created with the other shared stores
+        // rather than inside the MQTT block: it is read by every dispatch
+        // message AND by the HTTP node-delete path, and a per-message guard
+        // would never see the live online signal the stale-replay check
+        // depends on.
+        let node_replay_guard = Arc::new(crate::mqtt::dispatch::NodeReplayGuard::default());
         // ADR-087: ownership policy tables (same directory + atomic-write
         // pattern as the token stores). Shared between the HTTP layer
         // (permission middleware, install/uninstall handlers, list
@@ -1172,10 +1178,6 @@ impl Gateway {
             // Clone before the move-closure; the original stays
             // available for the HTTP server below.
             let operation_store_for_dispatch = operation_store_shared.clone();
-            // ADR-059 §7.2 replay guard: shared across every dispatch
-            // message (a per-message guard would never see the live
-            // online signal that the stale replay check needs).
-            let node_replay_guard = Arc::new(crate::mqtt::dispatch::NodeReplayGuard::default());
             // Clone before the move-closure: the callback is `move` and
             // would otherwise consume the original, which must stay
             // available for `set_replay_guard` after connect.
@@ -1548,6 +1550,8 @@ impl Gateway {
                 agent_owners,
                 enrollment_tokens_for_http,
                 pending_installs,
+                node_tokens.clone(),
+                node_replay_guard.clone(),
             )
             .await
             {
@@ -1784,6 +1788,13 @@ impl Gateway {
                         }
                     }
                 }
+
+                // Installed generic apps (craft apps) are spawned by this
+                // process too, so they are as owned as the services above —
+                // same reason, same failure otherwise: an app that outlives
+                // the Gateway keeps its port, and on Windows keeps the lock on
+                // `versions/<v>/bin/<app>.exe` that blocks the next install.
+                crate::app::supervisor::stop_all_apps(&shared_state).await;
 
                 // ADR-055 §6.11: shut down the local Node Agent.
                 if let Some(supervisor) = &local_node_supervisor {

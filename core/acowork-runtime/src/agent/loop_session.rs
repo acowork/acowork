@@ -592,6 +592,12 @@ impl super::loop_::AgentLoop {
             > 0;
 
         if streamed {
+            // ADR-022 §12: flush_streaming_line drains the line's interleaved
+            // segment as a thought record. In case 2 the line is removed
+            // instead, dropping the segment — `persist_think_to_conversation`
+            // writes the whole accumulated reasoning (interleaved segments
+            // included) from the response, so persisting it here too would
+            // duplicate the record.
             self.session_core
                 .flush_streaming_line(self.session.conversation.as_deref());
         } else if let Some(ref conversation) = self.session.conversation {

@@ -16,7 +16,9 @@ import { useDragResize } from "../hooks/useDragResize";
 import {
     filterGalleryCards,
     fetchGalleryIndex,
+    galleryAttributionLinks,
     mergeGalleryCards,
+    type GalleryAttributionKind,
     type GalleryCard,
     type InstallBadge,
 } from "../lib/appGallery";
@@ -48,6 +50,12 @@ function badgeClass(badge: InstallBadge): string {
         default:
             return "bg-nav-surface text-text-tertiary border border-border-divider";
     }
+}
+
+function attributionKey(kind: GalleryAttributionKind): string {
+    if (kind === "homepage") return "extensions.homepage";
+    if (kind === "upstream") return "extensions.upstream";
+    return "extensions.repository";
 }
 
 function statusDot(app: AppDto | null): string {
@@ -501,23 +509,32 @@ export function ExtensionsView() {
                                     </>
                                 )}
 
-                                {selected.gallery?.repository && selected.badge !== "catalog_only" && (
-                                    <a
-                                        href={selected.gallery.repository}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="inline-flex items-center gap-1 text-[11px] text-text-tertiary hover:text-text-secondary"
-                                    >
-                                        {t("extensions.repository")}
-                                        <ExternalLink className="h-3 w-3" aria-hidden />
-                                    </a>
-                                )}
+                                {selected.gallery
+                                    ? galleryAttributionLinks(selected.gallery)
+                                          .filter(
+                                              (link) =>
+                                                  selected.badge !== "catalog_only" ||
+                                                  link.kind !== "repository",
+                                          )
+                                          .map((link) => (
+                                              <a
+                                                  key={link.kind}
+                                                  href={link.href}
+                                                  target="_blank"
+                                                  rel="noreferrer"
+                                                  className="inline-flex items-center gap-1 text-[11px] text-text-tertiary hover:text-text-secondary"
+                                              >
+                                                  {t(attributionKey(link.kind))}
+                                                  <ExternalLink className="h-3 w-3" aria-hidden />
+                                              </a>
+                                          ))
+                                    : null}
                             </div>
 
                             {!selected.installed?.builtin && confirmUninstall && (
-                                <div className="mt-3 rounded-md border border-border-divider bg-nav-surface p-3 text-xs">
-                                    <div className="mb-2 text-text-secondary">{t("extensions.uninstallConfirm")}</div>
-                                    <label className="mb-3 flex items-center gap-2 text-text-tertiary">
+                                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs">
+                                    <span className="text-text-secondary">{t("extensions.uninstallConfirm")}</span>
+                                    <label className="flex items-center gap-1.5 text-text-tertiary">
                                         <input
                                             type="checkbox"
                                             checked={purgeData}
@@ -525,11 +542,11 @@ export function ExtensionsView() {
                                         />
                                         {t("extensions.purgeData")}
                                     </label>
-                                    <div className="flex justify-end gap-2">
+                                    <div className="ml-auto flex gap-2">
                                         <button
                                             type="button"
                                             onClick={() => setConfirmUninstall(false)}
-                                            className="rounded-md border border-border-divider px-3 py-1.5"
+                                            className="rounded-md border border-border-divider px-2.5 py-1"
                                         >
                                             {t("extensions.cancel")}
                                         </button>
@@ -537,7 +554,7 @@ export function ExtensionsView() {
                                             type="button"
                                             disabled={busy}
                                             onClick={() => void onUninstall()}
-                                            className="rounded-md border border-danger-border px-3 py-1.5 text-danger-text disabled:opacity-50"
+                                            className="rounded-md border border-danger-border px-2.5 py-1 text-danger-text disabled:opacity-50"
                                         >
                                             {t("extensions.uninstall")}
                                         </button>

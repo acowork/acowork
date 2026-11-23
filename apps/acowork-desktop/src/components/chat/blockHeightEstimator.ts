@@ -382,7 +382,7 @@ export function estimateBlockHeight(
       // the moment the block is in view, and the next estimate consults
       // that cache first.  The estimate only has to be right about the
       // RESTING shape — an estimate that assumed the expanded height
-      // (32 + 4 + 144) would reserve 148px of empty space under every
+      // (32 + 4 + 288) would reserve 292px of empty space under every
       // folded explore block in the transcript.
       return EXPLORE_HEADER_HEIGHT;
     }

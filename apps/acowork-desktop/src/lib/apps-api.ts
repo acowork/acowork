@@ -23,12 +23,20 @@ export interface AppDto {
     mcp_url: string | null;
     ui_path: string;
     ui_mode: string;
+    /** ADR-121 preview channel: `library` | `visual` | `none`. */
+    canvas_kind?: string;
+    /** Template such as `/?file={workspace_file}` for visual apps. */
+    canvas_preview_path?: string;
+    /** Workspace file extensions this visual app owns (no leading dot). */
+    canvas_extensions?: string[];
     nav_label: string;
     nav_icon: string;
     nav_order: number;
     health_path: string;
     permissions: string[];
     installed_version?: string | null;
+    /** Unix-second install stamp — nav slots append in install order. */
+    installed_at?: string | null;
     fingerprint?: string | null;
     origin?: string | null;
 }
@@ -101,8 +109,17 @@ export async function mintAppTicket(id: string): Promise<string> {
     return body.ticket;
 }
 
+/** The Gateway refuses a package it has to stream past this size (`MAX_APP_PACKAGE_BYTES`). */
+const MAX_APP_PACKAGE_BYTES = 200 * 1024 * 1024;
+
 /** Upload a local `.app` package (`Content-Type: application/octet-stream`). */
 export async function installAppPackage(file: Blob, onProgress?: (pct: number) => void): Promise<InstallResult> {
+    // Checked here because the refusal that matters is the body cap: it answers
+    // 413 without the CORS headers the renderer needs, so the browser reports
+    // "Failed to fetch" and the user never learns what went wrong.
+    if (file.size > MAX_APP_PACKAGE_BYTES) {
+        throw new AppApiError(413, "应用包超过 200 MB 限制", "package_too_large");
+    }
     // Progress is best-effort: fetch has no upload progress without XHR.
     onProgress?.(0);
     const result = await request<InstallResult>("/api/apps/install", {
@@ -155,6 +172,9 @@ export function installErrorMessage(err: unknown): string {
             version_exists: "该版本已安装",
             binary_missing: "应用包缺少可执行文件",
             platform_signature_required: "该应用需要平台签名",
+            app_not_installed: "应用未安装",
+            invalid_app_id: "应用 ID 无效",
+            uninstall_failed: "卸载失败：安装目录被占用或无法移入回收站",
         };
         return map[err.code] ?? err.message;
     }

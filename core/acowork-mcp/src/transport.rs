@@ -36,6 +36,8 @@ const MCP_STREAMABLE_ACCEPT: &str = "application/json, text/event-stream";
 const MCP_JSON_CONTENT_TYPE: &str = "application/json";
 /// Streamable HTTP session header used to preserve MCP server state.
 const MCP_SESSION_ID_HEADER: &str = "Mcp-Session-Id";
+/// Absolute path of the calling Agent's current workspace (ADR-121).
+pub const MCP_WORKSPACE_ROOT_HEADER: &str = "X-MCP-Workspace-Root";
 
 // ── Transport Trait ──────────────────────────────────────────────────────
 
@@ -47,6 +49,10 @@ pub trait McpTransportConn: Send + Sync {
 
     /// Close the connection.
     async fn close(&mut self) -> Result<()>;
+
+    /// Attach the session workspace root to the next HTTP request (ADR-121).
+    /// Stdio transports ignore this.
+    fn set_workspace_root(&mut self, _root: Option<&str>) {}
 }
 
 // ── Stdio Transport ──────────────────────────────────────────────────────
@@ -273,6 +279,8 @@ pub struct HttpTransport {
     client: reqwest::Client,
     headers: HashMap<String, String>,
     session_id: Option<String>,
+    /// Per-request workspace root; not part of the catalog-static headers.
+    workspace_root: Option<String>,
 }
 
 impl HttpTransport {
@@ -293,7 +301,15 @@ impl HttpTransport {
             client,
             headers: config.headers.clone(),
             session_id: None,
+            workspace_root: None,
         })
+    }
+
+    fn apply_workspace_root_header(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.workspace_root.as_deref() {
+            Some(root) if !root.is_empty() => req.header(MCP_WORKSPACE_ROOT_HEADER, root),
+            _ => req,
+        }
     }
 
     fn apply_session_header(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -337,6 +353,7 @@ impl McpTransportConn for HttpTransport {
         for (key, value) in &self.headers {
             req = req.header(key, value);
         }
+        req = self.apply_workspace_root_header(req);
         req = self.apply_session_header(req);
         if !has_accept {
             req = req.header("Accept", MCP_STREAMABLE_ACCEPT);
@@ -382,6 +399,13 @@ impl McpTransportConn for HttpTransport {
 
     async fn close(&mut self) -> Result<()> {
         Ok(())
+    }
+
+    fn set_workspace_root(&mut self, root: Option<&str>) {
+        self.workspace_root = root
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
     }
 }
 
@@ -617,5 +641,22 @@ mod tests {
         assert!(!looks_like_sse_text(
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"
         ));
+    }
+
+    #[test]
+    fn workspace_root_header_is_set_and_cleared() {
+        let config = McpServerConfig {
+            name: "test".into(),
+            transport: McpTransportDef::Http,
+            url: Some("http://localhost:9999/mcp".into()),
+            ..Default::default()
+        };
+        let mut t = HttpTransport::new(&config).unwrap();
+        t.set_workspace_root(Some("  /tmp/ws  "));
+        assert_eq!(t.workspace_root.as_deref(), Some("/tmp/ws"));
+        t.set_workspace_root(Some(""));
+        assert!(t.workspace_root.is_none());
+        t.set_workspace_root(None);
+        assert!(t.workspace_root.is_none());
     }
 }

@@ -1,16 +1,11 @@
 /**
- * The Users group must carry the same row hairline the Agents group does.
+ * The sidebar's row hairlines were removed (agent rows, project-group rows
+ * and user rows alike) — the three groups now read as one column without
+ * rules between them. This pins that contract: NO user row carries the
+ * divider, in a multi-row group or a single-row one.
  *
- * The report: agent rows in the sidebar are separated by a hairline, the
- * user rows under them are not, so the two groups read as two different
- * lists stitched together. `UserRow` is the only sidebar row that never
- * got the divider — the agent row and the two other sidebar pickers
- * ([ProjectSidebar](../../views/pm/ProjectSidebar.tsx),
- * [ExtensionsView](../../views/ExtensionsView.tsx)) all draw it by hand.
- *
- * This pins the visual contract: every row but the last one in the group
- * gets the divider, and the last one does not (a trailing rule under the
- * final row would double up with the group's own bottom border).
+ * The other sidebars (pm, extensions) keep their own hairline; this file
+ * only governs the chat sidebar.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { execSync } from "node:child_process";
@@ -103,22 +98,20 @@ describe("UserList rows carry the agent-list hairline", () => {
     useProjectGroupStore.setState({ groups: [], dms: [], activeGroupId: null });
   });
 
-  it("divides every pair of rows but leaves the last row undecorated", async () => {
+  it("draws no hairline between user rows", async () => {
     await act(async () => {
       render(<UserList />);
     });
 
-    const rows = [screen.getByTestId("user-row-u-self"), screen.getByTestId("user-row-u-peer-a")];
-
-    // `u-peer-b` sorts last (admins first, then display name), so it is the
-    // only row that must NOT get a rule.
-    for (const row of rows) {
-      expect(row.className).toContain(DIVIDER);
+    // The sidebar's row separators were removed: the agent rows, the
+    // project-group rows and the user rows all read as one column now, so
+    // no row in any of the three groups carries a rule.
+    for (const id of ["u-self", "u-peer-a", "u-peer-b"]) {
+      expect(screen.getByTestId(`user-row-${id}`).className).not.toContain(DIVIDER);
     }
-    expect(screen.getByTestId("user-row-u-peer-b").className).not.toContain(DIVIDER);
   });
 
-  it("still drops the rule on a single-row group", async () => {
+  it("draws no hairline on a single-row group either", async () => {
     useAuthStore.setState({ account: account("admin", "u-self", "Alice") });
     vi.stubGlobal(
       "fetch",

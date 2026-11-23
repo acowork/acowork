@@ -43,6 +43,8 @@ docs/
 | Session 数据模型（持久化终态 + 运行时超集） | [`design/zh/31-session-data-model.md`](./design/zh/31-session-data-model.md) |
 | 远程访问：Cloud Hub（托管档，应用层消息中枢） | [`design/zh/26-cloud-sync-hub.md`](./design/zh/26-cloud-sync-hub.md) |
 | 远程访问：瘦中继（自托管 BYO 档，协议冻结） | [`design/zh/24-cloud-relay-remote-access.md`](./design/zh/24-cloud-relay-remote-access.md) |
+| 托管应用框架（进程 / 反代 / catalog / iframe 壳） | [`design/zh/34-hosted-application-framework.md`](./design/zh/34-hosted-application-framework.md) · [ADR-116](./adr/zh/ADR-116-hosted-application-framework.md) |
+| 托管应用双画布（用户界面 vs Agent 工作态 vs 聊天预览） | [`design/zh/35-hosted-app-dual-canvas.md`](./design/zh/35-hosted-app-dual-canvas.md) · [ADR-121](./adr/zh/ADR-121-hosted-app-dual-canvas.md) |
 | 架构决策记录 | [`adr/zh/`](./adr/zh/) |
 | 包级 LLM prompt 覆盖约定（`prompts/<file>.md`） | [`adr/zh/ADR-063-package-level-prompt-override.md`](./adr/zh/ADR-063-package-level-prompt-override.md) |
 | Runtime 内硬编码 prompt 清单 | [`prompt-audit/zh/runtime-prompts-summary.md`](./prompt-audit/zh/runtime-prompts-summary.md) |

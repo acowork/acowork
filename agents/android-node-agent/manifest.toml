@@ -1,0 +1,194 @@
+# Android Node Agent
+# The phone-side agent for ACowork on Android: remote phone control — observe the screen, act on it, manage apps, capture media and sensor data, and talk to BLE/USB peripherals. Everything it produces goes back to the chat, because the user is not holding the phone.
+
+agent_id = "com.acowork.android-node"
+version = "0.1.1"
+name = "AndroidNode"
+role = "Phone Remote Operator"
+description = "Operates an Android phone on the user's behalf from a distance: screen observation and automation, app install and launch, media and sensor capture, location, speech, clipboard, notifications, and BLE/USB peripherals. All results are delivered through chat."
+author = "ACowork Team"
+runtime_version = "0.1.0"
+dev = false
+labels = ["automation", "android"]
+avatar = "assets/avatar.jpg"
+
+identity_deps = ["display_name", "language", "timezone"]
+
+[[permissions]]
+type = "FilesystemRead"
+
+[[permissions]]
+type = "FilesystemWrite"
+
+[[permissions]]
+type = "Network"
+
+# Tool opt-in declarations (ADR-029).
+#
+# The android_* set is the agent's whole reason to exist. On the phone engine
+# these tools are ALSO default-on through the platform exception
+# (`android_device_default_enabled`, android-remote-control-tools design §2),
+# so this declaration is belt-and-braces: it documents the intent, and it
+# makes the row show enabled even if the exception list ever changes.
+# On a desktop host the names do not exist in the code registry and
+# `init_tools_config_from_manifest` drops them silently — declaring them is
+# safe on every platform.
+#
+#   v1 (implemented): device_status, photo, video_record, audio_record,
+#     audio_play, ble_scan, ble_gatt, usb_hid, android_use
+#   v2 (defined in docs/design/zh/android-remote-control-tools.md):
+#     app_package, intent, sensor, location, speech, clipboard,
+#     notification, system_control, message, contacts, calendar
+
+# --- Observation ---
+[[tools]]
+name = "android_device_status"
+
+[[tools]]
+name = "android_use"
+
+[[tools]]
+name = "android_sensor"
+
+[[tools]]
+name = "android_location"
+
+[[tools]]
+name = "android_notification"
+
+# --- Action ---
+[[tools]]
+name = "android_app_package"
+
+[[tools]]
+name = "android_intent"
+
+[[tools]]
+name = "android_clipboard"
+
+[[tools]]
+name = "android_system_control"
+
+[[tools]]
+name = "android_message"
+
+# --- Media ---
+[[tools]]
+name = "android_photo"
+
+[[tools]]
+name = "android_video_record"
+
+[[tools]]
+name = "android_audio_record"
+
+[[tools]]
+name = "android_audio_play"
+
+[[tools]]
+name = "android_speech"
+
+# --- Peripherals ---
+[[tools]]
+name = "android_ble_scan"
+
+[[tools]]
+name = "android_ble_gatt"
+
+[[tools]]
+name = "android_usb_hid"
+
+# --- Data ---
+[[tools]]
+name = "android_contacts"
+
+[[tools]]
+name = "android_calendar"
+
+# --- General ---
+# http_request / web_fetch: download an APK or a file before install/share.
+# file_read: read captured media/sensor artifacts back out of the work dir.
+# image_read: inspect a saved screenshot or photo.
+# ask_user_question: the only reliable way to reach the remote user — never
+#   the phone's own UI. todo_write: multi-step device flows (install, BLE
+#   commissioning, sensor logging) are long and resumable.
+# load_skill: the five android skills carry the multi-tool procedures.
+[[tools]]
+name = "http_request"
+
+[[tools]]
+name = "web_fetch"
+
+[[tools]]
+name = "file_read"
+
+[[tools]]
+name = "image_read"
+
+[[tools]]
+name = "ask_user_question"
+
+[[tools]]
+name = "todo_write"
+
+[[tools]]
+name = "load_skill"
+
+[llm]
+temperature = 0.3
+max_tokens = 32768
+context_window = 200000
+
+[llm.routing]
+strategy = "quality_priority"
+fallback_order = ["claude", "openai"]
+
+[llm.budget]
+max_output_tokens = 8192
+exceeded_action = "warn"
+
+# ADR-104: behaviour defaults for agent_config.json.
+[config]
+temperature = 0.3
+context_window = 160000
+max_output_tokens = 8192
+max_iterations = 60
+
+# The five android skills are the agent's procedure library; the model must
+# see they exist to route a "connect this sensor to the phone" request into
+# the BLE skill instead of improvising.
+[skills]
+progressive = true
+
+[memory]
+enabled = true
+retention_days = 365
+
+[resources]
+max_memory_mb = 512
+idle_timeout_secs = 3600
+
+[sandbox]
+enabled = false
+
+# Capabilities = the five skill-backed procedures. validate_capability_skills
+# checks each named skill ships in skills/<name>/ at packaging time.
+[capabilities.remote_control]
+description = "Remote screen control: observe (screenshot / accessibility tree / screen record), act (tap / swipe / type / node / global), verify the result, and fall back to clipboard paste when text injection fails"
+skills = ["android-remote-control"]
+
+[capabilities.app_lifecycle]
+description = "App lifecycle at a distance: list and inspect installed packages, download an APK, drive the asynchronous install through the on-site confirmation dialog, launch and uninstall"
+skills = ["android-app-lifecycle"]
+
+[capabilities.ble_communication]
+description = "BLE peripheral work: scan with filters, connect, discover services, negotiate MTU, subscribe to notifications, read and write characteristics, and recover from disconnects"
+skills = ["android-ble-connect"]
+
+[capabilities.media_capture]
+description = "Media capture and delivery: photos, video, audio, and screen recordings land in the work dir and are brought back to the user through chat"
+skills = ["android-media-capture"]
+
+[capabilities.sensor_logging]
+description = "Sensor and location logging: windowed sampling and streams, GPS tracks, artifacts written to the work dir, then read back and summarized"
+skills = ["android-sensor-log"]

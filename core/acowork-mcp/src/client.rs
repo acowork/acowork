@@ -299,6 +299,19 @@ impl McpClient {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        self.call_tool_in_workspace(tool_name, arguments, None)
+            .await
+    }
+
+    /// Like [`Self::call_tool`], and for HTTP transports attach
+    /// `X-MCP-Workspace-Root` so hosted apps can confine `open_file` /
+    /// `save_file` to this Agent's current workspace (ADR-121).
+    pub async fn call_tool_in_workspace(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        workspace_root: Option<&str>,
+    ) -> Result<serde_json::Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = JsonRpcRequest::new(
             id,
@@ -324,6 +337,7 @@ impl McpClient {
                 );
             }
         };
+        transport.set_workspace_root(workspace_root);
 
         let result = timeout(
             Duration::from_secs(tool_timeout),
@@ -492,6 +506,17 @@ impl McpRegistry {
         prefixed_name: &str,
         arguments: serde_json::Value,
     ) -> Result<String> {
+        self.call_tool_in_workspace(prefixed_name, arguments, None)
+            .await
+    }
+
+    /// Execute a tool, forwarding the session workspace root on HTTP MCP.
+    pub async fn call_tool_in_workspace(
+        &self,
+        prefixed_name: &str,
+        arguments: serde_json::Value,
+        workspace_root: Option<&str>,
+    ) -> Result<String> {
         let (server_idx, def) = self
             .tool_index
             .get(prefixed_name)
@@ -510,7 +535,9 @@ impl McpRegistry {
             server.reconnect().await?;
         }
 
-        let result = server.call_tool(original_name, arguments).await?;
+        let result = server
+            .call_tool_in_workspace(original_name, arguments, workspace_root)
+            .await?;
         serde_json::to_string_pretty(&result)
             .with_context(|| format!("failed to serialize result of MCP tool `{prefixed_name}`"))
     }
@@ -540,6 +567,13 @@ impl McpRegistry {
 
 #[cfg(test)]
 pub(crate) fn registry_with_mock_tool_result(result: serde_json::Value) -> Arc<McpRegistry> {
+    registry_with_mock_tool_result_and_root(result).0
+}
+
+#[cfg(test)]
+pub(crate) fn registry_with_mock_tool_result_and_root(
+    result: serde_json::Value,
+) -> (Arc<McpRegistry>, Arc<std::sync::Mutex<Option<String>>>) {
     use std::sync::atomic::{AtomicBool, AtomicU64};
 
     use crate::protocol::{JSONRPC_VERSION, JsonRpcResponse};
@@ -548,6 +582,7 @@ pub(crate) fn registry_with_mock_tool_result(result: serde_json::Value) -> Arc<M
 
     struct MockTransport {
         result: serde_json::Value,
+        workspace_root: Arc<std::sync::Mutex<Option<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -567,33 +602,42 @@ pub(crate) fn registry_with_mock_tool_result(result: serde_json::Value) -> Arc<M
         async fn close(&mut self) -> anyhow::Result<()> {
             Ok(())
         }
+
+        fn set_workspace_root(&mut self, root: Option<&str>) {
+            *self.workspace_root.lock().unwrap() = root.map(str::to_string);
+        }
     }
 
-    let server_name = "test".to_string();
+    let workspace_root = Arc::new(std::sync::Mutex::new(None));
     let tool_def = McpToolDef {
         name: "render".to_string(),
         description: Some("Test image tool".to_string()),
         input_schema: serde_json::json!({}),
     };
-    let config = McpServerConfig {
-        name: server_name.clone(),
-        ..Default::default()
-    };
     let client = McpClient {
         meta: Arc::new(McpServerMeta {
-            config,
+            config: McpServerConfig {
+                name: "test".to_string(),
+                ..Default::default()
+            },
             tools: vec![tool_def.clone()],
         }),
         transport: Arc::new(Mutex::new(McpTransportState {
-            transport: Some(Box::new(MockTransport { result })),
+            transport: Some(Box::new(MockTransport {
+                result,
+                workspace_root: Arc::clone(&workspace_root),
+            })),
         })),
         next_id: Arc::new(AtomicU64::new(3)),
         is_alive: Arc::new(AtomicBool::new(true)),
     };
-    Arc::new(McpRegistry {
-        servers: vec![client],
-        tool_index: IndexMap::from([("mcp_test__render".to_string(), (0, tool_def))]),
-    })
+    (
+        Arc::new(McpRegistry {
+            servers: vec![client],
+            tool_index: IndexMap::from([("mcp_test__render".to_string(), (0, tool_def))]),
+        }),
+        workspace_root,
+    )
 }
 
 #[cfg(test)]

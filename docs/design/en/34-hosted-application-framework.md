@@ -288,6 +288,9 @@ Error codes are **stable strings** so the Desktop can map them to user-facing co
 | `app_id_reserved` | 409 | Attempt to overwrite a builtin |
 | `version_exists` | 409 | Same version installed twice |
 | `binary_missing` | 400 | `bin/` missing or not executable |
+| `app_not_installed` | 404 | Uninstall: install directory is missing |
+| `invalid_app_id` | 400 | Uninstall/operate on an id that is not a valid app id |
+| `uninstall_failed` | 500 | Could not move the install directory to `.trash` (Windows directory move / file in use) |
 
 ### 6.9 Upgrade / rollback / uninstall semantics
 
@@ -440,3 +443,4 @@ Expected: `/api/apps` returns two AppDtos (pm/doc); `ui` returns each app's own 
 - **legacy slot**: PM/DOC map to the existing `pm_process` / `doc_process` state fields via `legacy_slot`, avoiding changes to the existing identity-injection tests. This is an intentional migration bridge, not the long-term structure.
 - **`navigation_guard.rs`**: the Desktop iframe targets a Gateway reverse-proxy path (`http(s)` + deep path); deployment must confirm the navigation firewall allows this prefix. The existing `UrlPreviewView` iframe exception uses the same mechanism.
 - `ExtensionsView` still has no `extensions` i18n namespace (pre-existing TODO).
+- **User canvas vs agent working state** (ADR-116 does not say which copy of state an agent mutates): see [ADR-121](../../adr/en/ADR-121-hosted-app-dual-canvas.md) and [design doc 35](./35-hosted-app-dual-canvas.md). Left nav is the user canvas; MCP does not attach by default; a `visual` app's chat preview is a durable-pane iframe, not a transcript row.

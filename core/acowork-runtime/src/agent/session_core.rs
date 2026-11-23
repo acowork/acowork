@@ -484,6 +484,7 @@ impl SessionCore {
                 accumulated_content: String::with_capacity(4096),
                 started_at: chrono::Utc::now().to_rfc3339(),
                 started_at_ms: chrono::Utc::now().timestamp_millis(),
+                interleaved: None,
             },
         );
     }
@@ -584,6 +585,15 @@ impl SessionCore {
                 "ADR-022 flush_streaming_line: content is whitespace-only, skipping write"
             );
         }
+        // ADR-022 §12: drain the line's interleaved reasoning as one thought
+        // record, AFTER the line's own record (canonical assistant → thought
+        // order). The line is already removed from the map, so appending the
+        // thought cannot renumber an open streaming line. A thought write
+        // counts as streaming persistence: bump the flush count so finalize
+        // takes Path 1 even when the line text itself was whitespace-only.
+        if Self::persist_interleaved_segment(sl.interleaved.as_ref(), conversation) {
+            self.streaming_flush_count.fetch_add(1, Ordering::Relaxed);
+        }
         Some(content)
     }
 
@@ -594,6 +604,127 @@ impl SessionCore {
             None => return,
         };
         self.streaming_lines.write().unwrap().remove(&sid);
+    }
+
+    /// ADR-022 §12: role of the currently open streaming line, if any.
+    ///
+    /// [`Self::on_reasoning_delta`] uses this to tell a genuine role
+    /// transition (flush + new thought line) apart from a provider
+    /// *interleaving* a `reasoning_content` delta into an already-open
+    /// assistant message — which appends to the line's `interleaved`
+    /// segment instead of ending the line.
+    pub(crate) fn current_streaming_role(&self) -> Option<String> {
+        let sid = self.session_id.as_ref()?;
+        self.streaming_lines
+            .read()
+            .unwrap()
+            .get(sid)
+            .map(|sl| sl.role.clone())
+    }
+
+    /// ADR-022 §12: map one `reasoning_content` delta onto the streaming
+    /// state. This is the single place that decides what a reasoning delta
+    /// means, so the stream loop never reasons about roles itself.
+    ///
+    /// Two cases:
+    /// - An assistant line is OPEN → the provider is interleaving reasoning
+    ///   into the middle of one logical reply (flushing here is what cut
+    ///   "写盘" in half in the MiniMax 2026-11-23 incident). Append to that
+    ///   line's `interleaved` segment and leave the line alive; the segment
+    ///   is persisted as one `thought` record when the line flushes.
+    /// - Otherwise → a genuine thought segment: flush any open line and
+    ///   stream the delta on a `thought` line (the original ADR-022 rule).
+    pub(crate) fn on_reasoning_delta(
+        &self,
+        delta: &str,
+        now_ms: i64,
+        conversation: Option<&crate::conversation::ConversationSession>,
+    ) {
+        if self.current_streaming_role().as_deref() == Some("assistant") {
+            if let Some(sid) = self.session_id.as_ref() {
+                let mut map = self.streaming_lines.write().unwrap();
+                if let Some(sl) = map.get_mut(sid) {
+                    match sl.interleaved.as_mut() {
+                        Some(seg) => {
+                            seg.content.push_str(delta);
+                            seg.end_ms = now_ms;
+                        }
+                        None => {
+                            sl.interleaved = Some(crate::conversation::ThoughtSegment {
+                                content: delta.to_string(),
+                                start_ms: now_ms,
+                                end_ms: now_ms,
+                            });
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        self.flush_and_new_streaming_line("thought", conversation);
+        self.append_streaming_delta("thought", delta);
+        self.notify_new_data_available();
+    }
+
+    /// ADR-022 §12: write one interleaved segment as a `thought` record.
+    ///
+    /// Returns whether a record was written so the caller can bump
+    /// `streaming_flush_count`: a thought write IS streaming persistence and
+    /// must steer `finalize_streaming_line` to Path 1. Without the bump, a
+    /// whitespace-only assistant line carrying interleaved reasoning would
+    /// leave the count at 0 and Path 2's `persist_think_to_conversation`
+    /// would write the same reasoning a second time.
+    ///
+    /// The caller must append this AFTER the line's own record (canonical
+    /// `assistant → thought` order) and only once the line is removed from
+    /// the map, so no open streaming line can be renumbered beneath a
+    /// committed record (the partial-cut bug family, see `read_messages_since`).
+    fn persist_interleaved_segment(
+        seg: Option<&crate::conversation::ThoughtSegment>,
+        conversation: Option<&crate::conversation::ConversationSession>,
+    ) -> bool {
+        let Some(t) = seg else {
+            return false;
+        };
+        // Trim-guard mirrors `flush_streaming_line` and
+        // `persist_think_to_conversation`: a whitespace-only reasoning
+        // fragment must not render as an empty ThinkBlock.
+        if t.content.trim().is_empty() {
+            return false;
+        }
+        let Some(conv) = conversation else {
+            return false;
+        };
+        let meta = serde_json::json!({ "startTime": t.start_ms, "endTime": t.end_ms });
+        conv.append_message("thought", &t.content, Some(meta));
+        true
+    }
+
+    /// ADR-022 §12: persist the line's interleaved thought (if any) and drop
+    /// the line WITHOUT writing its text — for stop paths where the caller
+    /// has already persisted the assistant text itself (`handle_stopped`).
+    ///
+    /// A distinct third operation, not a patch: `flush_streaming_line` writes
+    /// the line text too, `remove_streaming_line` drops the segment as well
+    /// (the Path 2 contract, where `persist_think_to_conversation` owns the
+    /// full reasoning). Here the caller owns the line text, so only the
+    /// attached reasoning needs persisting. The thought lands after the
+    /// caller's assistant record; the line is removed first, so no open-line
+    /// renumbering can occur.
+    pub(crate) fn drop_line_persisting_thought(
+        &self,
+        conversation: Option<&crate::conversation::ConversationSession>,
+    ) {
+        let sid = match &self.session_id {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        let removed = self.streaming_lines.write().unwrap().remove(&sid);
+        if let Some(sl) = removed
+            && Self::persist_interleaved_segment(sl.interleaved.as_ref(), conversation)
+        {
+            self.streaming_flush_count.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Flush current streaming line (if non-empty), then ensure a new one
@@ -622,13 +753,28 @@ impl SessionCore {
         } else {
             // No existing line or empty — if there's a stale empty line with
             // a different role, discard it so ensure_streaming_line won't hit
-            // the role-mismatch assertion.
-            let mut map = self.streaming_lines.write().unwrap();
-            if let Some(sl) = map.get(&sid)
-                && sl.role != new_role
-                && sl.accumulated_content.is_empty()
+            // the role-mismatch assertion. ADR-022 §12: drain any interleaved
+            // segment before dropping, so no line removal silently loses
+            // reasoning — the only drop-without-persist path is the explicit
+            // Path 2 `remove_streaming_line`. In practice the stale empty line
+            // here is a thought line (no segment) and the drain is a no-op;
+            // draining keeps the invariant structural rather than relying on
+            // "no caller ever switches role away from an empty assistant line".
+            let stale = {
+                let mut map = self.streaming_lines.write().unwrap();
+                if let Some(sl) = map.get(&sid)
+                    && sl.role != new_role
+                    && sl.accumulated_content.is_empty()
+                {
+                    map.remove(&sid)
+                } else {
+                    None
+                }
+            };
+            if let Some(sl) = stale
+                && Self::persist_interleaved_segment(sl.interleaved.as_ref(), conversation)
             {
-                map.remove(&sid);
+                self.streaming_flush_count.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -1037,6 +1183,7 @@ mod tests {
                 role: "assistant".to_string(),
                 started_at: String::new(),
                 started_at_ms: 0,
+                interleaved: None,
             },
         );
 
@@ -1127,6 +1274,7 @@ mod tests {
                 role: "thought".to_string(),
                 started_at: String::new(),
                 started_at_ms: 0,
+                interleaved: None,
             },
         );
         core.try_send_stream_delta(false);
@@ -1186,6 +1334,7 @@ mod tests {
                 role: "assistant".to_string(),
                 started_at: String::new(),
                 started_at_ms: 0,
+                interleaved: None,
             },
         );
 
@@ -1333,10 +1482,17 @@ mod tests {
 
     // ── ADR-022 §9: Runtime role transition & flush tests ──────────────
 
-    /// ADR-022 §9 test 3: Runtime role transition produces three
-    /// single-role JSONL lines.
+    /// ADR-022 §9 test 3 — mechanism: an explicit role transition through
+    /// `flush_and_new_streaming_line` produces single-role JSONL lines.
     ///
-    /// Simulates the event sequence:
+    /// NOTE: this drives the SessionCore primitives directly. The *stream
+    /// loop* no longer maps an interleaved `ReasoningContent` delta to a
+    /// role transition when the assistant line is open — it buffers it
+    /// (ADR-022 amendment, see `test_interleaved_reasoning_merges_assistant_
+    /// reply`). A transition like the one below still occurs for genuine
+    /// boundaries (thought line open when the first Content arrives).
+    ///
+    /// Simulated primitive sequence:
     ///   Content("我先看一下")          → assistant line
     ///   ReasoningContent("分析路径")    → flush assistant, thought line
     ///   Content("然后搜索")            → flush thought, assistant line
@@ -1381,6 +1537,217 @@ mod tests {
         assert_eq!(entries[1].content, "分析路径");
         assert_eq!(entries[2].role, "assistant");
         assert_eq!(entries[2].content, "然后搜索");
+    }
+
+    /// ADR-022 §12 regression test (MiniMax 2026-11-23 incident): a
+    /// `reasoning_content` delta interleaved into an OPEN assistant line
+    /// must not fragment the reply.
+    ///
+    /// Mapping under §12 (owned by `on_reasoning_delta`):
+    ///   Content("写")                        → assistant line opens
+    ///   ReasoningContent(" delete.")         → role is `assistant` → append
+    ///                                          to the line's segment, line stays open
+    ///   Content("盘链路我自己探一下，不再猜：")   → SAME line, text merged
+    ///   Finished                             → flush_streaming_line drains
+    ///                                          the line + its segment atomically
+    ///
+    /// Expected JSONL — assistant first (the streaming line keeps its
+    /// pre-assigned `line_number`; appending the thought first would
+    /// renumber it and drop leading chars on the next poll), then the
+    /// merged interleaved reasoning as one thought record:
+    ///   line 1: {"role":"assistant","content":"写盘链路我自己探一下，不再猜："}
+    ///   line 2: {"role":"thought","content":" delete.","metadata":{startTime,endTime}}
+    #[test]
+    fn test_interleaved_reasoning_merges_assistant_reply() {
+        let session_id = "adr022-interleaved";
+        let (core, session, temp_dir) = make_session_core_with_session(session_id);
+
+        // Content("写") — assistant streaming line opens.
+        core.flush_and_new_streaming_line("assistant", Some(&session));
+        core.append_streaming_delta("assistant", "写");
+
+        // ReasoningContent(" delete.") — on_reasoning_delta sees an open
+        // assistant line and appends to its segment instead of transitioning.
+        assert_eq!(
+            core.current_streaming_role().as_deref(),
+            Some("assistant"),
+            "assistant line must still be open before the interleave"
+        );
+        core.on_reasoning_delta(" delete.", 1700000000123, Some(&session));
+        assert_eq!(
+            core.current_streaming_role().as_deref(),
+            Some("assistant"),
+            "ADR-022 §12: interleaved reasoning must NOT flush the assistant line"
+        );
+
+        // Content resumes — appended to the SAME streaming line.
+        core.flush_and_new_streaming_line("assistant", Some(&session));
+        core.append_streaming_delta("assistant", "盘链路我自己探一下，不再猜：");
+
+        // Finished — flush writes the merged line, then drains its segment.
+        core.flush_streaming_line(Some(&session));
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let entries = read_jsonl_entries(temp_dir.path(), session_id);
+        assert_eq!(
+            entries.len(),
+            2,
+            "one merged assistant record + one thought record — not two fragments"
+        );
+        assert_eq!(entries[0].role, "assistant");
+        assert_eq!(entries[0].content, "写盘链路我自己探一下，不再猜：");
+        assert_eq!(entries[1].role, "thought");
+        assert_eq!(entries[1].content, " delete.");
+        let meta = entries[1]
+            .metadata
+            .as_ref()
+            .expect("interleaved thought carries timing metadata");
+        assert_eq!(meta["startTime"].as_i64().unwrap(), 1700000000123);
+        assert!(meta["endTime"].as_i64().unwrap() >= 1700000000123);
+    }
+
+    /// ADR-022 §12: several interleaved deltas merge into ONE thought record
+    /// on the line (first start / last end); a whitespace-only segment
+    /// persists nothing.
+    #[test]
+    fn test_interleaved_thought_merges_segments_and_skips_whitespace() {
+        let session_id = "adr022-interleaved-merge";
+        let (core, session, temp_dir) = make_session_core_with_session(session_id);
+
+        core.flush_and_new_streaming_line("assistant", Some(&session));
+        core.append_streaming_delta("assistant", "A");
+        core.on_reasoning_delta("x", 100, Some(&session));
+        core.on_reasoning_delta("y", 200, Some(&session));
+        core.append_streaming_delta("assistant", "B");
+        core.flush_streaming_line(Some(&session));
+
+        // Second round: whitespace-only interleaved reasoning → no record.
+        core.flush_and_new_streaming_line("assistant", Some(&session));
+        core.append_streaming_delta("assistant", "C");
+        core.on_reasoning_delta("   ", 300, Some(&session));
+        core.flush_streaming_line(Some(&session));
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let entries = read_jsonl_entries(temp_dir.path(), session_id);
+        assert_eq!(entries.len(), 3, "assistant, thought, assistant");
+        assert_eq!(entries[0].role, "assistant");
+        assert_eq!(entries[0].content, "AB");
+        assert_eq!(entries[1].role, "thought");
+        assert_eq!(entries[1].content, "xy");
+        let meta = entries[1].metadata.as_ref().unwrap();
+        assert_eq!(meta["startTime"].as_i64().unwrap(), 100);
+        assert_eq!(meta["endTime"].as_i64().unwrap(), 200);
+        assert_eq!(entries[2].role, "assistant");
+        assert_eq!(entries[2].content, "C");
+    }
+
+    /// ADR-022 §12 structural invariant: an interleaved segment lives ON the
+    /// streaming line, so it dies with the line. Path 2's `remove_streaming_line`
+    /// drops the segment (persist_think owns the full reasoning); there is no
+    /// separate buffer that could leak into the next call. This is what makes
+    /// the "cancelled before first chunk" bare flush safe by construction.
+    ///
+    /// Sequence this locks:
+    ///   Call N : assistant line opens, reasoning interleaves onto the line,
+    ///            stream ends with no Finished event → finalize Path 2 removes
+    ///            the line, dropping its segment (persist_think wrote "r").
+    ///   Call N+1: cancelled before first chunk → bare flush_streaming_line
+    ///            finds no open line and writes NOTHING.
+    ///   Call N+1 continues: a fresh line carries only its own content.
+    #[test]
+    fn test_interleaved_segment_dies_with_line_on_path2_remove() {
+        let session_id = "adr022-segment-lifetime";
+        let (core, session, temp_dir) = make_session_core_with_session(session_id);
+
+        // Call N: assistant line + interleaved reasoning on the line.
+        core.flush_and_new_streaming_line("assistant", Some(&session));
+        core.append_streaming_delta("assistant", "A");
+        core.on_reasoning_delta("r", 100, Some(&session));
+        // Path 2 termination: removing the line drops its segment too
+        // (persist_think already wrote "r" from the full response).
+        core.remove_streaming_line();
+
+        // Call N+1 entry: the "cancelled before first chunk" bare flush.
+        // No line is open, so nothing is written — the segment cannot leak.
+        core.flush_streaming_line(Some(&session));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            read_jsonl_entries(temp_dir.path(), session_id).is_empty(),
+            "a removed line's interleaved segment must not surface in the next call"
+        );
+
+        // Call N+1 continues: a fresh line carries only its own content.
+        core.flush_and_new_streaming_line("assistant", Some(&session));
+        core.append_streaming_delta("assistant", "B");
+        core.flush_streaming_line(Some(&session));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let entries = read_jsonl_entries(temp_dir.path(), session_id);
+        assert_eq!(entries.len(), 1, "only the new round's line is written");
+        assert_eq!(entries[0].role, "assistant");
+        assert_eq!(entries[0].content, "B");
+    }
+
+    /// ADR-022 §12 count-semantics regression: a whitespace-only assistant
+    /// line carrying interleaved reasoning must still count as a streaming
+    /// flush when its thought record is written.
+    ///
+    /// `finalize_streaming_line` picks Path 1 vs Path 2 purely on
+    /// `streaming_flush_count > 0`, and `persist_think_to_conversation` has no
+    /// dedup guard. If the thought write did NOT bump the count, this shape
+    /// (blank reply text + interleaved reasoning, flushed at a boundary)
+    /// would leave the count at 0 → Path 2 → persist_think writes the same
+    /// reasoning a SECOND time. The flush must bump the count for the thought
+    /// record even though the line's own text was skipped.
+    #[test]
+    fn test_whitespace_line_with_interleaved_thought_counts_as_flush() {
+        let session_id = "adr022-whitespace-count";
+        let (core, session, temp_dir) = make_session_core_with_session(session_id);
+
+        // Assistant line whose text is whitespace-only, plus interleaved reasoning.
+        core.flush_and_new_streaming_line("assistant", Some(&session));
+        core.append_streaming_delta("assistant", "   ");
+        core.on_reasoning_delta("r", 100, Some(&session));
+        core.flush_streaming_line(Some(&session));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        assert!(
+            core.streaming_flush_count.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "writing the interleaved thought must count as a flush (steers finalize to Path 1)"
+        );
+        let entries = read_jsonl_entries(temp_dir.path(), session_id);
+        assert_eq!(entries.len(), 1, "exactly one thought record — no duplicate, no blank assistant");
+        assert_eq!(entries[0].role, "thought");
+        assert_eq!(entries[0].content, "r");
+    }
+
+    /// ADR-022 §12 structural invariant: even the stale-empty-line discard in
+    /// `flush_and_new_streaming_line` drains an interleaved segment before
+    /// dropping the line. The only drop-without-persist path is the explicit
+    /// Path 2 `remove_streaming_line`; every other line removal persists the
+    /// segment. This locks the else-branch hardening so a future role-switch
+    /// away from an empty assistant line cannot silently lose reasoning.
+    #[test]
+    fn test_role_switch_from_empty_assistant_line_drains_segment() {
+        let session_id = "adr022-empty-line-drain";
+        let (core, session, temp_dir) = make_session_core_with_session(session_id);
+
+        // Assistant line with EMPTY text but an interleaved segment.
+        core.flush_and_new_streaming_line("assistant", Some(&session));
+        core.on_reasoning_delta("r", 100, Some(&session));
+        assert_eq!(core.current_streaming_role().as_deref(), Some("assistant"));
+
+        // Role switch away from the empty assistant line: the stale-empty
+        // discard must drain the segment, not drop it.
+        core.flush_and_new_streaming_line("thought", Some(&session));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let entries = read_jsonl_entries(temp_dir.path(), session_id);
+        assert_eq!(entries.len(), 1, "the interleaved segment is persisted, not lost");
+        assert_eq!(entries[0].role, "thought");
+        assert_eq!(entries[0].content, "r");
     }
 
     /// ADR-022 §9 test 4: assistant text + tool_call preserves order.

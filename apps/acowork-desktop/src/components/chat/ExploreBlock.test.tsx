@@ -464,3 +464,38 @@ describe("ExploreBlock — the tool row uses the width it has", () => {
     expect(span.textContent!.length).toBeLessThan(1000);
   });
 });
+
+describe("ExploreBlock — visual canvas card", () => {
+  it("shows a canvas card for a figcraft save without expanding the fold", () => {
+    const call: ChatMessage = {
+      id: "c-fig",
+      type: "tool_call",
+      content: JSON.stringify({ path: "designs/home.figcraft" }),
+      timestamp: 1000,
+      toolName: "mcp_figcraft__save_file",
+      toolCallId: "call-fig",
+    };
+    const result: ChatMessage = {
+      id: "r-fig",
+      type: "tool_result",
+      content: "{}",
+      timestamp: 1001,
+      toolName: "mcp_figcraft__save_file",
+      toolCallId: "call-fig",
+      toolStatus: "success",
+    };
+    const { container } = render(
+      <ExploreBlock items={[call, result]} isStreaming={false} currentSessionId="sess-1" />,
+    );
+    expect(header(container).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByTestId("visual-canvas-card")).toBeTruthy();
+    expect(screen.getByText("home.figcraft")).toBeTruthy();
+  });
+
+  it("does not show a canvas card for ordinary tools", () => {
+    const { container } = render(
+      <ExploreBlock items={[toolCall("c1")]} isStreaming={false} />,
+    );
+    expect(container.querySelector("[data-testid=visual-canvas-card]")).toBeNull();
+  });
+});

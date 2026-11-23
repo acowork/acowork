@@ -163,6 +163,8 @@ fn build_mcp_headers(headers: &HeaderMap, gw: &GatewayState) -> HeaderMap {
         }
         // Strip client-forged app/session identity on the MCP path; the
         // upstream app authenticates agents via X-MCP-Actor only.
+        // X-MCP-Workspace-Root (ADR-121) is NOT identity — it is the
+        // Actor's session workspace path and must be forwarded.
         if matches!(
             name.as_str(),
             "x-actor"
@@ -357,6 +359,27 @@ label = "Clone"
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["x-mcp-actor"], serde_json::json!(AGENT));
+    }
+
+    #[tokio::test]
+    async fn workspace_root_header_is_forwarded() {
+        let state = test_state();
+        add_agent(&state, AGENT).await;
+        let port = start_echo_mcp().await;
+        register_clone(&state, Some(port), true).await;
+        let root = "/tmp/agent-ws";
+        let (status, body) = call(
+            state,
+            "/api/apps/doc-clone/mcp",
+            &[
+                ("X-MCP-Actor", AGENT),
+                ("X-MCP-Workspace-Root", root),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["x-mcp-workspace-root"], serde_json::json!(root));
         assert_eq!(body["x-mcp-actor"], serde_json::json!(AGENT));
     }
 

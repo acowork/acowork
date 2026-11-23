@@ -810,6 +810,66 @@ mod tests {
     }
 
     #[test]
+    fn restore_folds_interleaved_thought_after_merged_assistant() {
+        // ADR-022 amendment canonical shape: when a provider interleaves
+        // reasoning into the middle of a reply, the writer emits ONE merged
+        // assistant record and persists the buffered reasoning AFTER it:
+        //   user, thought, assistant(merged), thought(interleaved), tool_call
+        // The trailing thought must still become the tool-call round's
+        // reasoning_content (is_new_round path) — restoring the merged
+        // record must not strand the interleaved thought or lose it.
+        let work = temp_workdir("rc-interleaved");
+        let session_id = "sess-rc-interleaved";
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
+            &work,
+            session_id,
+            SessionConfig {
+                agent_id: "test".into(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
+        )
+        .unwrap();
+        session.append_message("user", "q1", None);
+        session.append_message("thought", "rc-first", None);
+        session.append_message("assistant", "写盘链路我自己探一下", None);
+        session.append_message("thought", "rc-interleaved", None);
+        session.append_message(
+            "tool_call",
+            r#"{"path":"."}"#,
+            Some(serde_json::json!({"tool_name":"glob_search","tool_call_id":"tc_1"})),
+        );
+        flush(&session);
+
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
+        let outcome = restore_history_from_jsonl(&path, None).unwrap();
+
+        // User, Assistant{merged text, no reasoning}, Assistant{tc_1,
+        // reasoning=rc-interleaved}
+        assert_eq!(outcome.messages.len(), 3);
+        assert!(matches!(outcome.messages[1].role, MessageRole::Assistant));
+        assert_eq!(outcome.messages[1].content, "写盘链路我自己探一下");
+        assert_eq!(
+            outcome.messages[1].reasoning_content, None,
+            "text-only turn keeps reasoning off the wire"
+        );
+        assert!(matches!(outcome.messages[2].role, MessageRole::Assistant));
+        assert_eq!(
+            outcome.messages[2].reasoning_content.as_deref(),
+            Some("rc-interleaved"),
+            "trailing interleaved thought becomes the tool round's reasoning"
+        );
+        let calls = outcome.messages[2].tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "tc_1");
+    }
+
+    #[test]
     fn restore_merges_tool_calls_onto_assistant() {
         let work = temp_workdir("tools");
         let session_id = "sess-tools";

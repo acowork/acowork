@@ -4,6 +4,7 @@ import { useAuthStore } from "./authStore";
 import { DEFAULT_GATEWAY_URL } from "../lib/config";
 import { invalidateWorkspaceFileBlob } from "../lib/workspaceFileBlob";
 import { getCachedFileVersion } from "./fileTree";
+import { HOSTED_PREVIEW_EXT_RE } from "../components/editor/filePreview";
 import { log } from "../lib/logger";
 import type { GitCommitDto } from "./gitStore";
 
@@ -336,6 +337,12 @@ interface FileEditorState {
     setDiffInlineMode: (fileId: string, inline: boolean) => void;
     /** Save file content to Gateway */
     saveFile: (fileId: string) => Promise<void>;
+    /** A hosted app wrote this tab's bytes (ADR-121 §6.4). Stamps the same
+     *  `lastSavedAtMs` echo window a text save does: without it the fs event
+     *  the write bounces back is read as an external change, the viewer
+     *  re-fetches the blob, and the app — handed the document again — reloads
+     *  it in front of the user. */
+    noteHostedAppSave: (fileId: string) => void;
     /** Re-fetch file content from disk and replace both content and originalContent.
      *  Resets dirty=false. URL-preview tabs (kind === "url") are skipped.
      *  No-op while a refresh is already in flight for this file.
@@ -432,19 +439,19 @@ function detectLanguage(fileName: string): string {
 }
 
 // ── Document-preview files (remote file preview plan) ─────────────────
-// pdf / office documents open in dedicated viewer components that fetch
-// the raw bytes themselves through the Gateway raw-file route (see
-// `lib/workspaceFileBlob.ts`). Loading their content as base64 through
-// the JSON `/workspaces/file` endpoint would transfer megabytes the
-// editor never renders, so these tabs carry an EMPTY `content` and a
-// client-side inferred `mimeType`; the viewer keys off the MIME to pick
-// the renderer. CSV deliberately stays on the text path (its JSON
-// content is cheap plain text, and the sheet viewer reads the blob).
-const DOC_PREVIEW_EXT_RE = /\.(?:pdf|docx|doc|xlsx|xls|pptx|ppt)$/i;
+// pdf / office / craft documents open in dedicated viewer components (or a
+// hosted app's iframe) that fetch the raw bytes themselves through the
+// Gateway raw-file route (see `lib/workspaceFileBlob.ts`). Loading their
+// content as base64 through the JSON `/workspaces/file` endpoint would
+// transfer megabytes the editor never renders, so these tabs carry an
+// EMPTY `content` and a client-side inferred `mimeType`; the viewer keys
+// off the MIME to pick the renderer. CSV and the image formats with a
+// built-in viewer deliberately stay on their read path (see
+// `HOSTED_PREVIEW_EXT_RE`).
 
 /** Whether this file is rendered by a document viewer instead of Monaco. */
 export function isDocPreviewFile(fileName: string): boolean {
-    return DOC_PREVIEW_EXT_RE.test(fileName);
+    return HOSTED_PREVIEW_EXT_RE.test(fileName);
 }
 
 /** Client-side MIME inference for document-preview files — the JSON
@@ -458,6 +465,12 @@ const DOC_MIME_MAP: Record<string, string> = {
     doc: "application/msword",
     xls: "application/vnd.ms-excel",
     ppt: "application/vnd.ms-powerpoint",
+    figcraft: "application/x-figcraft",
+    deckcraft: "application/x-deckcraft",
+    vectorcraft: "application/x-vectorcraft",
+    drawcraft: "application/x-vectorcraft",
+    vctemplate: "application/x-vectorcraft-template",
+    scjson: "application/json",
 };
 
 function inferDocMimeType(fileName: string): string {
@@ -928,6 +941,14 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                 f.id === fileId && f.kind === "diff"
                     ? { ...f, diffInlineMode: inline }
                     : f,
+            ),
+        }));
+    },
+
+    noteHostedAppSave: (fileId: string) => {
+        set((state) => ({
+            openFiles: state.openFiles.map((f) =>
+                f.id === fileId ? { ...f, lastSavedAtMs: Date.now() } : f,
             ),
         }));
     },

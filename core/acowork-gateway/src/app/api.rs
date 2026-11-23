@@ -9,11 +9,12 @@ use std::path::PathBuf;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Extension, Path, Query, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
 };
+use acowork_core::app::MAX_APP_PACKAGE_BYTES;
 use serde::{Deserialize, Serialize};
 
 use crate::app::install::{
@@ -36,6 +37,13 @@ pub fn app_routes() -> Router<AppState> {
         .route("/api/apps/{id}/session-ticket", post(session_ticket))
         .route("/api/apps/{id}/versions", get(get_versions))
         .route("/api/apps/{id}/rollback", post(rollback))
+        // A `.app` is a whole app: the gateway-wide 64 MiB cap rejected every
+        // package over that size (vectorcraft is 81 MiB) with a bare 413 the
+        // browser reported as "Failed to fetch". The package limit is
+        // `MAX_APP_PACKAGE_BYTES` (200 MiB, `app::install` enforces it while
+        // streaming to the staging file), so the body cap has to match it —
+        // otherwise the route's own limit is unreachable.
+        .layer(DefaultBodyLimit::max(MAX_APP_PACKAGE_BYTES as usize))
 }
 
 /// The Desktop-facing projection of one registered app.
@@ -56,6 +64,12 @@ pub struct AppDto {
     pub mcp_url: Option<String>,
     pub ui_path: String,
     pub ui_mode: String,
+    /// ADR-121 preview channel: `library` | `visual` | `none` | empty.
+    pub canvas_kind: String,
+    /// Template such as `/?file={workspace_file}` for `visual` apps.
+    pub canvas_preview_path: String,
+    /// Workspace file extensions this visual app owns (no leading dot).
+    pub canvas_extensions: Vec<String>,
     pub nav_label: String,
     pub nav_icon: String,
     pub nav_order: i32,
@@ -63,6 +77,10 @@ pub struct AppDto {
     pub permissions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub installed_version: Option<String>,
+    /// Unix-second install stamp — the Desktop appends new app slots in
+    /// install order, so a fresh install lands below the existing icons.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,12 +130,16 @@ fn to_dto(
         mcp_url: app_mcp_url(gw, manifest),
         ui_path: manifest.ui.path.clone(),
         ui_mode: ui_mode.to_string(),
+        canvas_kind: manifest.ui.canvas.kind.clone(),
+        canvas_preview_path: manifest.ui.canvas.preview_path.clone(),
+        canvas_extensions: manifest.ui.canvas.extensions.clone(),
         nav_label: manifest.ui.nav.label.clone(),
         nav_icon: manifest.ui.nav.icon.clone(),
         nav_order: manifest.ui.nav.order,
         health_path: manifest.process.health_path.clone(),
         permissions: manifest.permissions.platform.clone(),
         installed_version: install.as_ref().map(|s| s.current.clone()),
+        installed_at: install.as_ref().map(|s| s.installed_at.clone()),
         fingerprint: install.as_ref().and_then(|s| s.fingerprint.clone()),
         origin: install.as_ref().map(|s| s.origin.clone()),
     }
@@ -565,7 +587,10 @@ async fn delete_app(
         )
             .into_response();
     };
-    crate::app::supervisor::stop_app(&id, &state.gateway_state).await;
+    let pid = crate::app::supervisor::stop_app(&id, &state.gateway_state).await;
+    if let Some(pid) = pid {
+        crate::app::supervisor::wait_process_gone(pid, std::time::Duration::from_secs(5)).await;
+    }
     if let Err(e) = uninstall_app(&dir, &id, q.purge_data) {
         return install_err_response(e);
     }

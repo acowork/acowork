@@ -31,7 +31,7 @@
 | 4 | 进程 | `runtime = "legacy"`（PM/DOC）沿用已验证的 ADR-064 supervisor（含 `--gateway-url`、token env、身份注入测试套件）；`runtime = "generic"` 走框架配置驱动 supervisor（`app::supervisor`）。两者统一投影到 `resolve_app_port()`，禁止每个应用各写一套 Rust supervisor |
 | 5 | 网络 | 应用只监听 `127.0.0.1`，桌面端与 Agent **一律经 Gateway**：`/api/apps/{id}/ui/*`（静态 bundle）、`/api/apps/{id}/api/*`（应用 REST）、`{mcp.gateway_path}`（MCP）。`/api/pm\|doc/*` 保留为字节级兼容别名，Desktop 与 agent manifest 零改动 |
 | 6 | MCP | 仍以 HTTP（Streamable HTTP 无状态子集，单 `POST /mcp`）为主。`build_available_mcps()` 中 pm/doc 两处硬编码改为遍历 registry：禁用应用立即从 catalog 消失，新应用声明 `auto_inject` 即自动进入 catalog，无需改代码。memory 保持 ADR-101 原路径不动 |
-| 7 | 前端 | 应用自己 serve `/ui/`；Desktop 只提供 iframe 容器 + `postMessage` 窄桥（theme / locale / accent / ready / notify）。`sandbox` **不给 `allow-same-origin`**，应用拿不到父窗口 DOM / storage / token |
+| 7 | 前端 | 应用自己 serve `/ui/`；Desktop 只提供 iframe 容器 + `postMessage` 窄桥（theme / locale / accent / ready / notify）。`sandbox` **带 `allow-same-origin`**（见 §1.4）：不带时 iframe 是 opaque origin，`localStorage` / `IndexedDB` 一律抛 `SecurityError`，应用存不住偏好、存不住用户自加字体。应用拿到的是 **Gateway 的源**，不是 Desktop 窗口的源，父窗口 DOM 与 Bearer token 仍不可达 |
 | 8 | 认证 | 主窗口用已登录的 Bearer 换短期 HMAC **app session ticket**，经 iframe URL **fragment**（不进 query、日志、Referer）传给应用页；应用页把 ticket 放进 `X-App-Session` 头，Gateway 逐请求校验并注入可信身份。可选一次性交换为 `HttpOnly; SameSite=Strict; Path=/api/apps/{id}/` cookie |
 | 9 | 身份 | 反代剥离客户端自报的 `X-Actor` / `x-actor-admin` / `x-app-id` / `Authorization` / cookie，注入 `X-App-Id` / `X-App-User` / `X-Actor` / `x-actor-admin=false` / `X-App-Platform-Url`。延续 ADR-064 Phase 3 的反伪造语义 |
 | 10 | 平台接口 | `/api/platform/{identity,context,agents,notify}` 最小集合，按 `app.toml` 声明的 `permissions.platform` **默认拒绝**。应用后端凭 supervisor 注入的 internal service token + `X-App-Id` 调用；webview 永远拿不到平台凭证 |
@@ -48,7 +48,40 @@
 6. **平台不提供改写平台状态的宿主 API**——这是"应用"定位的核心护栏。
 7. memory 的右侧面板嵌入形态未纳入本框架；在其 UI 契约明确前，不得把 memory 声明为 `app.toml` 应用。
 
+### 1.4 iframe sandbox 与 `allow-same-origin`
+
+`AppFrame` 的 `sandbox` 是 `allow-scripts allow-same-origin allow-forms allow-popups allow-downloads`。
+
+**为什么必须给 `allow-same-origin`**：不透明源（opaque origin）下浏览器把 iframe 当作来自一个谁也不是的源，`localStorage.setItem` 与 `indexedDB.open` 直接抛 `SecurityError`（实测：在完全相同的 sandbox 里跑探针，两者都是 `SecurityError`）。托管应用是有状态的编辑器：界面语言、"不再提示缺字体"、用户自己添加的字体（IndexedDB，几 MB 的 CJK 字体放不进 localStorage）全都要落盘。没有这个属性，这些能力在 ACowork 里永远坏掉，而同一个包在浏览器里正常。
+
+**它换不来什么**：iframe 的源是 Gateway（`http://127.0.0.1:19876`），不是 Desktop 窗口的源（Tauri `tauri://localhost` / dev `localhost:5173`）。父窗口 DOM 读不到；Bearer token 存在 Desktop 源的 `localStorage`，读不到；Gateway API 只认 Bearer，应用手里只有自己的 app session ticket（URL fragment 传入），拿不到别人的会话。
+
+**已知天花板（可接受）**：所有托管应用共享同一个 Gateway 源，因此应用 A 与应用 B 的 `localStorage` 同源——一个恶意应用理论上能读到另一个应用存的偏好。缓解路径（按需再做，不是现在）：宿主在注入脚本里给 `localStorage` 加应用 id 前缀垫片，或给每个应用单独的源（独立端口 / 独立 proxy 前缀）。写在这里，是为了下次有人问"为什么应用之间能互相看见存储"时不用重新推导。
+
 ---
+
+### 1.5 托管应用的系统字体
+
+Craft 文档（`.docx` / `.pptx` / `.xlsx`）**只写字体名，不嵌字形**：正文说"宋体"、"Calibri"，字体程序不在文件里。渲染器必须自己有那份字体，而 wasm 里读不到 `%WINDIR%\Fonts`，浏览器端的 `queryLocalFonts`（`Load System Installed Fonts…` 的实现）在 WebView2 上不可用、也需要用户手势授权。结果就是：中文文档在应用里全是方块，还要用户自己去装字库。（PDF 不受影响——它把字体子集嵌在文件里，所以 PdfCraft 天然没有这个问题。）
+
+**机制**（不改 `craft-web-host`、不新增 bridge 消息类型）：
+
+```
+应用首帧就绪 ──fontsWanted {have:[families]}──▶ AppFrame
+AppFrame ──system_fonts(have)──▶ Tauri 命令（读 %WINDIR%\Fonts，只返回缺的）
+AppFrame ──fonts {fonts:[{name,data(base64)}]}──▶ 应用桥
+应用桥 ──window.<app>.execute("font.add",{data,name})──▶ 应用引擎（现有命令）
+```
+
+- **时机**：应用自己报 `ready`（canvas 的 `<app>:ready`）时握手一次，不等用户操作，也不等"文档报缺字体"——那样用户已经看见方块了。`have` 由应用自己的 `font.list` 提供，所以第二次以后是零传输（装过的字体在应用自己的 IndexedDB 里），宿主不维护任何"已注入"状态。
+- **默认集**（按序串行灌，先到先生效，只在本机首次打开时传一次）。同一个"角色"在三个平台上是不同的字体，所以各自一张表：
+  - Windows：SimSun（宋体）、DengXian（等线）、Microsoft YaHei（微软雅黑）、Calibri、Arial、Times New Roman，约 58 MB（`%WINDIR%\Fonts`）
+  - macOS：Songti SC（宋体）、PingFang SC（苹方，顶上微软雅黑的位置）、Hiragino Sans GB、Helvetica、Arial、Times New Roman（`/System/Library/Fonts`、`Supplemental`、`/Library/Fonts`、`~/Library/Fonts`）
+  - Linux：Noto Serif CJK SC（宋体的替身）、Noto Sans CJK SC、Liberation Sans / Serif、Noto Sans / Serif、DejaVu Sans（`/usr/share/fonts`、`/usr/local/share/fonts`、`~/.local/share/fonts`、`~/.fonts`，递归找）
+  - 表里没有的字体（或这台机器没装的）静默跳过；名字猜错也只是少注入一个，不会报错。
+- **不变量**：宿主不猜应用支持什么。应用有 `font.add` 才生效；没有（gridcraft / pdfcraft / vectorcraft / lightcraft）桥就无声 no-op，包在浏览器里打开的行为完全不变。
+- **天花板**：默认集不含黑体 / 楷体 / 仿宋；应用字体库此前会丢掉字体自带的 localized family name（`宋体` 装成 `SimSun` 后按 `宋体` 查不到，于是"缺字体"提示照旧、正文走 script fallback），已在 wordcraft 修（`fontdb/user.rs` 与 bundled / system 路径一样保留 `local_names`）。DeckCraft 用的是更早的一套 fontdb，没有这一层，字形正确但仍会报"缺字体"名字——留作后续。
+
 
 ## 2. 背景与动机
 
@@ -131,3 +164,4 @@ MCP **刻意不放在 `/api/apps/{id}/` 通配下**：Agent 侧继续走已验�
 - **memory**：右侧导航栏嵌入 UI 属于"面板型"应用，需要另立 UI 贡献点契约，之后再纳入。
 - `ExtensionsView` 的 i18n 命名空间仍未建立（原有 TODO 保留）；本轮未改 5 个语言包。
 - 建议 CI 增补两条 red line：`dev/ci.sh` 的 `run_all_redlines` 中检查 Gateway 不读 app 数据目录、Desktop 不 import 应用前端代码。
+- **双画布**（本 ADR 只定了托管壳，没定 Agent 改哪一份状态）：[ADR-121](./ADR-121-hosted-app-dual-canvas.md) / [设计文档 35](../../design/zh/35-hosted-app-dual-canvas.md)。左侧导航 = 用户画布；MCP 默认不 attach；聊天预览走常驻栏 iframe。

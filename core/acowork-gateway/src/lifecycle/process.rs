@@ -113,6 +113,48 @@ pub fn is_process_alive(_pid: u32) -> bool {
     true // fallback: assume alive if we have a PID record
 }
 
+/// The executable's file name for `pid`, or `None` when no such process runs.
+///
+/// A recorded PID is only safe to act on once you know it still names the same
+/// program: after a hard kill the record outlives the process, and Windows
+/// recycles PIDs, so the number can come back as something unrelated.
+pub async fn process_image_name(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    if cfg!(windows) {
+        let out = tokio::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text.trim();
+        // CSV output always starts with a quoted field; anything else is
+        // tasklist's "no tasks match" notice.
+        if !line.starts_with('"') {
+            return None;
+        }
+        let name = line.trim_start_matches('"').split('"').next()?.to_string();
+        return (!name.is_empty()).then_some(name);
+    }
+    if cfg!(target_os = "linux") {
+        let name = tokio::fs::read_to_string(format!("/proc/{}/comm", pid))
+            .await
+            .ok()?;
+        return Some(name.trim().to_string());
+    }
+    let out = tokio::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .await
+        .ok()?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
 /// Path of a sibling binary next to the running executable.
 ///
 /// Every supervised standalone service is built into the same `target/`
@@ -147,6 +189,19 @@ mod tests {
     async fn test_check_health_nonexistent_pid() {
         // A very large PID is unlikely to exist
         assert!(!check_health(999999999).await);
+    }
+
+    /// The stale-PID reap is only safe because this names the image: a record
+    /// that no longer points at our app must not be killed.
+    #[tokio::test]
+    async fn process_image_name_names_the_calling_binary() {
+        let name = process_image_name(std::process::id())
+            .await
+            .expect("own process must have an image name");
+        let ours = std::env::current_exe().expect("current exe");
+        let ours = ours.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.eq_ignore_ascii_case(&ours), "{name} != {ours}");
+        assert!(process_image_name(999999999).await.is_none());
     }
 
     #[tokio::test]

@@ -289,6 +289,9 @@ entry = "bin/acowork-pm"
 | `app_id_reserved` | 409 | 试图覆盖 builtin |
 | `version_exists` | 409 | 同版本重复安装 |
 | `binary_missing` | 400 | `bin/` 缺失或不可执行 |
+| `app_not_installed` | 404 | 卸载时安装目录不存在 |
+| `invalid_app_id` | 400 | 卸载/操作的 id 不是合法应用 id |
+| `uninstall_failed` | 500 | 安装目录无法移入 `.trash`（Windows 目录移动 / 文件占用） |
 
 ### 6.9 升级 / 回滚 / 卸载语义
 
@@ -440,3 +443,4 @@ curl -H "Authorization: Bearer $TOKEN" \
 - **legacy slot**：PM/DOC 通过 `legacy_slot` 映射到既有 `pm_process` / `doc_process` 状态字段，避免改动已有身份注入测试；这是有意的迁移桥，不是长期结构。
 - **`navigation_policy.rs`**：桌面端 `AppFrame` iframe 的目标是 Gateway 反代路径（`http(s)` + 深层路径），需要在部署时确认导航防火墙对该前缀放行。ADR-118 之后该例外已按 webview 角色显式建模（`NavigationRole::App` 白名单 / `NavigationRole::Preview` 允许外部 `http(s)`），`UrlPreviewView` 不再是 iframe 而是子 Webview。
 - `ExtensionsView` 仍无 `extensions` i18n 命名空间（沿用原有 TODO）。
+- **用户画布 vs Agent 工作态**（ADR-116 未规定 Agent 改哪一份状态）：见 [ADR-121](../../adr/zh/ADR-121-hosted-app-dual-canvas.md) 与 [设计文档 35](./35-hosted-app-dual-canvas.md)。左侧导航是用户画布；MCP 默认不 attach；`visual` 应用的聊天预览是常驻栏 iframe，不是转录行。

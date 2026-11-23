@@ -5,6 +5,8 @@ import { ThinkBlock } from "./ThinkBlock";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cardButtonAccent, cardButtonNeutral } from "../../lib/ui-styles";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
+import { VisualCanvasCard } from "./VisualCanvasCard";
+import { findVisualCanvasRelPath, visualCanvasShotSeq } from "../editor/visualCanvas";
 
 interface ExploreBlockProps {
   items: ChatMessage[];
@@ -292,7 +294,7 @@ function approvalMatchesSession(
  *   execution block by default and retired the "auto-expand the newest work"
  *   state machine for the same reason.
  * - Collapsed: "Exploring... (N steps)" + chevron.
- * - Expanded: max-height 144px container with ThinkBlock and ToolCallItem.
+ * - Expanded: max-height 288px container with ThinkBlock and ToolCallItem.
  * - Streaming: auto-scrolls to bottom while expanded.
  * - Open (auto): a PENDING TOOL AUTHORIZATION opens the block — a control
  *   hidden behind a fold is not answerable (ADR-106 D8, same rule the
@@ -321,6 +323,8 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
   // fold effect re-fire) on renders that changed nothing about the block.
   const pairedItems = useMemo(() => buildPairedItems(items), [items]);
   const stepCount = pairedItems.length;
+  const visualCanvasPath = useMemo(() => findVisualCanvasRelPath(items), [items]);
+  const visualCanvasShotSeqValue = useMemo(() => visualCanvasShotSeq(items), [items]);
 
   // Count tool_calls that have NOT yet been paired with a tool_result.
   // Derived once here so the collapsed-header "M running" badge can read
@@ -486,12 +490,22 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
         )}
       </button>
 
+      {visualCanvasPath && (
+        <div className="mt-1.5">
+          <VisualCanvasCard
+            relPath={visualCanvasPath}
+            sessionId={currentSessionId}
+            reloadSeq={visualCanvasShotSeqValue}
+          />
+        </div>
+      )}
+
       {/* Expanded content: full ThinkBlock + paired ToolCall rendering */}
       {expanded && (
         <OverlayScrollbar
           ref={contentRef}
-          maxHeight={144}
-          containerClassName="flex-none max-h-60 ml-2 mt-1 rounded-md border-l-2 border-border-strong bg-transparent"
+          maxHeight={288}
+          containerClassName="flex-none max-h-72 ml-2 mt-1 rounded-md border-l-2 border-border-strong bg-transparent"
           className="pl-3 pr-2 py-2 overscroll-contain"
           onViewportWheel={(event) => {
             if (event.deltaY !== 0) event.stopPropagation();

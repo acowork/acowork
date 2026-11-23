@@ -413,6 +413,7 @@ fn bundled_agent_package_path(
         "project-manager-agent" => "com.acowork.project-manager.agent",
         "product-manager-agent" => "com.acowork.product-manager.agent",
         "document-manager-agent" => "com.acowork.document-manager.agent",
+        "android-node-agent" => "com.acowork.android-node.agent",
         other => {
             return resource_dir
                 .join("agent-packages")

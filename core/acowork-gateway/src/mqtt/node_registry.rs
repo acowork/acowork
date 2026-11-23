@@ -13,7 +13,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use prost::Message as _;
@@ -44,8 +43,12 @@ pub struct NodeInfoState {
     /// the in-memory mirror so HTTP handlers (X-ACowork-Node-Token
     /// checks) and /api/nodes can read it without the store.
     pub node_token: Option<String>,
-    /// When the registry last observed any message from this node.
-    pub last_updated: Instant,
+    /// Wall-clock time the registry last observed any message from this
+    /// node. A `DateTime`, not an `Instant`: the display-layer timeout
+    /// needs a timestamp it can compare against a client's clock and
+    /// serialise, and a monotonic clock read is meaningless across a
+    /// Gateway restart.
+    pub last_seen_at: DateTime<Utc>,
     /// UTC timestamp of the last observed online transition (None
     /// while the node has never been online).
     pub online_since: Option<DateTime<Utc>>,
@@ -118,7 +121,7 @@ impl NodeRegistry {
             if let Some(entry) = self.nodes.get_mut(node_id) {
                 entry.online = false;
                 entry.online_since = None;
-                entry.last_updated = Instant::now();
+                entry.last_seen_at = Utc::now();
                 tracing::info!(node_id, "Node status retained cleared — marked offline");
             }
             return;
@@ -135,7 +138,7 @@ impl NodeRegistry {
             return;
         }
 
-        let now = Instant::now();
+        let now = Utc::now();
         let entry = self.nodes.entry(node_id.to_string()).or_insert_with(|| {
             tracing::info!(node_id, "Node discovered via status topic");
             NodeInfoState {
@@ -145,7 +148,7 @@ impl NodeRegistry {
                 lsp_endpoint: None,
                 node_name: None,
                 node_token: None,
-                last_updated: now,
+                last_seen_at: now,
                 online_since: None,
             }
         });
@@ -156,7 +159,7 @@ impl NodeRegistry {
             entry.online_since = None;
         }
         entry.online = online;
-        entry.last_updated = now;
+        entry.last_seen_at = now;
 
         // Presence re-assert republishes retained `online` every few
         // seconds; only log the false↔true edge so DEBUG stays readable.
@@ -186,7 +189,7 @@ impl NodeRegistry {
             if let Some(entry) = self.nodes.get_mut(&node_id) {
                 entry.info = None;
                 entry.node_name = None;
-                entry.last_updated = Instant::now();
+                entry.last_seen_at = Utc::now();
                 tracing::debug!(node_id = %node_id, "Node info cleared (retained empty)");
             }
             return;
@@ -219,7 +222,7 @@ impl NodeRegistry {
             return;
         }
 
-        let now = Instant::now();
+        let now = Utc::now();
         let node_name = (!info.node_name.is_empty()).then(|| info.node_name.clone());
         let entry = self.nodes.entry(node_id.clone()).or_insert_with(|| {
             tracing::info!(node_id = %node_id, "Node discovered via info topic");
@@ -230,13 +233,13 @@ impl NodeRegistry {
                 lsp_endpoint: None,
                 node_name: None,
                 node_token: None,
-                last_updated: now,
+                last_seen_at: now,
                 online_since: None,
             }
         });
         entry.info = Some(info);
         entry.node_name = node_name;
-        entry.last_updated = now;
+        entry.last_seen_at = now;
     }
 
     /// Update a node's LSP relay endpoint from the retained
@@ -262,7 +265,7 @@ impl NodeRegistry {
         if payload.is_empty() {
             if let Some(entry) = self.nodes.get_mut(&node_id) {
                 entry.lsp_endpoint = None;
-                entry.last_updated = Instant::now();
+                entry.last_seen_at = Utc::now();
                 tracing::debug!(node_id = %node_id, "Node lsps cleared (retained empty)");
             }
             return;
@@ -289,7 +292,7 @@ impl NodeRegistry {
             None
         };
 
-        let now = Instant::now();
+        let now = Utc::now();
         let entry = self.nodes.entry(node_id.clone()).or_insert_with(|| {
             tracing::info!(node_id = %node_id, "Node discovered via lsps topic");
             NodeInfoState {
@@ -299,12 +302,12 @@ impl NodeRegistry {
                 lsp_endpoint: None,
                 node_name: None,
                 node_token: None,
-                last_updated: now,
+                last_seen_at: now,
                 online_since: None,
             }
         });
         entry.lsp_endpoint = endpoint;
-        entry.last_updated = now;
+        entry.last_seen_at = now;
         tracing::debug!(
             node_id = %node_id,
             endpoint = ?entry.lsp_endpoint,
@@ -334,6 +337,15 @@ impl NodeRegistry {
         self.nodes.values().filter(|n| n.online).count()
     }
 
+    /// Whether `node_id` is the Gateway's own-machine node, by anchor.
+    /// Unlike [`local_node_id`], this answers for an OFFLINE node too:
+    /// the anchor is launcher-local knowledge, not protocol state, and an
+    /// offline-but-anchored node is one the Gateway will bring back — so
+    /// deleting its record would be undone by the supervisor.
+    pub fn is_local_node(&self, node_id: &str) -> bool {
+        self.local_node_anchor.as_deref() == Some(node_id)
+    }
+
     /// Remove a node record (e.g. `nodes remove` CLI, Phase 2c, or
     /// the permanent-offline cleanup in `dispatch`).
     pub fn remove(&mut self, node_id: &str) {
@@ -344,7 +356,7 @@ impl NodeRegistry {
     /// Phase 5a). Creates the entry when the node was never seen via
     /// status/info topics (enroll may arrive first).
     pub fn set_node_token(&mut self, node_id: &str, token: String) {
-        let now = Instant::now();
+        let now = Utc::now();
         let entry = self.nodes.entry(node_id.to_string()).or_insert_with(|| {
             tracing::info!(node_id, "Node registered via enrollment");
             NodeInfoState {
@@ -354,12 +366,12 @@ impl NodeRegistry {
                 lsp_endpoint: None,
                 node_name: None,
                 node_token: None,
-                last_updated: now,
+                last_seen_at: now,
                 online_since: None,
             }
         });
         entry.node_token = Some(token);
-        entry.last_updated = now;
+        entry.last_seen_at = now;
     }
 }
 
@@ -390,7 +402,7 @@ pub fn new_shared_registry() -> SharedNodeRegistry {
 /// 2. **Same-hostname scan** — an online node whose reported
 ///    `NodeInfo.hostname` equals this machine's. Covers the first boot
 ///    after an upgrade (no anchor file yet) and a deleted anchor file.
-///    Multiple hits → newest `last_updated` wins (WARN).
+///    Multiple hits → newest `last_seen_at` wins (WARN).
 ///
 /// None → the launcher may decide to spawn a child; no caller may turn
 /// `None` into an install target.
@@ -418,7 +430,7 @@ pub async fn local_node_id(registry: &SharedNodeRegistry) -> Option<String> {
     if candidates.is_empty() {
         return None;
     }
-    candidates.sort_by_key(|n| n.last_updated);
+    candidates.sort_by_key(|n| n.last_seen_at);
     let best = candidates.pop().expect("non-empty");
     let resolved = best.node_id.clone();
     if !candidates.is_empty() {

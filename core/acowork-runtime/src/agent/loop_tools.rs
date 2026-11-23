@@ -1206,6 +1206,11 @@ impl AgentLoop {
         // This final flush captures any remaining content in the last
         // streaming line (e.g., the assistant text that preceded the
         // tool_call).
+        //
+        // ADR-022 §12: `flush_streaming_line` atomically drains the line's
+        // interleaved reasoning (as one `thought` record, after the
+        // assistant record) before the tool_call rows land — the shape the
+        // restorer folds into the tool-call assistant's `reasoning_content`.
         let flushed = self
             .session_core
             .flush_streaming_line(self.session.conversation.as_deref());

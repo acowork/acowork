@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useMemo, useCallback, Fragment } from "react";
 import { useAgentStore } from "../../stores/agentStore";
-import { usableNodesOf } from "../nodes/nodeAvailability";
+import { isStaleOfflineNode, usableNodesOf } from "../nodes/nodeAvailability";
 import { useChatStore } from "../../stores/chatStore";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -20,7 +20,7 @@ import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
 import { COUNT_BADGE_NEUTRAL_CN } from "../common/sidebarCountBadge";
 import { SIDEBAR_GROUP_BANNER_CN } from "../common/sidebarGroupBanner";
-import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server, Monitor, MessagesSquare, Smartphone } from "lucide-react";
+import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server, Monitor, MessagesSquare, Smartphone, Eye, EyeOff } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { invoke } from "@tauri-apps/api/core";
 import { isProcessing, instanceIdOf, type AgentInfo, type CloneResponse } from "../../lib/types";
@@ -580,12 +580,31 @@ export function AgentList({ width }: AgentListProps) {
   // buried under empty headers. Outside a search every node is listed, so
   // an empty node stays reachable (e.g. to install its first agent).
   const searching = searchQuery.trim().length > 0;
-  const visibleGroups = useMemo(() => {
-    return searching ? nodeGroups.filter((g) => g.agents.length > 0) : nodeGroups;
-  }, [nodeGroups, searching]);
+  // A node that has been silent past the display window is not a machine the
+  // user can act on, it is a leftover record — so it is hidden by default
+  // instead of sitting in the sidebar as a permanent "offline" row.
+  //
+  // Hidden, never removed: the count below stays on screen while the groups
+  // are not, because revealing them is the only way to reach a ghost node's
+  // settings dialog, and that dialog is where Delete lives. Hiding something
+  // must not silently make it undeletable.
+  const [showStaleNodes, setShowStaleNodes] = useState(false);
+  const { visibleGroups, staleNodeCount } = useMemo(() => {
+    const base = searching
+      ? nodeGroups.filter((g) => g.agents.length > 0)
+      : nodeGroups;
+    // A group with no `node` is the unknown-node bucket — it carries agents
+    // the Gateway could not place, so it is never a stale node and must
+    // never be hidden.
+    const isStaleGroup = (g: (typeof base)[number]) =>
+      g.node != null && isStaleOfflineNode(g.node);
+    return {
+      visibleGroups: showStaleNodes ? base : base.filter((g) => !isStaleGroup(g)),
+      staleNodeCount: base.filter(isStaleGroup).length,
+    };
+  }, [nodeGroups, searching, showStaleNodes]);
 
-  // `total` lets the row draw the divider correctly within each node group.
-  const renderAgentItem = (agent: AgentInfo, index: number, total: number) => {
+  const renderAgentItem = (agent: AgentInfo) => {
     // ADR-073: the sidebar row is an INSTANCE. `id` is the
     // canonical addressing key (instance_id, with legacy
     // agent_id fallback); `agent.agent_id` is display-only.
@@ -617,7 +636,6 @@ export function AgentList({ width }: AgentListProps) {
           selectedAgentId === id
             ? "bg-accent-strong/90 text-white"
             : listRowHover,
-          index < total - 1 && "row-divider-b"
         )}
         onClick={() => selectAgent(id)}
         onDoubleClick={() => {
@@ -674,7 +692,7 @@ export function AgentList({ width }: AgentListProps) {
                     renders its row name at `text-xs`, and the agent name was
                     the lone 14px outlier, so the chat column read as a
                     different scale from the rest of the nav. */}
-                <span className={cn("truncate font-medium text-xs", selectedAgentId === id ? "text-white" : agent.alive ? "text-text-secondary " : "text-text-tertiary ")}>{agent.name}</span>
+                <span className={cn("truncate font-medium text-xs", selectedAgentId === id ? "text-white" : agent.alive ? "text-text " : "text-text-secondary ")}>{agent.name}</span>
                 <span
                   title={busyAgentIds.has(id) && agent.alive ? t("agentList.dotBusy") : agent.alive ? t("agentList.dotOnline") : t("agentList.dotOffline")}
                   aria-label={busyAgentIds.has(id) && agent.alive ? t("agentList.dotBusy") : agent.alive ? t("agentList.dotOnline") : t("agentList.dotOffline")}
@@ -841,6 +859,13 @@ export function AgentList({ width }: AgentListProps) {
                         kind: "node",
                         id: group.nodeId,
                         name: nodeDisplayName(group),
+                        // The dialog offers Delete only for a node that is
+                        // offline (the Gateway refuses an online one with
+                        // 409) and only for a caller who can manage it.
+                        // `can_manage` absent = pre-087 Gateway → treat as
+                        // manageable, matching `canManage` above.
+                        online: group.node?.online,
+                        canManage: group.node?.can_manage,
                       })
                     }
                     permissionsLabel={t("agentList.nodePermissions")}
@@ -867,7 +892,7 @@ export function AgentList({ width }: AgentListProps) {
                       </button>
                     )}
                   {!collapsed &&
-                    group.agents.map((agent, index) => renderAgentItem(agent, index, group.agents.length))}
+                    group.agents.map((agent) => renderAgentItem(agent))}
                 </Fragment>
               );
             })}
@@ -876,6 +901,27 @@ export function AgentList({ width }: AgentListProps) {
           <div className="px-3 py-8 text-center text-xs text-text-tertiary ">
             {agentsList.length === 0 ? t("agentList.noAgentsInstalled") : t("agentList.noMatchingAgents")}
           </div>
+        )}
+
+        {/* The reveal for nodes hidden by the offline display window. */}
+        {!loading && staleNodeCount > 0 && (
+          <button
+            type="button"
+            data-testid="agent-list-toggle-stale-nodes"
+            onClick={() => setShowStaleNodes((v) => !v)}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-10 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary"
+          >
+            {showStaleNodes ? (
+              <EyeOff className="h-3.5 w-3.5 shrink-0" />
+            ) : (
+              <Eye className="h-3.5 w-3.5 shrink-0" />
+            )}
+            <span className="truncate">
+              {showStaleNodes
+                ? t("agentList.hideInactiveNodes", { count: staleNodeCount })
+                : t("agentList.showInactiveNodes", { count: staleNodeCount })}
+            </span>
+          </button>
         )}
 
         {/* Project group chats + user-created `user_group`s (design 27 §4.4,
@@ -908,7 +954,7 @@ export function AgentList({ width }: AgentListProps) {
                 <span className={cn("ml-auto", COUNT_BADGE_NEUTRAL_CN)}>{visibleGroupsChats.length}</span>
               </button>
             </div>
-            {!groupsCollapsed && visibleGroupsChats.map((g, index) => {
+            {!groupsCollapsed && visibleGroupsChats.map((g) => {
               const unread = selfUserId ? (g.unread?.[selfUserId] ?? 0) : 0;
               const active = activeGroupId === g.session_id;
               return (
@@ -929,7 +975,6 @@ export function AgentList({ width }: AgentListProps) {
                     "relative flex cursor-pointer items-center rounded-md px-3 py-2 transition-colors duration-150",
                     isCollapsed ? "gap-0" : "gap-3",
                     active ? "bg-accent-strong/90 text-white" : listRowHover,
-                    index < visibleGroupsChats.length - 1 && "row-divider-b",
                   )}
                 >
                   {/* Member composite at the agent / user 40px footprint —
@@ -952,7 +997,7 @@ export function AgentList({ width }: AgentListProps) {
                       <span
                         className={cn(
                           "truncate font-medium text-xs",
-                          active ? "text-white" : "text-text-secondary",
+                          active ? "text-white" : "text-text",
                         )}
                       >
                         {g.title || g.session_id.slice(0, 8)}
@@ -1135,6 +1180,15 @@ export function AgentList({ width }: AgentListProps) {
         // already correct — re-pull it so the group header above stops
         // rendering the old name.
         onRenamedNode={() => void useAgentStore.getState().fetchNodes()}
+        // A node delete is Gateway-side only, but it also drops the
+        // projection rows of the agents that were hosted on it, so both
+        // lists have to be re-pulled — otherwise the sidebar keeps showing
+        // agents on a machine the Gateway no longer knows about.
+        onNodeDeleted={() => {
+          void useAgentStore.getState().fetchNodes();
+          void useAgentStore.getState().fetchAgents();
+          addToast({ type: "success", message: t("agentList.nodeDeleted") });
+        }}
       />
 
       {/* Clone dialog */}

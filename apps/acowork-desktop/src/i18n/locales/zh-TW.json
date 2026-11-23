@@ -503,7 +503,12 @@
     "contextPermissions": "權限",
     "nodePermissions": "節點權限",
     "noAccess": "無存取權限",
-    "projectGroupsBanner": "專案群組"
+    "projectGroupsBanner": "專案群組",
+    "showInactiveNodes_one": "顯示 {{count}} 個不活躍節點",
+    "showInactiveNodes_other": "顯示 {{count}} 個不活躍節點",
+    "hideInactiveNodes_one": "隱藏 {{count}} 個不活躍節點",
+    "hideInactiveNodes_other": "隱藏 {{count}} 個不活躍節點",
+    "nodeDeleted": "已從本网關移除該節點"
   },
   "cloneDialog": {
     "skeleton": "骨架",
@@ -1068,6 +1073,10 @@
     },
     "copy": "複製",
     "previewBadge": "預覽",
+    "openPreview": "預覽",
+    "visualCanvas": {
+      "open": "開啟畫布"
+    },
     "showSource": "顯示原始碼",
     "previewLoading": "頁面載入中",
     "previewDoubleClickHint": "雙擊切換到編輯器",
@@ -2158,7 +2167,12 @@
     "claiming": "認領中…",
     "claimOwnerHint": "該{{kind}}無歸屬，因此僅你可管理，且暫時無法設為{{pub}}。認領歸屬後即可調整可見性。",
     "agent": "Agent",
-    "node": "節點"
+    "node": "節點",
+    "deleteNode": "刪除",
+    "deleteTitle": "刪除該節點？",
+    "deleteConfirm": "將從本网關移除 {{name}}，並吊銷它的存取憑證。裝置上的內容不會被解除安裝——這裡顯示的 agent 只是裝置自行回報的記錄。它若重新上線必須重新註冊，屆時它真實安裝的 agent 會重新出現。",
+    "deleteConfirmLabel": "刪除節點",
+    "deleteFailed": "刪除節點失敗"
   },
   "groupChat": {
     "members": "{{count}} 名成員",
@@ -2268,6 +2282,8 @@
     "update": "更新",
     "openRepo": "開啟儲存庫",
     "repository": "儲存庫",
+    "homepage": "首頁",
+    "upstream": "上游專案",
     "noReadme": "此應用尚無說明文件。",
     "selectHint": "選擇一個應用以檢視詳細資料。"
   },
@@ -2277,5 +2293,14 @@
     "openFailed": "無法開啟 {{filename}}",
     "imageAlt": "{{filename}} 的縮圖",
     "size": "{{size}}"
+  },
+  "saveAs": {
+    "title": "另存新檔",
+    "location": "位置",
+    "folder": "資料夾",
+    "root": "工作區根目錄",
+    "noSubfolders": "沒有子資料夾",
+    "name": "檔案名稱",
+    "save": "儲存"
   }
 }

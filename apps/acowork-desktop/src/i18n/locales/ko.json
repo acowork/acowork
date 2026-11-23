@@ -503,7 +503,12 @@
     "contextPermissions": "권한",
     "nodePermissions": "노드 권한",
     "noAccess": "접근 권한 없음",
-    "projectGroupsBanner": "프로젝트 그룹"
+    "projectGroupsBanner": "프로젝트 그룹",
+    "showInactiveNodes_one": "비활성 노드 {{count}}개 표시",
+    "showInactiveNodes_other": "비활성 노드 {{count}}개 표시",
+    "hideInactiveNodes_one": "비활성 노드 {{count}}개 숨기기",
+    "hideInactiveNodes_other": "비활성 노드 {{count}}개 숨기기",
+    "nodeDeleted": "이 Gateway에서 노드를 제거했습니다"
   },
   "cloneDialog": {
     "skeleton": "스켈레톤",
@@ -1079,6 +1084,10 @@
     },
     "copy": "Copy",
     "previewBadge": "미리보기",
+    "openPreview": "미리보기",
+    "visualCanvas": {
+      "open": "캔버스 열기"
+    },
     "showSource": "소스 보기",
     "previewLoading": "페이지 로드 중",
     "previewDoubleClickHint": "더블클릭하여 에디터에서 열기",
@@ -2168,7 +2177,12 @@
     "claiming": "처리 중…",
     "claimOwnerHint": "이 {{kind}}에는 소유자가 없어 관리할 수 있는 사람은 당신뿐이며 아직 {{pub}}(으)로 설정할 수 없습니다. 소유권을 주장하면 공개 범위를 변경할 수 있습니다.",
     "agent": "에이전트",
-    "node": "노드"
+    "node": "노드",
+    "deleteNode": "삭제",
+    "deleteTitle": "이 노드를 삭제할까요?",
+    "deleteConfirm": "{{name}}을(를) 이 Gateway에서 제거하고 접근 자격 증명을 폐기합니다. 기기 자체의 앱은 제거되지 않습니다. 여기에 표시되는 에이전트는 기기가 스스로 보고한 기록일 뿐이며, 기기가 복귀하려면 다시 등록해야 하고 실제로 설치된 에이전트는 다시 표시됩니다.",
+    "deleteConfirmLabel": "노드 삭제",
+    "deleteFailed": "노드 삭제에 실패했습니다"
   },
   "groupChat": {
     "members": "멤버 {{count}}명",
@@ -2278,6 +2292,8 @@
     "update": "업데이트",
     "openRepo": "저장소 열기",
     "repository": "저장소",
+    "homepage": "홈페이지",
+    "upstream": "업스트림",
     "noReadme": "README가 없습니다.",
     "selectHint": "앱을 선택해 세부 정보를 보세요."
   },
@@ -2287,5 +2303,14 @@
     "openFailed": "{{filename}}을(를) 열 수 없습니다",
     "imageAlt": "{{filename}} 썸네일",
     "size": "{{size}}"
+  },
+  "saveAs": {
+    "title": "다른 이름으로 저장",
+    "location": "위치",
+    "folder": "폴더",
+    "root": "워크스페이스 루트",
+    "noSubfolders": "하위 폴더 없음",
+    "name": "파일 이름",
+    "save": "저장"
   }
 }
