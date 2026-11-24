@@ -76,6 +76,7 @@ pub mod lsp;
 pub mod manifest;
 pub mod memory;
 pub mod message_ref;
+pub mod model_caps;
 pub mod node;
 pub mod operation;
 pub mod packaging;
@@ -109,6 +110,7 @@ pub use manifest::{
     SkillsConfig, ToolDeclaration,
 };
 pub use message_ref::{MessageRef, REF_KIND_CHAT_BACKGROUND, REF_KIND_REFERENCED_ROUND};
+pub use model_caps::{DEFAULT_MAX_OUTPUT_TOKENS_LIMIT, ModelCatalog};
 pub use protocol::{
     ConversationEntryDto, GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, ModelCostInfo,
     ModelModalities, ProtocolType, SessionInfoDto, SessionStatusDto,

@@ -2690,8 +2690,8 @@ pub fn build_context_usage_from_persisted(
 ///     UI with non-empty counters before the first LLM call)
 ///
 /// All three previously called, in order:
-///   1. `AgentCore::get_model_capabilities(model_name)`
-///   2. `AgentCore::max_output_tokens_limit_for_model(model_name)`
+///   1. `AgentCore::model_caps(model_name, provider)`
+///   2. `AgentCore::max_output_tokens_limit(model_name, provider)`
 ///   3. `session_config::resolve_effective_context_window(...)`
 ///   4. `build_context_usage_from_persisted(...)`
 ///   5. `patch_agent_totals(&mut ctx, core.agent_token_totals())`
@@ -2725,8 +2725,11 @@ pub(crate) fn build_persisted_ctx_usage(
 ) -> Option<acowork_core::protocol::ContextUsageInfo> {
     let persisted = conv.tokens()?;
     let model_name = conv.model().unwrap_or_else(|| "unknown".to_string());
-    let caps = core.get_model_capabilities(&model_name)?;
-    let max_output = core.max_output_tokens_limit_for_model(&model_name);
+    // The session's provider names WHICH provider's row to read: the same
+    // model id can be served by several providers with different windows.
+    let provider = conv.provider();
+    let caps = core.model_caps(&model_name, provider.as_deref())?;
+    let max_output = core.max_output_tokens_limit(&model_name, provider.as_deref());
     let resolved = crate::agent::session_config::resolve_effective_context_window(
         conv.context_window(),
         core.context_window_override,

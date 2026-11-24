@@ -1284,7 +1284,7 @@ impl SessionTask {
                                 .session
                                 .model
                                 .as_deref()
-                                .and_then(|m| agent_loop.get_model_capabilities(m));
+                                .and_then(|m| agent_loop.model_caps(m));
                             // Two derivations, one failure surface: an
                             // attachment the runtime cannot read stops the turn
                             // whichever channel it belonged to.
@@ -1763,7 +1763,7 @@ impl SessionTask {
                                 .session
                                 .model
                                 .as_deref()
-                                .and_then(|m| agent_loop.get_model_capabilities(m));
+                                .and_then(|m| agent_loop.model_caps(m));
                             match (
                                 crate::agent::attachment_to_document::derive_document_parts(
                                     agent_loop.core.attachment_service(),

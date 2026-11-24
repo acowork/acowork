@@ -274,7 +274,7 @@ impl AgentLoop {
     pub(crate) fn context_trim_budget(&self, model_name: &str) -> u64 {
         let resolved = self.resolved_effective_context_window(model_name);
         self.core
-            .context_trim_budget_with(Some(resolved), model_name)
+            .context_trim_budget_with(Some(resolved), model_name, self.current_provider())
     }
 
     /// ADR-074: resolve this session's effective context window through the
@@ -284,7 +284,7 @@ impl AgentLoop {
     /// agent-layer changes always reach sessions without an override.
     fn resolved_effective_context_window(&self, model_name: &str) -> u64 {
         let session_override = self.session.conversation().and_then(|c| c.context_window());
-        let caps = self.core.get_model_capabilities(model_name);
+        let caps = self.model_caps(model_name);
         crate::agent::session_config::resolve_effective_context_window(
             session_override,
             self.core.context_window_override,
@@ -312,16 +312,18 @@ impl AgentLoop {
         &self,
         model_name: &str,
     ) -> Option<(acowork_core::protocol::ModelCapabilitiesInfo, u64, u64)> {
-        let caps = self.core.get_model_capabilities(model_name)?;
+        let caps = self.model_caps(model_name)?;
         // Display window follows the SAME ADR-074 resolution chain as the
         // trim budget (session meta → agent_config → manifest →
         // DEFAULT_CONTEXT_WINDOW → min(model window)), so the frontend
         // shows the session-effective "context length" (e.g. 96K) instead
         // of the model's raw window (1M) when a cap is configured.
         let effective_window = self.resolved_effective_context_window(model_name);
-        let effective_usable = self
-            .core
-            .context_trim_budget_with(Some(effective_window), model_name);
+        let effective_usable = self.core.context_trim_budget_with(
+            Some(effective_window),
+            model_name,
+            self.current_provider(),
+        );
         Some((caps, effective_window, effective_usable))
     }
 
@@ -429,7 +431,7 @@ impl AgentLoop {
                 );
                 continue;
             }
-            if let Some(cap) = self.core.get_model_capabilities(mid) {
+            if let Some(cap) = self.core.model_caps(mid, Some(pid)) {
                 if cap.context_window < estimated_tokens {
                     tracing::warn!(
                         provider_id = %pid,
@@ -475,7 +477,7 @@ impl AgentLoop {
                 .get(&session_pid)
                 .and_then(|cm| cm.clone())
         {
-            if let Some(cap) = self.core.get_model_capabilities(&compact) {
+            if let Some(cap) = self.core.model_caps(&compact, Some(&session_pid)) {
                 if cap.context_window < estimated_tokens {
                     tracing::warn!(
                         provider_id = %session_pid,
@@ -986,7 +988,8 @@ impl AgentLoop {
                         } else {
                             Some(resolved_distill.provider_id.clone())
                         };
-                        let compact_caps = self.get_model_capabilities(&compact_model);
+                        let compact_caps =
+                            self.core.model_caps(&compact_model, provider_id.as_deref());
                         conversation.accumulate_compaction_usage(
                             &usage,
                             &crate::conversation::ModelUsageAttribution {
@@ -1571,8 +1574,8 @@ impl AgentLoop {
     ) -> acowork_core::providers::traits::ChatRequest {
         // ADR-060 v2: `set_todo_context` removed — todo state is carried by the
         // most recent real `todo_write` tool result in Block B history.
-        let caps = self.get_model_capabilities(current_model);
-        let max_output_limit = self.core.max_output_tokens_limit_for_model(current_model);
+        let caps = self.model_caps(current_model);
+        let max_output_limit = self.max_output_tokens_limit(current_model);
 
         // Resolve reasoning_effort: read from per-session state (initialized from
         // the three-level priority chain in build_initial_session_state).
@@ -1849,8 +1852,8 @@ impl AgentLoop {
             }
 
             // Compute and emit context usage report
-            let model_caps = self.get_model_capabilities(current_model);
-            let max_output_limit = self.core.max_output_tokens_limit_for_model(current_model);
+            let model_caps = self.model_caps(current_model);
+            let max_output_limit = self.max_output_tokens_limit(current_model);
             tracing::debug!(
                 has_chunk_tx = self.session_core.chunk_tx.is_some(),
                 has_model_caps = model_caps.is_some(),
@@ -2429,6 +2432,82 @@ mod tests {
         }
     }
 
+    /// One provider serving `model` with the given INPUT modalities.
+    ///
+    /// Built for the multi-provider capability tests below: the same model id
+    /// under two providers is exactly the shape that used to shadow a
+    /// user-configured capability (2026-11-23).
+    fn provider_serving(
+        provider_id: &str,
+        model: &str,
+        input_modalities: &[&str],
+    ) -> ProviderListItem {
+        let mut caps = caps(128_000);
+        caps.modalities = Some(acowork_core::protocol::ModelModalities {
+            input: input_modalities.iter().map(|s| s.to_string()).collect(),
+            output: vec!["text".to_string()],
+        });
+        ProviderListItem {
+            id: provider_id.to_string(),
+            base_url: "https://example.invalid/v1".to_string(),
+            protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
+            compact_model: None,
+            custom: true,
+            models: vec![ProviderModelEntry {
+                id: model.to_string(),
+                capabilities: caps,
+                max_output_tokens_limit: 32_768,
+                protocol_type: None,
+                base_url: None,
+                protocol_probe: None,
+            }],
+        }
+    }
+
+    /// Regression test for the 2026-11-23 report: one model id under two
+    /// custom providers, the text-only one indexed first. The session runs on
+    /// the vision-capable provider, so `image_read`'s gate must open — the old
+    /// provider-blind lookup read the first row and refused.
+    ///
+    /// This is the symptom-level half of
+    /// `acowork_core::model_caps`'s unit test: that one proves the index
+    /// resolves per provider, this one proves the loop asks it with the
+    /// session's provider.
+    #[test]
+    fn image_capability_follows_the_sessions_provider_not_list_order() {
+        let mut loop_ = build_loop();
+        loop_.core.set_provider_list(vec![
+            provider_serving("custom-relay", "deepseek-v4.1-flash-1017", &["text"]),
+            provider_serving(
+                "custom-direct",
+                "deepseek-v4.1-flash-1017",
+                &["text", "image"],
+            ),
+        ]);
+        loop_.session.provider = Some("custom-direct".to_string());
+
+        let caps = loop_
+            .model_caps("deepseek-v4.1-flash-1017")
+            .expect("the session's provider serves the model");
+        assert!(
+            crate::agent::attachment_to_image::model_accepts_image(Some(&caps)),
+            "a session on the vision-capable provider must be able to read images"
+        );
+
+        // Same loop, session pinned to the text-only provider: the gate must
+        // close, proving the answer follows the provider rather than the model
+        // id (and that the test is not passing because everything reads as
+        // vision-capable).
+        loop_.session.provider = Some("custom-relay".to_string());
+        let caps = loop_
+            .model_caps("deepseek-v4.1-flash-1017")
+            .expect("the relay also serves the model");
+        assert!(
+            !crate::agent::attachment_to_image::model_accepts_image(Some(&caps)),
+            "the text-only provider's row must not borrow the other provider's modality"
+        );
+    }
+
     /// A model whose declared support set is `low`/`high`/`max` (the
     /// DeepSeek-style shape) must never receive `medium`: the level is
     /// clamped down to `low` on the wire.
@@ -2436,8 +2515,7 @@ mod tests {
     fn build_chat_request_clamps_the_effort_into_the_declared_support_set() {
         let mut loop_ = build_loop();
         {
-            let mut list = loop_.core.global_provider_list.write().unwrap();
-            *list = vec![ProviderListItem {
+            let list = vec![ProviderListItem {
                 id: "deepseek".to_string(),
                 base_url: "https://api.deepseek.com/v1".to_string(),
                 protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
@@ -2459,6 +2537,7 @@ mod tests {
                     protocol_probe: None,
                 }],
             }];
+            loop_.core.set_provider_list(list);
         }
         loop_.session.set_reasoning_effort(Some(
             acowork_core::providers::traits::ReasoningEffort::Medium,
@@ -2521,8 +2600,7 @@ mod tests {
     /// Ollama needs no key. `is_compact_provider_available` must
     /// accept it via the local base_url branch (ADR-056 §2.3).
     fn seed_providers(loop_: &AgentLoop) {
-        let mut list = loop_.core.global_provider_list.write().unwrap();
-        *list = vec![
+        let list = vec![
             ProviderListItem {
                 id: "deepseek".to_string(),
                 base_url: "https://api.deepseek.com/v1".to_string(),
@@ -2574,7 +2652,7 @@ mod tests {
                 ],
             },
         ];
-        drop(list);
+        loop_.core.set_provider_list(list);
 
         // Only the cloud provider (deepseek) gets a key; ollama-local stays
         // keyless (local provider, no key required).

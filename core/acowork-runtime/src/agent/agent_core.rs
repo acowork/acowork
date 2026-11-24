@@ -95,7 +95,25 @@ pub struct AgentCore {
     pub(crate) all_tools: Vec<Arc<dyn Tool>>,
     /// Global provider list — full metadata including models, capabilities,
     /// base_url, protocol_type, compact_model for all configured providers.
+    ///
+    /// Read freely (routing, fallback), but **write it only through
+    /// [`Self::set_provider_list`]**: the derived [`Self::model_catalog`] must
+    /// be rebuilt in the same step, or capability lookups answer from a stale
+    /// index.
     pub(crate) global_provider_list: Arc<RwLock<Vec<ProviderListItem>>>,
+    /// The single capability index derived from
+    /// [`Self::global_provider_list`] — see [`acowork_core::model_caps`] for
+    /// why lookups are provider-aware.
+    ///
+    /// Shared through the same `Arc<RwLock<...>>` pattern as the list itself
+    /// (ADR-063 §3.7.5): every session's deep-cloned `AgentCore` sees a
+    /// provider-list update on its next lookup, with no per-session rebuild.
+    /// Rebuilt only by [`Self::set_provider_list`].
+    /// The inner `Arc` is what keeps the read lock off the diagnostic path:
+    /// a lookup clones it and releases the guard immediately, so the miss-path
+    /// `warn!` below never formats while holding the lock against
+    /// [`Self::set_provider_list`].
+    pub(crate) model_catalog: Arc<RwLock<Arc<acowork_core::model_caps::ModelCatalog>>>,
     /// Provider list version for diff sync with Gateway.
     ///
     /// Shared via `Arc<RwLock<...>>` for the same reason as
@@ -493,6 +511,9 @@ impl AgentCore {
             mcp_tools: None,
             all_tools: initial_all_tools,
             global_provider_list: Arc::new(RwLock::new(Vec::new())),
+            model_catalog: Arc::new(RwLock::new(Arc::new(
+                acowork_core::model_caps::ModelCatalog::default(),
+            ))),
             provider_list_version: Arc::new(RwLock::new(0)),
             provider_key_vault: Arc::new(RwLock::new(HashMap::new())),
             model_health: Arc::new(crate::agent::model_fallback::ModelHealthRegistry::new()),
@@ -774,27 +795,93 @@ impl AgentCore {
         )
     }
 
-    pub fn gateway_model_capabilities(&self) -> HashMap<String, ModelCapabilitiesInfo> {
-        let list = self.global_provider_list.read().unwrap();
-        let mut map = HashMap::new();
-        for provider in list.iter() {
-            for model in &provider.models {
-                map.insert(model.id.clone(), model.capabilities.clone());
-            }
+    /// Replace the provider list and rebuild the capability index in one step.
+    ///
+    /// THE write entry point for [`Self::global_provider_list`]. Keeping the
+    /// index derived here is what makes `caps(model, provider)` unable to go
+    /// stale — a caller that writes the list behind this method's back leaves
+    /// the index answering from the previous provider set.
+    pub(crate) fn set_provider_list(&self, list: Vec<ProviderListItem>) {
+        let catalog = acowork_core::model_caps::ModelCatalog::build(&list);
+
+        // Ambiguous ids (one model under several providers) are a
+        // configuration the operator should see: a lookup without a provider
+        // resolves them to the first provider in list order, so the other
+        // rows' capabilities are unreachable without one. Warned here, once
+        // per provider-list update, rather than per turn in the lookup.
+        for (model, providers) in catalog.ambiguous_models() {
+            tracing::warn!(
+                model = %model,
+                providers = ?providers,
+                "Model id served by more than one provider — a provider-less \
+                 capability lookup uses the first in list order"
+            );
         }
-        map
+        if catalog.is_empty() {
+            tracing::debug!("Model capability index rebuilt: empty provider list");
+        }
+
+        *self.model_catalog.write().unwrap() = Arc::new(catalog);
+        *self.global_provider_list.write().unwrap() = list;
     }
 
-    pub fn max_output_tokens_limit_for_model(&self, model_id: &str) -> u64 {
-        let list = self.global_provider_list.read().unwrap();
-        for provider in list.iter() {
-            for model in &provider.models {
-                if model.id == model_id {
-                    return model.max_output_tokens_limit;
-                }
-            }
+    /// Capabilities for `model`, resolved under `provider`.
+    ///
+    /// The ONE capability lookup: pass the session's provider (or the explicit
+    /// provider a candidate was resolved from) whenever it is known. `None`
+    /// means "no provider context" and resolves by
+    /// [`acowork_core::model_caps::ModelCatalog`] rule 2.
+    ///
+    /// Returns an owned clone: callers hold it across awaits and locks.
+    pub(crate) fn model_caps(
+        &self,
+        model: &str,
+        provider: Option<&str>,
+    ) -> Option<ModelCapabilitiesInfo> {
+        let catalog = Arc::clone(&self.model_catalog.read().unwrap());
+        let caps = catalog.caps(model, provider).cloned();
+        if caps.is_none() && !catalog.is_empty() {
+            let available = catalog.model_ids();
+            tracing::warn!(
+                model = %model,
+                provider = ?provider,
+                available = ?available,
+                "Model capabilities not found for '{}'",
+                model
+            );
         }
-        16_384
+        caps
+    }
+
+    /// Output-token cap for `model`, resolved under `provider` exactly like
+    /// [`Self::model_caps`].
+    pub(crate) fn max_output_tokens_limit(&self, model: &str, provider: Option<&str>) -> u64 {
+        let catalog = Arc::clone(&self.model_catalog.read().unwrap());
+        catalog.max_output_tokens_limit(model, provider)
+    }
+
+    /// The provider whose entry [`Self::model_caps`] resolved to, under the
+    /// same rules — so a caller needing the provider id and a caller needing
+    /// the capabilities can never name different rows.
+    pub(crate) fn resolved_provider(&self, model: &str, provider: Option<&str>) -> Option<String> {
+        self.model_catalog
+            .read()
+            .unwrap()
+            .resolved_provider(model, provider)
+            .map(str::to_string)
+    }
+
+    /// Every provider serving `model`, in provider-list order.
+    ///
+    /// The set-shaped counterpart of [`Self::model_caps`], for routing and
+    /// fallback, which need candidates rather than one answer.
+    pub(crate) fn serving_providers(&self, model: &str) -> Vec<String> {
+        let catalog = Arc::clone(&self.model_catalog.read().unwrap());
+        catalog
+            .serving_providers(model)
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     }
 
     pub fn update_provider(&mut self, new_provider: Arc<dyn Provider>, model: String) {
@@ -864,44 +951,23 @@ impl AgentCore {
         );
     }
 
-    pub fn update_gateway_model_capabilities(
-        &mut self,
-        model_id: &str,
-        caps: ModelCapabilitiesInfo,
-    ) {
-        tracing::info!(
-            model = %model_id,
-            context_window = caps.context_window,
-            max_output_tokens = caps.max_output_tokens,
-            supports_tool_calling = caps.supports_tool_calling,
-            supports_reasoning = ?caps.supports_reasoning,
-            cost = ?caps.cost.as_ref().map(|c| (c.input_per_million, c.output_per_million)),
-            caps_name = ?caps.name,
-            source = "gateway",
-            "AgentCore received model capabilities from Gateway"
-        );
-        let mut list = self.global_provider_list.write().unwrap();
-        for provider in list.iter_mut() {
-            for model in provider.models.iter_mut() {
-                if model.id == model_id {
-                    model.capabilities = caps;
-                    return;
-                }
-            }
-        }
-    }
-
     pub fn update_max_output_tokens_limit(&mut self, limit: u64) {
         tracing::info!(
             new_limit = limit,
             "AgentCore max_output_tokens_limit updated from Gateway (all models)"
         );
-        let mut list = self.global_provider_list.write().unwrap();
-        for provider in list.iter_mut() {
-            for model in provider.models.iter_mut() {
-                model.max_output_tokens_limit = limit;
+        // Rewrite through `set_provider_list`: the index caches each entry's
+        // limit, so a bare in-place edit would keep answering with the old one.
+        let list = {
+            let mut list = self.global_provider_list.read().unwrap().clone();
+            for provider in list.iter_mut() {
+                for model in provider.models.iter_mut() {
+                    model.max_output_tokens_limit = limit;
+                }
             }
-        }
+            list.clone()
+        };
+        self.set_provider_list(list);
     }
 
     pub fn apply_runtime_config(&mut self, overrides: &RuntimeConfigOverrides) {
@@ -1096,7 +1162,7 @@ impl AgentCore {
                 );
                 continue;
             }
-            if self.get_model_capabilities(&mid).is_none() {
+            if self.model_caps(&mid, Some(&pid)).is_none() {
                 tracing::debug!(
                     provider_id = %pid,
                     model_id = %mid,
@@ -1233,25 +1299,6 @@ impl AgentCore {
         Some(Arc::new(crate::providers::reliable::ReliableProvider::new(
             raw, retry_config,
         )))
-    }
-
-    pub(crate) fn get_model_capabilities(&self, model_name: &str) -> Option<ModelCapabilitiesInfo> {
-        let list = self.global_provider_list.read().unwrap();
-        for provider in list.iter() {
-            for model in &provider.models {
-                if model.id == model_name {
-                    return Some(model.capabilities.clone());
-                }
-            }
-        }
-        if !list.is_empty() {
-            let available: Vec<&str> = list
-                .iter()
-                .flat_map(|p| p.models.iter().map(|m| m.id.as_str()))
-                .collect();
-            tracing::warn!(model = %model_name, available = ?available, "Model capabilities not found for '{}'", model_name);
-        }
-        None
     }
 
     pub fn get_provider(&self, provider_id: &str) -> Option<ProviderListItem> {
@@ -1394,15 +1441,15 @@ impl AgentCore {
         {
             other_providers.push(dp.to_string());
         }
-        for entry in self.global_provider_list.read().unwrap().iter() {
-            if Some(entry.id.as_str()) == failed.provider.as_deref()
-                || other_providers.iter().any(|p| p == &entry.id)
+        // Same set the index answers for any other caller, in provider-list
+        // order — a second hand-rolled walk here is how ordering rules drift.
+        for pid in self.serving_providers(&default_model) {
+            if Some(pid.as_str()) == failed.provider.as_deref()
+                || other_providers.iter().any(|p| p == &pid)
             {
                 continue;
             }
-            if entry.models.iter().any(|m| m.id == default_model) {
-                other_providers.push(entry.id.clone());
-            }
+            other_providers.push(pid);
         }
         for pid in other_providers {
             for account in accounts_of(&pid) {
@@ -1594,10 +1641,15 @@ impl AgentCore {
     /// 250K (the pre-fix behaviour, where the reserve was swallowed by the
     /// cap). `0` is no longer a legal "no limit" sentinel (ADR-074 §6); the
     /// resolution chain never emits it, and `None` here is only defensive.
-    pub fn context_trim_budget_with(&self, resolved_cap: Option<u64>, model_name: &str) -> u64 {
-        let max_output_limit = self.max_output_tokens_limit_for_model(model_name);
+    pub fn context_trim_budget_with(
+        &self,
+        resolved_cap: Option<u64>,
+        model_name: &str,
+        provider: Option<&str>,
+    ) -> u64 {
+        let max_output_limit = self.max_output_tokens_limit(model_name, provider);
 
-        self.get_model_capabilities(model_name)
+        self.model_caps(model_name, provider)
             .map(|caps| {
                 let effective = caps.input_budget_with_cap(resolved_cap, max_output_limit);
                 tracing::debug!(
@@ -1639,6 +1691,7 @@ impl Clone for AgentCore {
             mcp_tools: self.mcp_tools.clone(),
             all_tools: self.all_tools.clone(),
             global_provider_list: self.global_provider_list.clone(),
+            model_catalog: Arc::clone(&self.model_catalog),
             provider_list_version: Arc::clone(&self.provider_list_version),
             provider_key_vault: self.provider_key_vault.clone(),
             model_health: Arc::clone(&self.model_health),
@@ -1798,8 +1851,7 @@ mod tests {
                 compact_model: None,
                 custom: false,
             };
-            let mut list = core.global_provider_list.write().unwrap();
-            *list = vec![model];
+            core.set_provider_list(vec![model]);
         }
         core
     }
@@ -1829,14 +1881,14 @@ mod tests {
     /// compute the trim budget. `session_override` lets tests exercise
     /// the per-session Layer 0 without constructing a ConversationSession.
     fn resolved_trim_budget(core: &AgentCore, model: &str, session_override: Option<u64>) -> u64 {
-        let caps = core.get_model_capabilities(model);
+        let caps = core.model_caps(model, None);
         let resolved = crate::agent::session_config::resolve_effective_context_window(
             session_override,
             core.context_window_override,
             core.manifest_context_window,
             caps.as_ref(),
         );
-        core.context_trim_budget_with(Some(resolved), model)
+        core.context_trim_budget_with(Some(resolved), model, None)
     }
 
     // ── Resolution chain tests ──────────────────────────────────────
@@ -2049,7 +2101,7 @@ mod tests {
             Some(test_model_caps(128_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget_with(Some(1), "test-model");
+        let budget = core.context_trim_budget_with(Some(1), "test-model", None);
         assert_eq!(budget, 0);
     }
 
@@ -2077,12 +2129,13 @@ mod tests {
         );
         // Override max_output_tokens_limit for the model to 8K
         {
-            let mut list = core.global_provider_list.write().unwrap();
+            let mut list = core.global_provider_list.read().unwrap().clone();
             for p in list.iter_mut() {
                 for m in p.models.iter_mut() {
                     m.max_output_tokens_limit = 8_192;
                 }
             }
+            core.set_provider_list(list);
         }
         let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 91_808);
@@ -2514,10 +2567,10 @@ mod tests {
             compact_model: None,
             custom: false,
         };
-        *core.global_provider_list.write().unwrap() = vec![
+        core.set_provider_list(vec![
             entry("ark", &["doubao-pro"]),
             entry("openai", &["gpt-4o"]),
-        ];
+        ]);
         {
             let mut vault = core.provider_key_vault.write().unwrap();
             vault.insert(
@@ -2602,10 +2655,11 @@ mod tests {
         let core = core_with_inventory(dir.path());
         // Make ark serve the agent default too.
         {
-            let mut list = core.global_provider_list.write().unwrap();
+            let mut list = core.global_provider_list.read().unwrap().clone();
             let mut entry = list[0].models[0].clone();
             entry.id = "gpt-4o".to_string();
             list[0].models.push(entry);
+            core.set_provider_list(list);
         }
 
         let failed = crate::agent::model_fallback::ModelRef::new(
@@ -3080,7 +3134,7 @@ mod tests {
             compact_model: None,
             custom: false,
         };
-        *core.global_provider_list.write().unwrap() = vec![list_item];
+        core.set_provider_list(vec![list_item]);
         core
     }
 

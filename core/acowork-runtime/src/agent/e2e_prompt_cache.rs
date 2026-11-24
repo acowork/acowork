@@ -381,10 +381,8 @@ async fn spawn_harness(
     // Register the test model with capabilities — in production this data
     // arrives via the Gateway `AgentHelloResult` push; the loop's
     // context-usage reporting requires it before emitting a response.
-    core.global_provider_list
-        .write()
-        .unwrap()
-        .push(ProviderListItem {
+    let mut providers = core.global_provider_list.read().unwrap().clone();
+    providers.push(ProviderListItem {
             id: "test-provider".to_string(),
             base_url: "http://127.0.0.1:0".to_string(),
             protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
@@ -415,6 +413,7 @@ async fn spawn_harness(
             compact_model: None,
             custom: false,
         });
+    core.set_provider_list(providers);
 
     let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(64);
     let mut sm = SessionManager::new(

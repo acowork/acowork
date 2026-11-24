@@ -146,7 +146,9 @@ impl AgentLoop {
                 // delivery verdict: `image_read` must refuse exactly when the
                 // model cannot take the pixels it would put in the request.
                 let supports_image_input = crate::agent::attachment_to_image::model_accepts_image(
-                    self.core.get_model_capabilities(&model).as_ref(),
+                    self.core
+                        .model_caps(&model, self.current_provider())
+                        .as_ref(),
                 );
                 let image_read_budget = self.image_read_budget.clone();
                 // Per-call sink: each tool call declares into its own list so the

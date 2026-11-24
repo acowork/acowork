@@ -168,6 +168,7 @@ mod tests {
             chat_attachment_ids: Vec::new(),
             chat_row_id: String::new(),
             aware_users: Vec::new(),
+            interrupt: None,
         }
     }
 

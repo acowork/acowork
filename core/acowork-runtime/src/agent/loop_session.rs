@@ -136,8 +136,8 @@ impl super::loop_::AgentLoop {
         let context_usage = self.session.conversation.as_ref().and_then(|conv| {
             let persisted = conv.tokens()?;
             let model_name = self.session.model().unwrap_or("unknown");
-            let caps = self.core.get_model_capabilities(model_name)?;
-            let max_output = self.core.max_output_tokens_limit_for_model(model_name);
+            let caps = self.model_caps(model_name)?;
+            let max_output = self.max_output_tokens_limit(model_name);
             // Prefer the live in-memory history token count over the
             // persisted snapshot. `restore_anchor` has already seeded
             // `history` from `persisted.last_input`, so at cold start the two
@@ -226,7 +226,7 @@ impl super::loop_::AgentLoop {
                 .and_then(|c| c.tokens())
                 .is_some();
             let model_for_caps = self.session.model().unwrap_or("unknown");
-            let has_caps = self.core.get_model_capabilities(model_for_caps).is_some();
+            let has_caps = self.model_caps(model_for_caps).is_some();
             tracing::warn!(
                 session_id = %self.session_core.session_id.as_deref().unwrap_or("?"),
                 has_conv,

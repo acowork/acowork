@@ -1075,6 +1075,72 @@ run_deliverables_coupling_redline() {
     echo "Deliverables decoupling red line: OK"
 }
 
+run_model_caps_redline() {
+    echo "Checking model-capability single-entry red line..."
+    local root="$SCRIPT_DIR/.."
+    local catalog="$root/core/acowork-core/src/model_caps.rs"
+    if [ ! -f "$catalog" ]; then
+        echo "ERROR: the model-capability red line points at a file that no longer exists:"
+        echo "  $catalog"
+        echo "Every capability answer must come out of that index — a guard over a"
+        echo "missing file passes vacuously."
+        exit 1
+    fi
+
+    # 1. ONE writer for the provider list.
+    #
+    # `AgentCore::set_provider_list` replaces the list AND rebuilds the derived
+    # `ModelCatalog` in one step. Any second write path — including a `.push()`
+    # on the guard — leaves the index answering from the previous provider set,
+    # which is precisely the bug this red line exists to prevent (2026-11-23: a
+    # user-configured `image` capability on a custom provider was unreachable
+    # because a same-named text-only row in another provider came first).
+    #
+    # The rule is judged structurally, not by comment: a `.write()` within four
+    # lines of a `global_provider_list` mention is a write of that list. The one
+    # permitted site is `agent_core.rs`'s `set_provider_list` body.
+    local offenders
+    offenders=$(cd "$root/core" && find acowork-runtime/src -name '*.rs' -print0 \
+        | xargs -0 awk '
+            FNR == 1 { pending = 0 }
+            /global_provider_list/ { pending = 4 }
+            pending > 0 && /\.write\(\)/ { print FILENAME ":" FNR ":" $0 }
+            { if (pending > 0) pending-- }
+        ' 2>/dev/null | grep -v '^acowork-runtime/src/agent/agent_core.rs:' || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: the provider list is written outside AgentCore::set_provider_list:"
+        echo "$offenders"
+        echo "Write it through set_provider_list (clone the list, then pass it in):"
+        echo "the capability index is rebuilt there, and nowhere else."
+        exit 1
+    fi
+
+    # 2. The pre-catalog lookups must not come back.
+    #
+    # Each of these answered "what can this model do" by matching the model id
+    # alone, so it silently answered from whichever provider came first. A
+    # reinvention under the old name is the cheapest way to reintroduce the
+    # multi-provider bug, so the names themselves are the tripwire.
+    offenders=$(grep -rnE '\b(get_model_capabilities|max_output_tokens_limit_for_model|gateway_model_capabilities)\b' \
+        "$root/core/acowork-core/src" "$root/core/acowork-runtime/src" 2>/dev/null || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: a provider-blind capability lookup was reintroduced:"
+        echo "$offenders"
+        echo "Use AgentCore::model_caps(model, provider) / max_output_tokens_limit("
+        echo "model, provider) / serving_providers(model) — all backed by ModelCatalog."
+        exit 1
+    fi
+
+    echo "Model-capability single-entry red line: OK"
+}
+
+run_effect_deps_redline() {
+    echo "Checking deps-less setState effect red line (feedback-loop risk)..."
+    if ! node "$SCRIPT_DIR/check-effect-deps.mjs" "$SCRIPT_DIR/../apps/acowork-desktop/src"; then
+        exit 1
+    fi
+}
+
 run_all_redlines() {
     run_node_redline
     run_mqtt_redline
@@ -1096,6 +1162,8 @@ run_all_redlines() {
     run_app_framework_redline
     run_desktop_ipc_scope_redline
     run_deliverables_coupling_redline
+    run_model_caps_redline
+    run_effect_deps_redline
 }
 
 run_clippy() {

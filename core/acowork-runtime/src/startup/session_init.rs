@@ -324,9 +324,11 @@ pub(crate) async fn phase_b_init_session(
     // onboarding with a small-window model); `model_switch` stays a hard
     // rejection so the user gets a clear error when actively picking one.
     {
-        let boot_model = conversation_session.as_ref().and_then(|c| c.model());
-        if let Some(model) = boot_model
-            && let Some(caps) = core.get_model_capabilities(&model)
+        let boot_target = conversation_session
+            .as_ref()
+            .and_then(|c| c.model().map(|model| (model, c.provider())));
+        if let Some((model, provider)) = boot_target
+            && let Some(caps) = core.model_caps(&model, provider.as_deref())
             && let Err(e) = crate::agent::compression_constants::validate_model_budget(&caps)
         {
             tracing::warn!(
@@ -417,10 +419,10 @@ pub(crate) async fn phase_b_init_session(
                     pcm.insert(p.id.clone(), p.compact_model.clone());
                 }
             }
-            {
-                let mut list = c.global_provider_list.write().unwrap();
-                *list = providers.clone();
-            }
+            // `set_provider_list` rebuilds the derived capability index in
+            // the same step — writing the list directly would leave every
+            // capability lookup answering from an empty index.
+            c.set_provider_list(providers.clone());
             tracing::info!(
                 provider_count = providers.len(),
                 compact_count = c.provider_compact_models.read().unwrap().len(),

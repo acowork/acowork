@@ -5,7 +5,6 @@ pub mod anthropic_compat;
 pub mod compat;
 pub mod ollama;
 pub mod openai;
-pub mod registry;
 pub mod reliable;
 pub mod responses;
 pub mod responses_compat;

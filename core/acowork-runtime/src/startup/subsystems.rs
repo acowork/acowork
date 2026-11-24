@@ -623,7 +623,11 @@ pub(crate) fn spawn_config_change_relay(
                 && let Ok(slot) = core_slot.read()
                 && let Some(core) = slot.as_ref()
             {
-                let caps = core.get_model_capabilities(&config.model_id);
+                // An empty provider id means "not resolved yet" — pass None so
+                // the catalog uses its documented single-served-model rule.
+                let provider = (!config.provider_id.is_empty())
+                    .then_some(config.provider_id.as_str());
+                let caps = core.model_caps(&config.model_id, provider);
                 if let Some(effort) =
                     crate::agent::session_config::llm_effects::resolve_effective_reasoning_effort(
                         caps.as_ref(),

@@ -796,9 +796,29 @@ impl AgentLoop {
         }
     }
 
-    /// Look up model capabilities by exact model name (delegates to AgentCore).
-    pub(crate) fn get_model_capabilities(&self, model_name: &str) -> Option<ModelCapabilitiesInfo> {
-        self.core.get_model_capabilities(model_name)
+    /// The provider this session's model is configured under, if known.
+    ///
+    /// Paired with [`Self::model_caps`] so every capability lookup names its
+    /// provider: the same model id can be served by several providers with
+    /// different capabilities (a hand-configured custom provider next to an
+    /// aggregator), and the id alone does not say which one this session uses.
+    pub(crate) fn current_provider(&self) -> Option<&str> {
+        self.session.provider.as_deref()
+    }
+
+    /// Model capabilities for this session's model, provider-scoped.
+    ///
+    /// The ONE capability lookup for the loop. Use
+    /// [`AgentCore::model_caps`] directly when the model belongs to a provider
+    /// other than this session's (a compact candidate, a fallback target).
+    pub(crate) fn model_caps(&self, model_name: &str) -> Option<ModelCapabilitiesInfo> {
+        self.core.model_caps(model_name, self.current_provider())
+    }
+
+    /// Output-token cap for this session's model, provider-scoped.
+    pub(crate) fn max_output_tokens_limit(&self, model_name: &str) -> u64 {
+        self.core
+            .max_output_tokens_limit(model_name, self.current_provider())
     }
 
     /// Resolve the current model name for capability lookups.
@@ -1528,7 +1548,11 @@ impl AgentLoop {
                                     } else {
                                         Some(title_provider_id.clone())
                                     };
-                                    let caps = core_clone.get_model_capabilities(&compact_model);
+                                    // The title call runs against `provider_id`
+                                    // above — the session's own provider unless the
+                                    // title provider was resolved separately.
+                                    let caps = core_clone
+                                        .model_caps(&compact_model, provider_id.as_deref());
                                     conv.accumulate_llm_usage(
                                         &usage,
                                         &crate::conversation::ModelUsageAttribution {

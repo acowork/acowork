@@ -1709,14 +1709,16 @@ impl SessionManager {
             let session_override = session_state
                 .conversation()
                 .and_then(|c| c.context_window());
-            let caps = self.core.get_model_capabilities(m);
+            let caps = self.core.model_caps(m, initial_provider.as_deref());
             let resolved = crate::agent::session_config::resolve_effective_context_window(
                 session_override,
                 self.core.context_window_override,
                 self.core.manifest_context_window,
                 caps.as_ref(),
             );
-            let budget = self.core.context_trim_budget_with(Some(resolved), m);
+            let budget = self
+                .core
+                .context_trim_budget_with(Some(resolved), m, initial_provider.as_deref());
             session_state.history_mut().set_max_tokens(budget);
 
             // Reasoning-effort chain (ADR-110 adds layer 2), resolved by the
@@ -1733,7 +1735,7 @@ impl SessionManager {
             // This call site used to spell the chain out by hand with layer 2
             // missing; it now shares the one implementation the HTTP/MQTT
             // readers already use, so the three surfaces cannot drift.
-            let caps = self.core.get_model_capabilities(m);
+            let caps = self.core.model_caps(m, initial_provider.as_deref());
             let effort = crate::agent::session_config::llm_effects::
                 resolve_effective_reasoning_effort(
                     caps.as_ref(),
@@ -2243,8 +2245,6 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Record a routed intent in the target session's pending queue so the
-    /// execution UI can show it while the session is still busy (ADR-099,
     /// Deliver a **routed** intent turn: the two delivery semantics an inbound
     /// turn can have, chosen by the caller from the origin policy
     /// (`TurnOrigin::policy().supersede`) and never re-derived per transport.
@@ -2278,16 +2278,18 @@ impl SessionManager {
         }
     }
 
+    /// Record a routed intent in the target session's pending queue so the
+    /// execution UI can show it while the session is still busy (ADR-099,
     /// design 27 §5.5.5).
     ///
-    /// Only meaningful for a session that is already running a turn: an idle
-    /// session dequeues the intent immediately and the message appears in its
     /// Private on purpose: the only caller is [`Self::send_routed_intent`],
     /// which owns the record-before-handoff ordering. A public entry here
     /// would let a transport write the row after the send — the race that
     /// left rows stuck in the queue forever — so the invariant is enforced by
     /// the module boundary, not by a comment.
     ///
+    /// Only meaningful for a session that is already running a turn: an idle
+    /// session dequeues the intent immediately and the message appears in its
     /// history, so no queue row is needed. Best-effort — a session without a
     /// persistent conversation (ephemeral) simply has nowhere to record.
     /// Pushes one state change so the projection is live without waiting for
@@ -3117,7 +3119,7 @@ impl SessionManager {
     /// Updates the shared AgentCore's `global_provider_list`, version, and
     /// `provider_key_vault`. No per-session broadcast is needed — sessions
     /// query the shared cache on demand via
-    /// [`AgentCore::get_provider`] / [`AgentCore::get_model_capabilities`].
+    /// [`AgentCore::get_provider`] / [`AgentCore::model_caps`].
     pub fn update_global_provider_list(
         &mut self,
         provider_list: Vec<acowork_core::protocol::ProviderListItem>,
@@ -3155,15 +3157,15 @@ impl SessionManager {
             .map(|r| (r.provider_id.clone(), r.model_id.clone()))
             .collect();
 
-        // Replace the shared global provider list (live read-view for sessions).
-        {
-            let mut list = self.core.global_provider_list.write().unwrap();
-            *list = provider_list;
-        }
+        // Replace the shared global provider list (live read-view for sessions)
+        // AND rebuild the derived capability index in the same step — the two
+        // are one write, so no session can observe a list whose capabilities
+        // are still indexed from the previous provider set.
+        self.core.set_provider_list(provider_list);
 
         // Notify all active sessions so they emit an updated state to the frontend.
         // The shared global_provider_list on AgentCore is already updated above,
-        // so sessions can query it on demand via get_model_capabilities.
+        // so sessions can query it on demand via `model_caps`.
         let session_count = self.broadcast(SessionMessage::ProviderListUpdated).len();
         tracing::debug!(
             session_count = %session_count,
@@ -3223,7 +3225,7 @@ impl SessionManager {
             //   2. caps.default_reasoning_effort
             //   3. supports_reasoning -> Auto
             //   4. None (model doesn't support reasoning)
-            let caps = self.core.get_model_capabilities(&model);
+            let caps = self.core.model_caps(&model, provider.as_deref());
             // ADR-061 §13.4: reject model switches to models whose effective
             // input budget cannot run the 8-level compression loop.
             if let Some(caps) = caps.as_ref()
@@ -3903,7 +3905,10 @@ impl SessionManager {
         self.current_model_and_provider()
     }
 
-    /// First provider in the global inventory that exposes `model`.
+    /// The provider the capability index resolves `model` to.
+    ///
+    /// Asked of the index rather than re-derived from `serving_providers`, so
+    /// the provider seeded here is the same row `model_caps` will answer from.
     ///
     /// Used only when `agent_config.json` sets `default_model` without a
     /// `default_provider` (hand-edited config, or a provider that was renamed
@@ -3912,10 +3917,7 @@ impl SessionManager {
     /// same shape the pre-ADR-110 fallback can produce, and the model menu
     /// still shows the model so the user can re-pick.
     fn provider_serving_model(&self, model: &str) -> Option<String> {
-        let list = self.core.global_provider_list.read().ok()?;
-        list.iter()
-            .find(|p| p.models.iter().any(|m| m.id == model))
-            .map(|p| p.id.clone())
+        self.core.resolved_provider(model, None)
     }
 
     /// Resolve the account_id the next newly-created session should inherit.
@@ -5766,10 +5768,8 @@ mod tests {
 
         // A configured inventory so the provider auto-resolution path can be
         // exercised (default_provider unset ⇒ first provider serving the id).
-        core.global_provider_list
-            .write()
-            .unwrap()
-            .push(acowork_core::protocol::ProviderListItem {
+        let mut providers = core.global_provider_list.read().unwrap().clone();
+        providers.push(acowork_core::protocol::ProviderListItem {
                 id: "inventory-provider".to_string(),
                 base_url: String::new(),
                 protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
@@ -5800,6 +5800,7 @@ mod tests {
                 compact_model: None,
                 custom: false,
             });
+        core.set_provider_list(providers);
 
         let mut manager = SessionManager::new(core.clone(), SessionManagerConfig::default());
         // `create_frontend_session` resolves the workspace context through the
@@ -7651,7 +7652,6 @@ mod tests {
 
     /// An evicted / never-registered session has no generation to abort; the
     /// delivery itself is still attempted and reports its own error.
-    #[tokio::test]
     /// The waiting-queue defect (2026-11-24): a Chat message typed into the
     /// execution card's reply box parked in the pending queue while the same
     /// words in the execution composer aborted the turn. `RoutedIntent::resolve`
@@ -7702,6 +7702,7 @@ mod tests {
         }
     }
 
+    #[tokio::test]
     async fn superseding_send_without_a_registered_generation_still_delivers() {
         let (mut manager, mut inbox, _slot, sid) = manager_with_one_session(4);
         manager.cancel_handles.remove(&sid);
@@ -7712,7 +7713,6 @@ mod tests {
 
         assert!(inbox.try_recv().is_ok(), "message must be delivered");
     }
-}
 
     // ── `send_routed_intent`: the composition, not just the resolver ──────
     //
@@ -7820,3 +7820,4 @@ mod tests {
         assert!(running.is_cancelled(), "the running turn is superseded");
         assert!(inbox.try_recv().is_ok(), "the message must be delivered");
     }
+}

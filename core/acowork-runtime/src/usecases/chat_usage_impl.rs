@@ -67,9 +67,12 @@ impl ChatUsageService for RuntimeChatUsageService {
         };
         // Price through the same path the dialog loop uses; `None` folds
         // as "no cost known", never as free (ADR-027 poison rule).
+        // `provider_label` is the provider id this call was billed under —
+        // the same id names the capability row, so a model reachable through
+        // several providers prices from the one that actually ran it.
         let cost_delta = self
             .core
-            .get_model_capabilities(model_id)
+            .model_caps(model_id, Some(provider_label))
             .and_then(|caps| estimate_call_cost(caps.cost.as_ref(), usage));
         // A blank kind is "not known", not a kind: fold it to `None` so the
         // ledger column never stores `""` (an unrecorded and a blank-kind

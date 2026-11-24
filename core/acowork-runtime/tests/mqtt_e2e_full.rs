@@ -1089,7 +1089,6 @@ fn integration_mcp_template_instance_id_substituted_at_runtime() {
     });
     drop(broker);
 }
-
 // ═══════════════════════════════════════════════════════════════════════
 // record_complete `metadata_json` wire round-trip (ADR-119 mechanism rework).
 //
@@ -1122,6 +1121,7 @@ fn record_complete_metadata_json_round_trips() {
             control_tx,
             identity_update_tx: None,
             mcp_notifier: None,
+            provider_update_tx: None,
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,

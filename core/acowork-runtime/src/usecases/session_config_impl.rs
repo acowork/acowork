@@ -177,7 +177,7 @@ impl SessionConfigService for RuntimeSessionConfigService {
             let caps = snapshot
                 .model
                 .as_deref()
-                .and_then(|m| core.get_model_capabilities(m));
+                .and_then(|m| core.model_caps(m, snapshot.provider.as_deref()));
             if let Some(effort) = llm_effects::resolve_effective_reasoning_effort(
                 caps.as_ref(),
                 snapshot.reasoning_effort.as_deref(),
