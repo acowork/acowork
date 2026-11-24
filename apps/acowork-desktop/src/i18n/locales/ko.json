@@ -1020,7 +1020,13 @@
       "agentNotRunning": "Agent를 시작하여 워크스페이스 탐색",
       "loading": "로딩 중...",
       "refresh": "새로고침",
-      "searchPlaceholder": "파일 검색..."
+      "searchPlaceholder": "파일 검색...",
+      "searchContentPlaceholder": "콘텐츠 검색...",
+      "searchMode": "검색 모드",
+      "searchFilesMode": "파일 이름으로 검색",
+      "searchContentMode": "내용으로 검색",
+      "matchCase": "대소문자 구분",
+      "matchWholeWord": "단어 단위 검색"
     },
     "contextMenu": {
       "addToChat": "채팅에 추가",

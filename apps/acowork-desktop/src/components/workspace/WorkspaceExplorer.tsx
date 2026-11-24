@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Search, RefreshCw, FolderOpen, FilePlus, FolderPlus, X, MessageSquarePlus } from "lucide-react";
+import { Search, RefreshCw, FolderOpen, FilePlus, FolderPlus, X, MessageSquarePlus, FileText, TextSearch, CaseSensitive, WholeWord } from "lucide-react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useFileTreeStore, treeKey, isReadyNode, type TreeEntry, getCachedWorkspaceRoot } from "../../stores/fileTree";
@@ -23,6 +23,107 @@ import { isWorkspacePreviewable } from "../editor/filePreview";
 import { GitStatusBar } from "./git/GitStatusBar";
 import { GitStatusPanel } from "./git/GitStatusPanel";
 import { useGitStore } from "../../stores/gitStore";
+import { getGatewayUrl } from "../../lib/config";
+import { fileContentSearchUrl } from "../search/GlobalSearchDialog";
+
+/** Search box mode — the two halves of the box are mutually exclusive
+ *  (a radio pair, not two filters): `files` answers "where is this file",
+ *  `content` answers "where is this text". */
+export type SearchMode = "files" | "content";
+
+/** One dropdown row. Content mode adds the match location (`line`) and the
+ *  matched source line (`text`); file mode has neither and shows name+dir. */
+export interface SearchRow {
+    name: string;
+    relPath: string;
+    dir: string;
+    line?: number;
+    text?: string;
+}
+
+const AGENT_HOME_WORKSPACE = "__agent_home__";
+
+/** The search box's radio pair: file name vs content. Icons only — the row
+ *  already carries a placeholder and a mode-dependent tooltip. */
+const SEARCH_MODES: Array<{
+    mode: SearchMode;
+    Icon: typeof FileText;
+    labelKey: string;
+}> = [
+    { mode: "files", Icon: FileText, labelKey: "workspace.explorer.searchFilesMode" },
+    { mode: "content", Icon: TextSearch, labelKey: "workspace.explorer.searchContentMode" },
+];
+
+/** Shared look for the row's small icon toggles (mode radio + content flags):
+ *  the selected state is the only thing that differs. */
+function searchToggleClass(active: boolean): string {
+    return cn(
+        "flex h-5 w-5 items-center justify-center rounded transition-colors",
+        active
+            ? "bg-[var(--color-accent)]/15 text-text"
+            : "text-text-tertiary hover:text-text-secondary",
+    );
+}
+
+function splitRelPath(relPath: string): Pick<SearchRow, "name" | "relPath" | "dir"> {
+    const slash = relPath.lastIndexOf("/");
+    return {
+        name: slash >= 0 ? relPath.slice(slash + 1) : relPath,
+        relPath,
+        dir: slash >= 0 ? relPath.slice(0, slash) : "",
+    };
+}
+
+/**
+ * Rows for the search dropdown, one endpoint per mode.
+ *
+ *  - `files`   → `/workspaces/find` (fuzzy file **name**, what the box has
+ *                always done).
+ *  - `content` → `/workspaces/search` with `match_file_names=false`: the
+ *                same ripgrep backend the global search dialog's 文件 tab
+ *                uses, but content-only, so "content" mode cannot quietly
+ *                answer with file-name hits.
+ *
+ * Exported for its own test; abort/network failures read as "no rows" here —
+ * the caller drops the result anyway once the signal is aborted.
+ */
+export async function searchRows(
+    mode: SearchMode,
+    agentId: string,
+    workspaceId: string,
+    query: string,
+    signal: AbortSignal,
+    opts: { caseSensitive?: boolean; wholeWord?: boolean } = {},
+): Promise<SearchRow[]> {
+    if (mode === "files") {
+        const resp = await useWorkspaceStore
+            .getState()
+            .findFiles(agentId, workspaceId, query, 50, signal);
+        return (resp?.matches ?? []).map((m) => ({ ...splitRelPath(m.relPath), name: m.name }));
+    }
+    try {
+        const resp = await fetch(
+            fileContentSearchUrl(getGatewayUrl(), agentId, query, {
+                workspaceId: workspaceId === AGENT_HOME_WORKSPACE ? undefined : workspaceId,
+                caseSensitive: opts.caseSensitive,
+                wholeWord: opts.wholeWord,
+                maxResults: 50,
+            }),
+            { signal },
+        );
+        if (!resp.ok) return [];
+        const data = (await resp.json()) as {
+            matches?: Array<{ file: string; line?: number; text: string }>;
+        };
+        return (data.matches ?? []).map((m) => ({
+            ...splitRelPath(m.file),
+            line: m.line,
+            text: m.text,
+        }));
+    } catch {
+        return [];
+    }
+}
 
 /** Abbreviate a file path from the left: "…parent/filename.ext" */
 function abbreviatePath(path: string): string {
@@ -489,17 +590,22 @@ export function WorkspaceExplorer() {
 
     /* ── Search box state (Ctrl+P-style file search above the file tree) ── */
     const [searchQuery, setSearchQuery] = useState("");
+    const [searchMode, setSearchMode] = useState<SearchMode>("files");
+    /** Content-mode only: case-sensitive and whole-word matching. The file
+     *  mode has no use for them — a fuzzy name search is case-insensitive by
+     *  definition — so they are hidden, not merely ignored, there. */
+    const [caseSensitive, setCaseSensitive] = useState(false);
+    const [wholeWord, setWholeWord] = useState(false);
     const [searchFocused, setSearchFocused] = useState(false);
     const [focusedIdx, setFocusedIdx] = useState(0);
     const [searchLoading, setSearchLoading] = useState(false);
-    const [searchResults, setSearchResults] = useState<
-        Array<{ name: string; relPath: string; dir: string; score: number }>
-    >([]);
+    const [searchResults, setSearchResults] = useState<SearchRow[]>([]);
     const searchInputRef = useRef<HTMLInputElement>(null);
 
-    // Server-side filename search — one request per debounced query.
-    // Previous in-flight requests are cancelled via AbortController so
-    // the latest keystroke always wins, even on a slow network.
+    // Server-side search — one request per debounced query, endpoint picked
+    // by `searchMode` (see `searchRows`). Previous in-flight requests are
+    // cancelled via AbortController so the latest keystroke always wins,
+    // even on a slow network.
     useEffect(() => {
         if (!searchQuery.trim() || !selectedAgentId) {
             setSearchResults([]);
@@ -509,47 +615,31 @@ export function WorkspaceExplorer() {
         const controller = new AbortController();
         setSearchLoading(true);
         const timer = setTimeout(() => {
-            void useWorkspaceStore
-                .getState()
-                .findFiles(
-                    selectedAgentId,
-                    currentWorkspaceId,
-                    searchQuery,
-                    50,
-                    controller.signal,
-                )
-                .then((resp) => {
-                    if (controller.signal.aborted) return;
-                    if (!resp) {
-                        setSearchResults([]);
-                        setSearchLoading(false);
-                        return;
-                    }
-                    const rows = resp.matches.map((m) => {
-                        const slash = m.relPath.lastIndexOf("/");
-                        return {
-                            name: m.name,
-                            relPath: m.relPath,
-                            dir: slash >= 0 ? m.relPath.slice(0, slash) : "",
-                            score: m.score,
-                        };
-                    });
-                    setSearchResults(rows);
-                    setSearchLoading(false);
-                });
+            void searchRows(
+                searchMode,
+                selectedAgentId,
+                currentWorkspaceId,
+                searchQuery,
+                controller.signal,
+                { caseSensitive, wholeWord },
+            ).then((rows) => {
+                if (controller.signal.aborted) return;
+                setSearchResults(rows);
+                setSearchLoading(false);
+            });
         }, 150);
         return () => {
             clearTimeout(timer);
             controller.abort();
         };
-    }, [searchQuery, selectedAgentId, currentWorkspaceId]);
+    }, [searchQuery, searchMode, caseSensitive, wholeWord, selectedAgentId, currentWorkspaceId]);
 
-    const matchingFiles = searchQuery ? searchResults : [];
+    const matchingRows = searchQuery ? searchResults : [];
 
     // Clamp focused index when the result list changes
     useEffect(() => {
-        setFocusedIdx((i) => (i >= matchingFiles.length ? 0 : i));
-    }, [searchQuery, matchingFiles.length]);
+        setFocusedIdx((i) => (i >= matchingRows.length ? 0 : i));
+    }, [searchQuery, matchingRows.length]);
 
     // Ctrl+F (no file-tab focus) — AppLayout requests that the workspace
     // search input take focus. Consume each new seq once so a repeat press
@@ -620,13 +710,13 @@ export function WorkspaceExplorer() {
             searchInputRef.current?.blur();
         } else if (e.key === "ArrowDown") {
             e.preventDefault();
-            setFocusedIdx((i) => Math.min(i + 1, matchingFiles.length - 1));
+            setFocusedIdx((i) => Math.min(i + 1, matchingRows.length - 1));
         } else if (e.key === "ArrowUp") {
             e.preventDefault();
             setFocusedIdx((i) => Math.max(i - 1, 0));
         } else if (e.key === "Enter") {
             e.preventDefault();
-            const item = matchingFiles[focusedIdx];
+            const item = matchingRows[focusedIdx];
             if (!item) return;
             // Ctrl/Cmd+Enter attaches to chat; bare Enter opens the file —
             // splits the two actions so a keyboard-only flow can either
@@ -638,9 +728,11 @@ export function WorkspaceExplorer() {
                 handleSearchSelect(item.relPath);
             }
         }
-    }, [matchingFiles, focusedIdx, handleSearchSelect, handleSearchAddToChat]);
+    }, [matchingRows, focusedIdx, handleSearchSelect, handleSearchAddToChat]);
 
     const showDropdown = searchFocused && searchQuery.trim().length > 0;
+    const noResultsLabel =
+        searchMode === "content" ? "No matching content" : "No matching files";
 
     const handleRefresh = useCallback(() => {
         if (!selectedAgentId) return;
@@ -1011,9 +1103,77 @@ export function WorkspaceExplorer() {
                         onFocus={() => setSearchFocused(true)}
                         onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
                         onKeyDown={handleSearchKeyDown}
-                        placeholder={t("workspace.explorer.searchPlaceholder")}
-                        className="flex-1 bg-transparent text-xs text-text-secondary outline-none placeholder:text-text-tertiary  dark:placeholder:text-text-tertiary"
+                        placeholder={
+                            searchMode === "content"
+                                ? t("workspace.explorer.searchContentPlaceholder")
+                                : t("workspace.explorer.searchPlaceholder")
+                        }
+                        className="min-w-0 flex-1 bg-transparent text-xs text-text-secondary outline-none placeholder:text-text-tertiary  dark:placeholder:text-text-tertiary"
                     />
+                    {/* Mode: a radio pair, not two filters — "where is this
+                        file" and "where is this text" are different
+                        questions with different endpoints. `onMouseDown`
+                        preventDefault keeps focus in the box so switching
+                        mode does not blur the row and close the dropdown. */}
+                    <div
+                        role="radiogroup"
+                        aria-label={t("workspace.explorer.searchMode")}
+                        className="flex shrink-0 items-center"
+                    >
+                        {SEARCH_MODES.map(({ mode, Icon, labelKey }) => (
+                            <button
+                                key={mode}
+                                type="button"
+                                role="radio"
+                                aria-checked={searchMode === mode}
+                                aria-label={t(labelKey)}
+                                title={t(labelKey)}
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => {
+                                    setSearchMode(mode);
+                                    searchInputRef.current?.focus();
+                                }}
+                                className={searchToggleClass(searchMode === mode)}
+                            >
+                                <Icon className="h-3 w-3" />
+                            </button>
+                        ))}
+                    </div>
+                    {/* Content-mode flags — the ripgrep switches
+                        `/workspaces/search` already accepts. Hidden in file
+                        mode: a fuzzy name search has no case/word boundary
+                        to toggle. */}
+                    {searchMode === "content" && (
+                        <div className="flex shrink-0 items-center">
+                            {[
+                                {
+                                    Icon: CaseSensitive,
+                                    labelKey: "workspace.explorer.matchCase",
+                                    on: caseSensitive,
+                                    set: setCaseSensitive,
+                                },
+                                {
+                                    Icon: WholeWord,
+                                    labelKey: "workspace.explorer.matchWholeWord",
+                                    on: wholeWord,
+                                    set: setWholeWord,
+                                },
+                            ].map(({ Icon, labelKey, on, set }) => (
+                                <button
+                                    key={labelKey}
+                                    type="button"
+                                    aria-pressed={on}
+                                    aria-label={t(labelKey)}
+                                    title={t(labelKey)}
+                                    onMouseDown={(e) => e.preventDefault()}
+                                    onClick={() => set(!on)}
+                                    className={searchToggleClass(on)}
+                                >
+                                    <Icon className="h-3 w-3" />
+                                </button>
+                            ))}
+                        </div>
+                    )}
                     {searchQuery && (
                         <button
                             onClick={() => {
@@ -1035,26 +1195,31 @@ export function WorkspaceExplorer() {
                         <div className="flex items-center justify-between border-b border-border-divider px-3 py-1.5 text-11 text-text-tertiary">
                             {searchLoading ? (
                                 <span>Searching…</span>
-                            ) : matchingFiles.length > 0 ? (
-                                <span>{matchingFiles.length} matching file{matchingFiles.length === 1 ? "" : "s"}</span>
+                            ) : matchingRows.length > 0 ? (
+                                <span>
+                                    {matchingRows.length}{" "}
+                                    {searchMode === "content"
+                                        ? `match${matchingRows.length === 1 ? "" : "es"}`
+                                        : `matching file${matchingRows.length === 1 ? "" : "s"}`}
+                                </span>
                             ) : (
-                                <span>No matching files</span>
+                                <span>{noResultsLabel}</span>
                             )}
                         </div>
 
                         {/* Items */}
                         <div className="max-h-80 overflow-y-auto py-1">
-                            {matchingFiles.length === 0 ? (
+                            {matchingRows.length === 0 ? (
                                 <div className="px-3 py-4 text-center text-xs text-text-tertiary ">
-                                    {searchLoading ? "Searching workspace…" : "No matching files"}
+                                    {searchLoading ? "Searching workspace…" : noResultsLabel}
                                 </div>
                             ) : (
-                                matchingFiles.map((f, idx) => {
+                                matchingRows.map((f, idx) => {
                                     const focused = idx === focusedIdx;
                                     const addDisabled = searchAddToChatDisabledReason !== null;
                                     return (
                                         <div
-                                            key={f.relPath}
+                                            key={`${f.relPath}:${f.line ?? 0}`}
                                             onMouseDown={(e) => e.preventDefault()}
                                             onMouseEnter={() => setFocusedIdx(idx)}
                                             onClick={() => handleSearchSelect(f.relPath)}
@@ -1101,13 +1266,30 @@ export function WorkspaceExplorer() {
                                             <div className="h-3.5 w-3.5 shrink-0 flex items-center justify-center">
                                                 <SetiIcon {...getFileIcon(f.name)} size={14} />
                                             </div>
-                                            <div className="flex items-center min-w-0 overflow-hidden">
-                                                <span className="shrink-0 whitespace-nowrap text-xs text-text-secondary ">
-                                                    {f.name}
-                                                </span>
-                                                <span className="ml-3 min-w-0 truncate text-10 text-text-tertiary ">
-                                                    {abbreviatePath(f.dir)}
-                                                </span>
+                                            <div className="flex min-w-0 flex-col overflow-hidden">
+                                                <div className="flex items-center min-w-0 overflow-hidden">
+                                                    <span className="shrink-0 whitespace-nowrap text-xs text-text-secondary ">
+                                                        {f.name}
+                                                    </span>
+                                                    {/* Content hits carry their location:
+                                                        the same file can match on many
+                                                        lines, so without the number two
+                                                        rows for one file read as duplicates. */}
+                                                    {f.line !== undefined && (
+                                                        <span className="ml-1 shrink-0 text-10 text-text-tertiary">
+                                                            :{f.line}
+                                                        </span>
+                                                    )}
+                                                    <span className="ml-3 min-w-0 truncate text-10 text-text-tertiary ">
+                                                        {abbreviatePath(f.dir)}
+                                                    </span>
+                                                </div>
+                                                {/* Content mode: the matched source line. */}
+                                                {f.text !== undefined && (
+                                                    <span className="truncate text-10 text-text-tertiary">
+                                                        {f.text.trim()}
+                                                    </span>
+                                                )}
                                             </div>
                                             {/* Hover/focus-reveal "add to chat" button.
                                                 Mirrors the floating button on the editor

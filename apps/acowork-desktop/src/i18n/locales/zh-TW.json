@@ -1018,7 +1018,13 @@
       "agentNotRunning": "啟動 Agent 以瀏覽工作區",
       "loading": "載入中...",
       "refresh": "重新整理",
-      "searchPlaceholder": "搜尋檔案..."
+      "searchPlaceholder": "搜尋檔案...",
+      "searchContentPlaceholder": "搜尋內容...",
+      "searchMode": "搜尋方式",
+      "searchFilesMode": "依檔名搜尋",
+      "searchContentMode": "依內容搜尋",
+      "matchCase": "區分大小寫",
+      "matchWholeWord": "全字匹配"
     },
     "contextMenu": {
       "addToChat": "加入對話",

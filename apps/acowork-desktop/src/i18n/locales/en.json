@@ -890,7 +890,13 @@
       "agentNotRunning": "Start an agent to browse workspace",
       "loading": "Loading...",
       "refresh": "Refresh",
-      "searchPlaceholder": "Search files..."
+      "searchPlaceholder": "Search files...",
+      "searchContentPlaceholder": "Search content...",
+      "searchMode": "Search mode",
+      "searchFilesMode": "Search file names",
+      "searchContentMode": "Search file contents",
+      "matchCase": "Match case",
+      "matchWholeWord": "Match whole word"
     },
     "contextMenu": {
       "addToChat": "Add to Chat",

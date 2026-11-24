@@ -1019,7 +1019,13 @@
       "agentNotRunning": "Agentを起動してワークスペースを閲覧",
       "loading": "読み込み中...",
       "refresh": "更新",
-      "searchPlaceholder": "ファイルを検索..."
+      "searchPlaceholder": "ファイルを検索...",
+      "searchContentPlaceholder": "コンテンツを検索...",
+      "searchMode": "検索モード",
+      "searchFilesMode": "ファイル名で検索",
+      "searchContentMode": "内容で検索",
+      "matchCase": "大文字小文字を区別",
+      "matchWholeWord": "単語単位で検索"
     },
     "contextMenu": {
       "addToChat": "チャットに追加",

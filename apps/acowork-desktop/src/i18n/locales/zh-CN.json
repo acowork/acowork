@@ -1256,7 +1256,13 @@
       "agentNotRunning": "启动 Agent 以浏览工作区",
       "loading": "加载中...",
       "refresh": "刷新",
-      "searchPlaceholder": "搜索文件..."
+      "searchPlaceholder": "搜索文件...",
+      "searchContentPlaceholder": "搜索内容...",
+      "searchMode": "搜索方式",
+      "searchFilesMode": "按文件名搜索",
+      "searchContentMode": "按内容搜索",
+      "matchCase": "区分大小写",
+      "matchWholeWord": "全字匹配"
     },
     "contextMenu": {
       "addToChat": "添加到对话",
