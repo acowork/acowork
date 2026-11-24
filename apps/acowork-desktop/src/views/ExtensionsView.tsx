@@ -10,6 +10,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ExternalLink, Loader2, Search } from "lucide-react";
 import { CAPSULE_PANE_CN } from "../components/common/capsule";
+import { RemoteArtwork } from "../components/common/RemoteArtwork";
 import { SplitHandle } from "../components/common/SplitHandle";
 import { StyledInput } from "../components/common/StyledInput";
 import { useDragResize } from "../hooks/useDragResize";
@@ -393,10 +394,14 @@ export function ExtensionsView() {
                             >
                                 <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border-divider bg-nav-surface">
                                     {card.icon ? (
-                                        <img
+                                        <RemoteArtwork
                                             src={card.icon}
-                                            alt=""
                                             className="h-full w-full object-cover"
+                                            fallback={
+                                                <span className="text-sm font-medium text-text-tertiary">
+                                                    {card.name.slice(0, 1).toUpperCase()}
+                                                </span>
+                                            }
                                         />
                                     ) : (
                                         <span className="text-sm font-medium text-text-tertiary">
@@ -458,7 +463,11 @@ export function ExtensionsView() {
                             <div className="flex gap-4">
                                 <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border-divider bg-nav-surface">
                                     {selected.icon ? (
-                                        <img src={selected.icon} alt="" className="h-full w-full object-cover" />
+                                        <RemoteArtwork
+                                            src={selected.icon}
+                                            className="h-full w-full object-cover"
+                                            fallback={null}
+                                        />
                                     ) : (
                                         <span className="text-lg text-text-tertiary">
                                             {selected.name.slice(0, 1).toUpperCase()}

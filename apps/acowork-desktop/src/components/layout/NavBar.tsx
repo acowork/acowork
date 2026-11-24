@@ -13,6 +13,7 @@ import {
   hostedNavApps,
 } from "../../lib/hostedNavApps";
 import { NavButton } from "../common/NavButton";
+import { RemoteArtwork } from "../common/RemoteArtwork";
 import { AccountMenu } from "../account/AccountMenu";
 import { useAuthStore } from "../../stores/authStore";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
@@ -204,46 +205,17 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
             tooltipPosition="right"
           >
             {src ? (
-              <img
+              <RemoteArtwork
                 src={src}
-                alt=""
-                draggable={false}
                 className={
                   active
                     ? `${NAV_ARTWORK_CLASS} rounded-md object-cover`
                     : `${NAV_ARTWORK_CLASS} rounded-md object-cover grayscale group-hover:grayscale-0`
                 }
+                fallback={<LetterMark app={app} active={active} />}
               />
             ) : (
-              <span
-                className={cn(
-                  NAV_ARTWORK_CLASS,
-                  "flex items-center justify-center rounded-md text-[13px] font-semibold",
-                  // The letter mark has no artwork to un-grey, so hover
-                  // brightens its own background instead — the same affordance
-                  // the artwork icons get from `group-hover:grayscale-0`.
-                  // The two colours live in custom properties because an
-                  // inline `background` would outrank the hover class and
-                  // the hover would never show.
-                  "bg-[var(--letter-bg)] transition-colors group-hover:bg-[var(--letter-bg-hover)]",
-                )}
-                style={
-                  {
-                    // Both branches are `color-mix(... transparent)` off a theme
-                    // token: a literal fallback inside `var()` would win on every
-                    // theme that does not declare the token, which is exactly the
-                    // hard-coded colour the theme-pack red line exists to catch.
-                    "--letter-bg": active
-                      ? "color-mix(in srgb, var(--color-accent) 22%, transparent)"
-                      : "color-mix(in srgb, var(--color-text-tertiary) 18%, transparent)",
-                    "--letter-bg-hover": active
-                      ? "color-mix(in srgb, var(--color-accent) 22%, transparent)"
-                      : "color-mix(in srgb, var(--color-accent) 20%, transparent)",
-                  } as React.CSSProperties
-                }
-              >
-                {hostedAppLetter(app)}
-              </span>
+              <LetterMark app={app} active={active} />
             )}
           </NavButton>
         );
@@ -265,5 +237,43 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
         </NavButton>
       ))}
     </nav>
+  );
+}
+
+/**
+ * The letter tile a hosted app falls back to when it has no artwork — and,
+ * via `RemoteArtwork`, when its remote artwork failed to load.
+ *
+ * The letter mark has no artwork to un-grey, so hover brightens its own
+ * background instead — the same affordance the artwork icons get from
+ * `group-hover:grayscale-0`. The two colours live in custom properties
+ * because an inline `background` would outrank the hover class and the hover
+ * would never show.
+ */
+function LetterMark({ app, active }: { app: AppDto; active: boolean }) {
+  return (
+    <span
+      className={cn(
+        NAV_ARTWORK_CLASS,
+        "flex items-center justify-center rounded-md text-[13px] font-semibold",
+        "bg-[var(--letter-bg)] transition-colors group-hover:bg-[var(--letter-bg-hover)]",
+      )}
+      style={
+        {
+          // Both branches are `color-mix(... transparent)` off a theme token: a
+          // literal fallback inside `var()` would win on every theme that does
+          // not declare the token, which is exactly the hard-coded colour the
+          // theme-pack red line exists to catch.
+          "--letter-bg": active
+            ? "color-mix(in srgb, var(--color-accent) 22%, transparent)"
+            : "color-mix(in srgb, var(--color-text-tertiary) 18%, transparent)",
+          "--letter-bg-hover": active
+            ? "color-mix(in srgb, var(--color-accent) 22%, transparent)"
+            : "color-mix(in srgb, var(--color-accent) 20%, transparent)",
+        } as React.CSSProperties
+      }
+    >
+      {hostedAppLetter(app)}
+    </span>
   );
 }
