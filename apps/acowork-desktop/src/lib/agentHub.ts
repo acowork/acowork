@@ -13,6 +13,7 @@
  * are unit-testable without a DOM or a mocked `invoke`.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { clearCatalog, readCatalog, writeCatalog } from "./catalogCache";
 
 /** `GET {hub}/data/index.json` — field names mirror the published JSON. */
 export interface HubIndex {
@@ -325,12 +326,21 @@ export function countInstancesOnNode(
   return entries.filter((e) => e.agent_id === agentId && e.node_id === nodeId).length;
 }
 
-// ── Catalog access (session-scoped cache) ─────────────────────────────────
+// ── Catalog access (session cache + persistent seed) ─────────────────────
 //
 // One successful fetch is reused for the rest of the session (PRD §7 "本地
 // 缓存命中"), and concurrent callers share one request. The shared promise is
 // deliberately NOT bound to any caller's lifetime — a caller that unmounts
 // must not poison the cache entry for everyone else.
+//
+// On top of that, every successful fetch is persisted (catalogCache.ts) so
+// the FIRST dialog open after an app restart paints the real avatars from
+// disk instead of skeletons-and-letters until the network answers. The
+// disk copy is a seed, never a substitute: it is only handed out through
+// `readCachedHubIndex()`, and `fetchHubIndex()` still goes to the Hub
+// (forced) to revalidate it.
+
+const HUB_CACHE_KEY = "hubIndex";
 
 let cachedIndex: HubIndex | null = null;
 let inflight: Promise<HubIndex> | null = null;
@@ -345,7 +355,10 @@ export async function fetchHubIndex(options: { force?: boolean } = {}): Promise<
   const seq = ++requestSeq;
   const promise = invoke<HubIndex>("fetch_hub_index").then((index) => {
     // Only the newest request may populate the cache.
-    if (seq === requestSeq) cachedIndex = index;
+    if (seq === requestSeq) {
+      cachedIndex = index;
+      writeCatalog(HUB_CACHE_KEY, index);
+    }
     return index;
   });
   inflight = promise;
@@ -356,11 +369,28 @@ export async function fetchHubIndex(options: { force?: boolean } = {}): Promise<
   }
 }
 
-/** Test seam: drop the session cache. */
+/**
+ * The last Hub catalog that reached this machine, or `null`.
+ *
+ * Synchronous by design — the dialog seeds its initial catalog state with it
+ * so the first frame shows real entries. Shape-checked on read: a hand-edited
+ * or half-written value degrades to "no cache", exactly the pre-optimistic
+ * behavior.
+ */
+export function readCachedHubIndex(): HubIndex | null {
+  return readCatalog<HubIndex>(
+    HUB_CACHE_KEY,
+    (v) => !!v && typeof v === "object" && Array.isArray((v as HubIndex).agents),
+  );
+}
+
+/** Test seam: drop the session cache AND the persistent seed, so a test
+ *  cannot be affected by (or contribute to) another test's cache state. */
 export function resetHubIndexCache(): void {
   cachedIndex = null;
   inflight = null;
   requestSeq = 0;
+  clearCatalog(HUB_CACHE_KEY);
 }
 
 /** Download + checksum verify + submit. See `commands/hub.rs`. */

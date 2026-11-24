@@ -47,6 +47,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { cn } from "../../lib/utils";
 import { log } from "../../lib/logger";
+import { sameCatalog } from "../../lib/catalogCache";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useAgentStore } from "../../stores/agentStore";
 import { useToast } from "../common/ToastProvider";
@@ -74,6 +75,7 @@ import {
   installFromHub,
   inspectLocalPackage,
   listLocalAgentPackages,
+  readCachedHubIndex,
   searchHubAgents,
   type HubAgent,
   type LocalAgentList,
@@ -130,10 +132,25 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
 
   // Catalog: `null` = never loaded, `[]` = loaded and genuinely empty.
   // Those are different states (REQ-012) and must not share a render branch.
-  const [catalog, setCatalog] = useState<HubAgent[] | null>(null);
-  const [baseUrl, setBaseUrl] = useState("");
+  // The initial value may come from the persistent Hub seed (agentHub.ts):
+  // a restart then paints the real catalog with its avatars on the first
+  // frame, and the first open revalidates against the network — the fresh
+  // payload is applied only when it differs, so an unchanged catalog never
+  // re-renders. `needsRevalidate` pins "this paint came off disk" to the
+  // mount, so the revalidation runs exactly once and the session cache
+  // behavior of PRD §7 is untouched.
+  const [catalogSeed] = useState(() => readCachedHubIndex());
+  const [catalog, setCatalog] = useState<HubAgent[] | null>(
+    () => catalogSeed?.agents ?? null,
+  );
+  const [baseUrl, setBaseUrl] = useState(() => catalogSeed?.base_url ?? "");
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [loadingCatalog, setLoadingCatalog] = useState(false);
+  const needsRevalidate = useRef(catalog !== null);
+  const catalogRef = useRef(catalog);
+  useEffect(() => {
+    catalogRef.current = catalog;
+  }, [catalog]);
 
   // Recovery action for "no usable node". The guide's open/closed state
   // lives inside the banner so it resets whenever the banner unmounts.
@@ -275,18 +292,43 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     setCatalogError(null);
     try {
       const index = await fetchHubIndex({ force });
-      setBaseUrl(index.base_url ?? "");
-      setCatalog(index.agents ?? []);
+      setBaseUrl((prev) => {
+        const next = index.base_url ?? "";
+        return prev === next ? prev : next;
+      });
+      setCatalog((prev) => {
+        const next = index.agents ?? [];
+        // Identical payload → keep the old reference, React skips the
+        // re-render, and a revalidation that changes nothing is invisible.
+        return prev !== null && sameCatalog(prev, next) ? prev : next;
+      });
+      needsRevalidate.current = false;
     } catch (e) {
-      setCatalog(null);
-      setCatalogError(String(e));
+      if (catalogRef.current === null) {
+        // Cold failure: nothing is on screen, show the retry state.
+        setCatalog(null);
+        setCatalogError(String(e));
+      }
+      // Warm failure (an optimistic paint is up): keep it, stay eligible
+      // for the next open's revalidation. A Hub hiccup must not wipe
+      // catalog the user is already looking at.
     } finally {
       setLoadingCatalog(false);
     }
   }, []);
 
   useEffect(() => {
-    if (open && catalog === null && !catalogError && !loadingCatalog) void loadCatalog(false);
+    if (!open) return;
+    if (catalog === null && !catalogError && !loadingCatalog) {
+      void loadCatalog(false);
+      return;
+    }
+    // The paint came off the disk seed — validate it against the Hub once
+    // per mount. `force: false` keeps the PRD §7 session-cache semantics:
+    // a memory cache already fetched this session answers without a request.
+    if (catalog !== null && needsRevalidate.current && !loadingCatalog) {
+      void loadCatalog(false);
+    }
   }, [open, catalog, catalogError, loadingCatalog, loadCatalog]);
 
   const visibleAgents = useMemo(
@@ -740,6 +782,22 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
                   className="pl-8"
                 />
               </div>
+
+              {/* Revalidation strip: the first frame may be painted from the
+                  persistent seed, so without this sign the refresh is
+                  invisible and reads as a frozen list. Same shape as the
+                  chat history's load-more row. The cold load (nothing on
+                  screen yet) keeps the skeleton instead. */}
+              {loadingCatalog && catalog !== null && (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className="flex items-center justify-center gap-1.5 py-2 text-10 text-text-tertiary"
+                >
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  {t("common.loading")}
+                </div>
+              )}
 
               {loadingCatalog && catalog === null ? (
                 <SkeletonGrid />

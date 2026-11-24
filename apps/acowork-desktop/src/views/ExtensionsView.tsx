@@ -8,7 +8,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ExternalLink, Search } from "lucide-react";
+import { ExternalLink, Loader2, Search } from "lucide-react";
 import { CAPSULE_PANE_CN } from "../components/common/capsule";
 import { SplitHandle } from "../components/common/SplitHandle";
 import { StyledInput } from "../components/common/StyledInput";
@@ -18,16 +18,19 @@ import {
     fetchGalleryIndex,
     galleryAttributionLinks,
     mergeGalleryCards,
+    readCachedGalleryIndex,
     type GalleryAttributionKind,
     type GalleryCard,
     type InstallBadge,
 } from "../lib/appGallery";
+import { sameCatalog } from "../lib/catalogCache";
 import {
     installAppFromUrl,
     installAppPackage,
     installErrorMessage,
     listAppVersions,
     listApps,
+    readCachedInstalledApps,
     rollbackApp,
     setAppEnabled,
     uninstallApp,
@@ -70,9 +73,20 @@ export function ExtensionsView() {
     const fileRef = useRef<HTMLInputElement>(null);
     const [query, setQuery] = useState("");
     const [selectedId, setSelectedId] = useState<string | null>(null);
-    const [apps, setApps] = useState<AppDto[]>([]);
-    const [cards, setCards] = useState<GalleryCard[]>([]);
+    // Optimistic first paint (catalogCache.ts): the view remounts on every
+    // entry, and without the seed every entry paid a skeleton + letter-tile
+    // frame for the round trip. The network pass below still runs; its data
+    // is applied only when it differs from what is already on screen.
+    const [apps, setApps] = useState<AppDto[]>(() => readCachedInstalledApps() ?? []);
+    const [cards, setCards] = useState<GalleryCard[]>(() =>
+        mergeGalleryCards(readCachedGalleryIndex()?.apps ?? [], readCachedInstalledApps() ?? []),
+    );
     const [galleryError, setGalleryError] = useState<string | null>(null);
+    // The optimistic seed paints cards immediately, so the network pass is
+    // invisible without a sign of its own: a thin spinner strip above the
+    // list (the same shape as the chat history's load-more row) says
+    // "fresh data is on the way" instead of looking frozen.
+    const [syncing, setSyncing] = useState(true);
     const [busy, setBusy] = useState(false);
     const requestOpenHostedApp = useLayoutStore((s) => s.requestOpenHostedApp);
     const bumpHostedAppsEpoch = useLayoutStore((s) => s.bumpHostedAppsEpoch);
@@ -87,7 +101,7 @@ export function ExtensionsView() {
         if (typeof fetch !== "function") return [];
         try {
             const next = await listApps();
-            setApps(next);
+            setApps((prev) => (sameCatalog(prev, next) ? prev : next));
             setActionError(null);
             return next;
         } catch {
@@ -96,15 +110,23 @@ export function ExtensionsView() {
     };
 
     const reloadAll = async () => {
+        setSyncing(true);
         const local = await reloadLocal();
         try {
             const index = await fetchGalleryIndex();
             setGalleryError(null);
-            setCards(mergeGalleryCards(index.apps, local));
+            const merged = mergeGalleryCards(index.apps, local);
+            setCards((prev) => (sameCatalog(prev, merged) ? prev : merged));
         } catch (e) {
             setGalleryError(e instanceof Error ? e.message : String(e));
-            // Still show local installs when the catalog is unreachable.
-            setCards(mergeGalleryCards([], local));
+            // Catalog unreachable: keep the cache-seeded cards (they are the
+            // last known truth, and the banner above says so). Only a cold
+            // machine with nothing cached falls back to local-only cards.
+            setCards((prev) =>
+                prev.length > 0 ? prev : mergeGalleryCards([], local),
+            );
+        } finally {
+            setSyncing(false);
         }
     };
 
@@ -320,6 +342,21 @@ export function ExtensionsView() {
                 {galleryError && (
                     <div className="border-b border-border-divider px-3 py-2 text-[11px] text-warning-text">
                         {t("extensions.galleryUnavailable")}: {galleryError}
+                    </div>
+                )}
+
+                {/* Sync-in-progress strip — same shape as the chat history's
+                    load-more row (spinner + label, centered, quiet). It only
+                    rides the network pass; the cache-seeded cards stay put
+                    underneath, so nothing jumps when it appears or goes. */}
+                {syncing && (
+                    <div
+                        role="status"
+                        aria-live="polite"
+                        className="flex items-center justify-center gap-1.5 py-2 text-10 text-text-tertiary"
+                    >
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        {t("common.loading")}
                     </div>
                 )}
 

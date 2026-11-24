@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import type { NavView } from "../../lib/types";
-import { listApps, type AppDto } from "../../lib/apps-api";
-import { fetchGalleryIndex } from "../../lib/appGallery";
+import { listApps, readCachedInstalledApps, type AppDto } from "../../lib/apps-api";
+import {
+  fetchGalleryIndex,
+  galleryIconMap,
+  readCachedGalleryIndex,
+} from "../../lib/appGallery";
+import { sameCatalog } from "../../lib/catalogCache";
 import {
   hostedAppIconSrc,
   hostedAppLetter,
@@ -103,30 +108,42 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
   const hostedAppId = useLayoutStore((s) => s.hostedAppId);
   const hostedAppsEpoch = useLayoutStore((s) => s.hostedAppsEpoch);
   const requestOpenHostedApp = useLayoutStore((s) => s.requestOpenHostedApp);
-  const [hostedApps, setHostedApps] = useState<AppDto[]>([]);
-  const [galleryIcons, setGalleryIcons] = useState<Record<string, string>>({});
+  // Optimistic first paint: both lists are seeded synchronously from the
+  // last successful fetch (catalogCache.ts), so a restart shows the real
+  // hosted-app artwork on frame one instead of letter tiles that flip
+  // after the gallery answers. The network pass below still runs and
+  // overwrites the seed — but only when the data actually differs, so an
+  // unchanged catalog causes no re-render at all.
+  const [hostedApps, setHostedApps] = useState<AppDto[]>(() =>
+    hostedNavApps(readCachedInstalledApps() ?? []),
+  );
+  const [galleryIcons, setGalleryIcons] = useState<Record<string, string>>(() =>
+    galleryIconMap(readCachedGalleryIndex()),
+  );
 
   useEffect(() => {
     let cancelled = false;
     const load = () => {
       void listApps()
         .then((apps) => {
-          if (!cancelled) setHostedApps(hostedNavApps(apps));
+          if (!cancelled) {
+            const next = hostedNavApps(apps);
+            setHostedApps((prev) => (sameCatalog(prev, next) ? prev : next));
+          }
         })
         .catch(() => {
-          if (!cancelled) setHostedApps([]);
+          // Keep whatever is on screen (cache seed or last good list): a
+          // Gateway that is down must not erase icons that were visible.
         });
       void fetchGalleryIndex()
         .then((index) => {
           if (cancelled) return;
-          const icons: Record<string, string> = {};
-          for (const app of index.apps) {
-            if (app.icon) icons[app.id] = app.icon;
-          }
-          setGalleryIcons(icons);
+          const icons = galleryIconMap(index);
+          setGalleryIcons((prev) => (sameCatalog(prev, icons) ? prev : icons));
         })
         .catch(() => {
-          /* catalog offline — letter mark until the next focus */
+          /* catalog offline — the seeded icons (or letter marks on a cold
+             machine) stay until the next focus */
         });
     };
     load();

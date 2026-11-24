@@ -7,6 +7,22 @@
  */
 
 import type { AppDto } from "./apps-api";
+import { readCatalog, writeCatalog } from "./catalogCache";
+import pmAppIcon from "../assets/nav-icons/projects.png";
+import docAppIcon from "../assets/nav-icons/docs.png";
+
+/**
+ * Artwork for the built-in apps.
+ *
+ * The gallery catalog only carries icons for published gallery entries. The
+ * built-in PM/DOC apps are local-only, so they had no icon at all and fell
+ * back to a one-letter tile ("项" / "文"). These are the SAME files the left
+ * nav uses, so the two surfaces cannot drift apart.
+ */
+const BUILTIN_APP_ICONS: Record<string, string> = {
+    pm: pmAppIcon,
+    doc: docAppIcon,
+};
 
 /** Cloudflare Pages site (see ACoworkAppGallery docs/deploy.md). */
 export const DEFAULT_APP_GALLERY_INDEX_URL =
@@ -125,7 +141,46 @@ export async function fetchGalleryIndex(url = galleryIndexUrl()): Promise<Galler
         throw new Error("gallery index missing apps[]");
     }
     const base = url.replace(/\/[^/]*$/, "");
-    return { ...body, base_url: base };
+    const index: GalleryIndex = { ...body, base_url: base };
+    // Persist the last good catalog so the next entry into a surface can
+    // paint real artwork on the first frame (see catalogCache.ts). Keyed by
+    // URL: a staging override must not seed the production gallery.
+    writeCatalog(galleryCacheKey(url), index);
+    return index;
+}
+
+/** Key for the gallery cache. One entry per index URL, not across origins. */
+function galleryCacheKey(url: string): string {
+    return `appGallery:${url}`;
+}
+
+/**
+ * The last successfully fetched catalog for `url`, or `null`.
+ *
+ * Synchronous by design: surfaces call this inside a `useState` initializer
+ * so the FIRST render already carries the real icons — that is the whole
+ * point of the optimistic seed. A malformed entry is dropped, never trusted.
+ */
+export function readCachedGalleryIndex(url = galleryIndexUrl()): GalleryIndex | null {
+    return readCatalog<GalleryIndex>(
+        galleryCacheKey(url),
+        (v) => !!v && typeof v === "object" && Array.isArray((v as GalleryIndex).apps),
+    );
+}
+
+/**
+ * The `app id → icon URL` map the nav rail and cards resolve against.
+ *
+ * One derivation for both the cached seed and the fresh fetch, so the two
+ * paths cannot disagree about which entries carry usable artwork.
+ */
+export function galleryIconMap(index: GalleryIndex | null): Record<string, string> {
+    const icons: Record<string, string> = {};
+    if (!index) return icons;
+    for (const app of index.apps) {
+        if (app.icon) icons[app.id] = app.icon;
+    }
+    return icons;
 }
 
 /** Numeric dotted version, ignoring a leading `v` and any `-` / `+` suffix. */
@@ -182,7 +237,7 @@ export function mergeGalleryCards(
             id: g.id,
             name: g.name,
             summary: g.summary,
-            icon: g.icon,
+            icon: BUILTIN_APP_ICONS[g.id] ?? g.icon,
             publisherLabel: g.publisher.display_name,
             versionLabel: local?.installed_version || g.latest_version || g.package?.url || "—",
             badge,
@@ -198,7 +253,7 @@ export function mergeGalleryCards(
             id: app.id,
             name: app.name,
             summary: app.description || app.id,
-            icon: null,
+            icon: BUILTIN_APP_ICONS[app.id] ?? null,
             publisherLabel: app.builtin ? "ACowork" : app.origin || "local",
             versionLabel: app.installed_version || app.version,
             badge: app.builtin ? "builtin" : "installed",

@@ -6,6 +6,7 @@
  * attaches the Bearer token, so none of these functions handle credentials.
  */
 import { getGatewayUrl } from "./config";
+import { readCatalog, writeCatalog } from "./catalogCache";
 
 export interface AppDto {
     id: string;
@@ -87,7 +88,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export async function listApps(): Promise<AppDto[]> {
     const body = await request<{ apps: AppDto[] }>("/api/apps");
-    return body.apps ?? [];
+    const apps = body.apps ?? [];
+    // Persist for the optimistic nav seed (see catalogCache.ts). Keyed by
+    // Gateway: switching deployments must not paint the other Gateway's
+    // installs while the fresh list is in flight.
+    writeCatalog(installedAppsCacheKey(), apps);
+    return apps;
+}
+
+function installedAppsCacheKey(): string {
+    return `installedApps:${getGatewayUrl()}`;
+}
+
+/**
+ * The last successfully fetched app list for the CURRENT Gateway, or `null`.
+ * Synchronous — the nav rail seeds its first frame from this so installed
+ * apps and their slots exist before `/api/apps` answers (the Gateway may
+ * still be starting). Reconciliation is the caller's job: the live list
+ * overwrites the seed whenever it differs.
+ */
+export function readCachedInstalledApps(): AppDto[] | null {
+    return readCatalog<AppDto[]>(
+        installedAppsCacheKey(),
+        (v) => Array.isArray(v),
+    );
 }
 
 export async function setAppEnabled(id: string, enabled: boolean): Promise<void> {
