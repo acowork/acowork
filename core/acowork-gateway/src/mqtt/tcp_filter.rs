@@ -127,6 +127,27 @@ pub fn needs_mqtt_tcp_filter(host: &str, allowlist: &IpAllowlist) -> bool {
     !ip.is_loopback()
 }
 
+/// Where the broker itself must bind, given the configured host.
+///
+/// Single decision point for the ingress invariant: **whenever an
+/// allowlist has to be enforced, the broker binds loopback** — the
+/// pre-filter is then the only external ingress, and it is the only
+/// place the allowlist is executed.
+///
+/// Deliberately independent of whether the pre-filter actually came up.
+/// If the filter failed to bind, falling back to the configured external
+/// host would publish the broker on the LAN with *no* allowlist
+/// enforcement at all — a silent fail-open. Fail closed instead: local
+/// clients keep working, external ingress is simply absent until the
+/// operator fixes the bind conflict.
+pub fn broker_bind_host<'a>(configured: &'a str, allowlist: &IpAllowlist) -> &'a str {
+    if needs_mqtt_tcp_filter(configured, allowlist) {
+        "127.0.0.1"
+    } else {
+        configured
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +180,22 @@ mod tests {
         .unwrap()]);
         assert!(!needs_mqtt_tcp_filter("127.0.0.1", &l));
         assert!(!needs_mqtt_tcp_filter("::1", &l));
+    }
+
+    /// Ingress invariant: an allowlist forces the broker to loopback,
+    /// even when the pre-filter never started (fail closed, not open).
+    #[tokio::test]
+    async fn broker_bind_host_fails_closed_without_filter() {
+        let l = IpAllowlist::new(vec![crate::security::AllowlistEntry::parse(
+            "10.0.0.0/8",
+        )
+        .unwrap()]);
+        assert_eq!(broker_bind_host("0.0.0.0", &l), "127.0.0.1");
+        assert_eq!(broker_bind_host("192.168.1.20", &l), "127.0.0.1");
+        // No allowlist → the configured host stands.
+        assert_eq!(broker_bind_host("0.0.0.0", &IpAllowlist::default()), "0.0.0.0");
+        // Loopback stays loopback either way.
+        assert_eq!(broker_bind_host("127.0.0.1", &l), "127.0.0.1");
     }
 
     /// Decide logic: non-loopback bind + allowlist → filter needed.

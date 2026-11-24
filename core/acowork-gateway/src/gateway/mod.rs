@@ -969,9 +969,9 @@ impl Gateway {
         // may redirect the broker to loopback and enable a TCP
         // pre-filter that enforces the list on non-loopback binds.
         let mqtt_allowlist = self.config.security.to_allowlist();
-        let mqtt_filter = if mqtt_config.enabled
-            && crate::mqtt::tcp_filter::needs_mqtt_tcp_filter(&mqtt_config.host, &mqtt_allowlist)
-        {
+        let mqtt_filter_needed = mqtt_config.enabled
+            && crate::mqtt::tcp_filter::needs_mqtt_tcp_filter(&mqtt_config.host, &mqtt_allowlist);
+        let mqtt_filter = if mqtt_filter_needed {
             // Broker binds loopback; the pre-filter owns the configured
             // external address and gates peers by IP before splicing.
             let target_port = mqtt_config.port;
@@ -986,7 +986,13 @@ impl Gateway {
             {
                 Ok(handle) => Some(handle),
                 Err(e) => {
-                    tracing::error!(%e, "MQTT TCP pre-filter failed to start");
+                    tracing::error!(
+                        %e,
+                        host = %mqtt_config.host,
+                        port = mqtt_config.port,
+                        "MQTT TCP pre-filter failed to start; MQTT stays loopback-only \
+                         (fail closed — the IP allowlist has no other enforcement point)"
+                    );
                     None
                 }
             }
@@ -1017,14 +1023,11 @@ impl Gateway {
                     gateway_state: shared_state.clone(),
                 },
             };
-            // When the pre-filter is active the broker must bind loopback
-            // (the pre-filter already owns the external address). Only the
-            // pre-filter's absence lets the broker bind the configured host.
-            let broker_host = if mqtt_filter.is_some() {
-                "127.0.0.1"
-            } else {
-                &mqtt_config.host
-            };
+            // Ingress invariant (single decision point): an allowlist
+            // forces loopback whether or not the pre-filter came up, so a
+            // filter bind failure can never expose an unfiltered broker.
+            let broker_host =
+                crate::mqtt::tcp_filter::broker_bind_host(&mqtt_config.host, &mqtt_allowlist);
             match crate::mqtt::start_broker_with_auth(
                 broker_host,
                 mqtt_config.port,
@@ -1102,10 +1105,12 @@ impl Gateway {
             });
         }
 
-        // Track whether the broker actually started — used to gate the
-        // Gateway-side publisher without needing to re-check the broker
-        // handle (which has been moved into the debug control slot above).
-        let mqtt_broker_started = {
+        // Whether a broker supervisor exists. NOT "the listener is up":
+        // the supervisor retries a failed bind on its own, and every
+        // consumer below is connection-driven, so construction must not
+        // wait for the listener. Liveness is `BrokerState`, consumed via
+        // the handle's watch channel.
+        let mqtt_broker_present = {
             let ctrl = shared_state.read().await;
             let guard = ctrl.mqtt_broker_control.lock().await;
             guard.is_some()
@@ -1140,7 +1145,7 @@ impl Gateway {
         // match arm below.
         let mut _mqtt_readiness_projection: Option<tokio::task::JoinHandle<()>> = None;
 
-        let mqtt_gw_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = if mqtt_broker_started {
+        let mqtt_gw_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = if mqtt_broker_present {
             let reg_for_dispatch = runtime_http_registry.clone();
             let agent_reg_for_dispatch = agent_registry.clone();
             let node_reg_for_dispatch = node_registry.clone();
@@ -1642,7 +1647,7 @@ impl Gateway {
         };
         let local_node_supervisor: Option<
             std::sync::Arc<crate::gateway::node_manager::LocalNodeSupervisor>,
-        > = if mqtt_broker_started && self.config.local_node.enabled {
+        > = if mqtt_broker_present && self.config.local_node.enabled {
             match crate::gateway::node_manager::ensure_local_node(
                 mqtt_config.port,
                 &self.config.packages_dir,
@@ -1660,7 +1665,7 @@ impl Gateway {
                     None
                 }
             }
-        } else if mqtt_broker_started && !self.config.local_node.enabled {
+        } else if mqtt_broker_present && !self.config.local_node.enabled {
             tracing::info!(
                 "Local node agent disabled by [local_node] enabled=false \
                      (or --no-spawn-local-node); relying on externally-started nodes"

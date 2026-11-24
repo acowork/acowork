@@ -14,6 +14,7 @@
 //! async handler shape.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use rumqttd::{Broker, Config};
 
@@ -209,8 +210,8 @@ pub fn check_connect_auth(
 /// Handle to the running MQTT broker.
 ///
 /// The broker lives on a dedicated OS thread (see [`start_broker`]);
-/// this handle only carries the shutdown channel and the listen
-/// address.
+/// this handle carries the shutdown channel, the listen addresses and
+/// the listener's state stream.
 ///
 /// Production callers never need to shut the broker down — it lives
 /// for the lifetime of the Gateway process. The `shutdown_tx` exists
@@ -221,8 +222,46 @@ pub struct MqttBrokerHandle {
     shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
     /// The address the broker is listening on.
     pub listen_addr: SocketAddr,
-    /// The address of the strict remote listener, when it was started.
+    /// The address of the strict remote listener, when it was requested.
     pub remote_listen_addr: Option<SocketAddr>,
+    /// Liveness of the listener, updated by the supervisor thread.
+    state: tokio::sync::watch::Receiver<BrokerState>,
+}
+
+/// Lifecycle of the embedded broker's listener.
+///
+/// The broker is a supervised resource, not a one-shot construction: a
+/// bind failure (port taken by a process that is still shutting down,
+/// for instance) is retried on the same curve the MQTT sessions use.
+/// Every non-terminal state has a bounded exit, so a consumer that
+/// renders this state can never be stuck on a stale value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerState {
+    /// Supervisor is bringing the listener up; no evidence yet.
+    Starting,
+    /// A TCP connection to the listen address succeeded — the listener
+    /// is accepting. This is measured, not assumed.
+    Listening,
+    /// The listener died and will be rebuilt after `retry_in`.
+    Retrying {
+        reason: String,
+        attempt: u32,
+        retry_in: std::time::Duration,
+    },
+    /// The supervisor stopped for good.
+    Closed,
+}
+
+impl BrokerState {
+    /// Whether the listener is currently accepting connections.
+    pub fn is_listening(&self) -> bool {
+        matches!(self, BrokerState::Listening)
+    }
+
+    /// Whether the supervisor has stopped for good.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, BrokerState::Closed)
+    }
 }
 
 /// The strict second v4 listener a broker may host (§7.2).
@@ -310,16 +349,18 @@ listen = "127.0.0.1:0"
 ///
 /// # Why a background thread?
 ///
-/// rumqttd 0.20's `Broker::start()` never returns — it joins the
-/// server threads, whose accept loops run forever. Calling it directly
-/// would block the calling thread indefinitely, so this function runs
-/// the broker on a dedicated OS thread and returns after a bounded
-/// startup confirmation. The permanent block inside `Broker::start()`
-/// is what keeps the broker alive on that thread's stack.
+/// rumqttd 0.20's `Broker::start()` blocks while the broker is alive —
+/// it joins the server threads, whose accept loops run forever. Calling
+/// it directly would block the caller, so the broker lives on a
+/// dedicated OS thread and this function returns as soon as that
+/// supervisor thread exists.
 ///
-/// Uses a short timeout (500 ms) to confirm startup, but does NOT block
-/// indefinitely — if the broker doesn't respond in time, the function
-/// still returns `Ok` so the Gateway can continue starting.
+/// Construction is NOT readiness. `Ok` means "a supervisor owns the
+/// listener", nothing more: a bind conflict is retried on the session
+/// backoff curve, and liveness is published as [`BrokerState`] on the
+/// handle's watch channel. Consumers that need the listener wait on
+/// [`MqttBrokerHandle::wait_listening`] or consume the state stream;
+/// nothing here blocks the Gateway's boot on it.
 ///
 /// This is the ONLY public entry point for starting the broker; there
 /// is intentionally no "direct" (blocking) variant.
@@ -354,34 +395,19 @@ pub fn start_broker_with_auth(
             host, port, e
         )))?;
 
-    // Pre-probe the remote port: rumqttd's `Broker::start` aborts the
-    // whole broker if ANY configured server cannot bind, and a remote
-    // -listener conflict must not take the main listener down with it.
-    // The probe is dropped before rumqttd binds — a tiny race window
-    // another process could theoretically steal, acceptable for a
-    // loopback dev-machine edge case.
-    let remote_bind: Option<(String, u16)> = remote.as_ref().and_then(|r| {
-        match std::net::TcpListener::bind((r.host.as_str(), r.port)) {
-            Ok(probe) => {
-                drop(probe);
-                Some((r.host.clone(), r.port))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    port = r.port,
-                    error = %e,
-                    "remote MQTT listener port unavailable; strict listener disabled (main broker unaffected)"
-                );
-                None
-            }
-        }
-    });
+    // The remote listener is configured unconditionally. rumqttd 0.20
+    // runs every server on its own thread and only *logs* a server's
+    // start error (`error!(.., "Server error - V4")`), so a remote bind
+    // failure ends that thread alone — the main listener keeps serving.
+    // The former bind-then-drop "pre-probe" was therefore unnecessary,
+    // and it opened a window in which another process could steal the
+    // port between the probe and rumqttd's own bind.
+    let remote_bind: Option<(String, u16)> = remote.as_ref().map(|r| (r.host.clone(), r.port));
     let remote_listen_addr: Option<SocketAddr> = remote_bind
         .as_ref()
-        .map(|(h, p)| format!("{}:{}", h, p))
-        .and_then(|s| s.parse().ok());
+        .and_then(|(h, p)| format!("{}:{}", h, p).parse().ok());
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (state_tx, state_rx) = tokio::sync::watch::channel(BrokerState::Starting);
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
     let h = host.to_string();
 
@@ -390,6 +416,9 @@ pub fn start_broker_with_auth(
         .spawn(move || {
             let mut config =
                 build_broker_config(&h, port, remote_bind.as_ref().map(|(h, p)| (h.as_str(), *p)));
+            // The liveness probe authenticates as an internal publisher,
+            // so it needs the token before `auth` moves into the handler.
+            let probe_token = auth.as_ref().map(|a| a.publisher_token.clone());
             if let Some(auth) = auth {
                 let v4 = config.v4.as_mut().expect("v4 servers configured");
                 let server = v4.get_mut("acowork").expect("server 'acowork' configured");
@@ -429,8 +458,7 @@ pub fn start_broker_with_auth(
             // remote MQTT surface follows the user service lifecycle
             // exactly like the HTTP surface does (fail closed while
             // the verifier is not loaded). Guard = the server actually
-            // being present in the built config (a port conflict skips
-            // it above).
+            // being present in the built config.
             if let Some(remote) = remote.as_ref()
                 && let Some(server) = config
                     .v4
@@ -459,84 +487,236 @@ pub fn start_broker_with_auth(
                     },
                 );
             }
-            let mut broker = Broker::new(config);
-
-            tracing::info!(
-                addr = %listen_addr,
-                port,
-                max_connections = defaults::GATEWAY_MQTT_MAX_CONNECTIONS,
-                max_packet_size = defaults::GATEWAY_MQTT_MAX_PACKET_SIZE,
-                "Starting embedded MQTT broker (rumqttd)"
-            );
-
-            // If startup fails (e.g. port already taken), signal the
-            // parent and exit immediately.
-            if let Err(e) = broker.start() {
-                let _ = tx.send(Err(MqttBrokerError::Start(format!(
-                    "rumqttd broker start failed: {e}"
-                ))));
-                return;
-            }
-
-            // NOTE: `Broker::start()` normally blocks here forever (it
-            // joins the server threads) — that is what keeps the broker
-            // alive on this thread's stack. The `Ok(())` confirmation
-            // is only reachable in the abnormal case where the server
-            // threads exited (e.g. a bind failure raced with connect).
-            let _ = tx.send(Ok(()));
-
-            // Park until a shutdown signal arrives.
+            // Supervised lifetime. The decisive fact about rumqttd
+            // 0.20: `Broker::start()` joins the server threads, so it
+            // **blocks while the broker is alive and returns when every
+            // server thread has exited**. A bind failure is logged
+            // inside the server thread, not returned — measured: with
+            // the port taken, `start()` returns Ok(()) in ~3 ms.
             //
-            // `park_timeout` (vs. plain `park`) is used so the thread
-            // can react to a shutdown request from the debug HTTP
-            // endpoints without an explicit `Thread::unpark` — which
-            // would require exposing the parked Thread handle in
-            // `MqttBrokerHandle`, a strictly debug-only concern. The
-            // 200 ms timeout is a deliberate trade-off: it costs ~5
-            // wakeups/sec/idle thread, but lets the debug endpoint shut
-            // the broker down cleanly.
+            // The previous wiring read that return as a *success*
+            // confirmation and the 500 ms timeout as "still starting",
+            // which is exactly inverted: the only signal that could
+            // arrive meant "the broker is dead". Hence a real probe for
+            // liveness, and a retry loop for recovery.
+            // No owner (handle dropped) counts as shutdown: a broker
+            // nobody can observe must not keep retrying forever.
+            let stopped = |rx: &std::sync::mpsc::Receiver<()>| {
+                !matches!(
+                    rx.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                )
+            };
+            let policy = acowork_mqtt_session::ReconnectPolicy::default();
+            let mut attempt: u32 = 0;
             loop {
-                std::thread::park_timeout(std::time::Duration::from_millis(200));
-                if shutdown_rx.try_recv().is_ok() {
+                if stopped(&shutdown_rx) {
                     break;
                 }
+                let _ = state_tx.send(BrokerState::Starting);
+                let mut broker = Broker::new(config.clone());
+                tracing::info!(
+                    addr = %listen_addr,
+                    port,
+                    attempt,
+                    max_connections = defaults::GATEWAY_MQTT_MAX_CONNECTIONS,
+                    max_packet_size = defaults::GATEWAY_MQTT_MAX_PACKET_SIZE,
+                    "Starting embedded MQTT broker (rumqttd)"
+                );
+
+                let probe =
+                    spawn_listen_probe(listen_addr, probe_token.clone(), state_tx.clone());
+                let outcome = broker.start();
+                probe.stop();
+                drop(broker);
+
+                if stopped(&shutdown_rx) {
+                    break;
+                }
+                let reason = match outcome {
+                    Ok(()) => "every broker server thread exited (listen address unavailable?)"
+                        .to_string(),
+                    Err(e) => format!("rumqttd broker start failed: {e}"),
+                };
+                let retry_in = policy.delay(attempt);
+                attempt = attempt.saturating_add(1);
+                tracing::error!(
+                    addr = %listen_addr, %reason, ?retry_in, attempt,
+                    "MQTT broker listener is down; retrying"
+                );
+                let _ = state_tx.send(BrokerState::Retrying {
+                    reason,
+                    attempt,
+                    retry_in,
+                });
+
+                // Sleep in slices so a shutdown request stays responsive
+                // without exposing the parked thread handle.
+                let deadline = std::time::Instant::now() + retry_in;
+                while std::time::Instant::now() < deadline {
+                    if stopped(&shutdown_rx) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
             }
-            // Broker drops here, closing all TCP connections.
-            drop(broker);
-            tracing::info!("MQTT broker thread exiting (broker dropped)");
+            let _ = state_tx.send(BrokerState::Closed);
+            tracing::info!("MQTT broker supervisor exiting (broker dropped)");
         })
         .map_err(|e| MqttBrokerError::Start(format!("spawn thread: {e}")))?;
-
-    // Don't block indefinitely. Give the broker 500 ms to start, then proceed.
-    match rx.recv_timeout(std::time::Duration::from_millis(500)) {
-        Ok(Ok(())) => {
-            tracing::info!(addr = %listen_addr, "MQTT broker confirmed started");
-        }
-        Ok(Err(e)) => {
-            return Err(e);
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            // Broker thread is still starting up — this is fine.
-            // The Gateway continues booting; MQTT may not be available
-            // for the first few moments but will be soon.
-            tracing::warn!(
-                addr = %listen_addr,
-                "MQTT broker startup not confirmed within 500 ms; proceeding (broker may still be initializing)"
-            );
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            // Thread panicked before sending
-            return Err(MqttBrokerError::Start(
-                "broker thread panicked during startup".to_string(),
-            ));
-        }
-    }
 
     Ok(MqttBrokerHandle {
         shutdown_tx: Some(shutdown_tx),
         listen_addr,
         remote_listen_addr,
+        state: state_rx,
     })
+}
+
+/// Background probe that turns "the broker answers CONNECT" into an
+/// event.
+///
+/// rumqttd exposes no bind result, so liveness has to be measured from
+/// the outside. A bare TCP connect is **not** sufficient evidence: a
+/// socket that merely holds the port (a process still shutting down, a
+/// test blocker) completes the handshake from its accept backlog
+/// without ever serving MQTT — measured, and it produced a false
+/// `Listening`. So the probe performs a real MQTT CONNECT and requires
+/// an accepted CONNACK.
+///
+/// The probe has no deadline of its own: it ends on success, or when the
+/// supervisor stops it because `Broker::start()` returned (the death
+/// event). Those are the two bounded exits of `Starting`.
+struct ListenProbe {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ListenProbe {
+    fn stop(self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(handle) = self.handle {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn spawn_listen_probe(
+    listen_addr: SocketAddr,
+    password: Option<String>,
+    state: tokio::sync::watch::Sender<BrokerState>,
+) -> ListenProbe {
+    // A wildcard bind address is not a valid connect target (Windows
+    // rejects connects to 0.0.0.0), so probe the loopback equivalent.
+    let probe_addr = if listen_addr.ip().is_unspecified() {
+        let loopback: std::net::IpAddr = if listen_addr.is_ipv4() {
+            "127.0.0.1".parse().expect("loopback v4")
+        } else {
+            "::1".parse().expect("loopback v6")
+        };
+        SocketAddr::new(loopback, listen_addr.port())
+    } else {
+        listen_addr
+    };
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let handle = std::thread::Builder::new()
+        .name("mqtt-broker-probe".into())
+        .spawn(move || {
+            let started = std::time::Instant::now();
+            let mut warned = false;
+            while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                if mqtt_connack_probe(&probe_addr, password.as_deref().unwrap_or("")) {
+                    tracing::info!(addr = %listen_addr, "MQTT broker confirmed serving (CONNECT accepted)");
+                    let _ = state.send(BrokerState::Listening);
+                    return;
+                }
+                if !warned && started.elapsed() > std::time::Duration::from_secs(5) {
+                    warned = true;
+                    tracing::warn!(
+                        addr = %listen_addr,
+                        "MQTT broker still not accepting connections after 5s"
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        })
+        .ok();
+    ListenProbe { stop, handle }
+}
+
+/// Client id the liveness probe CONNECTs with.
+///
+/// `user:service:{suffix}` is the internal-publisher shape, so the
+/// startup publisher token authorizes it, and the suffix keeps it clear
+/// of the real `user:service` publisher (a duplicate client id would
+/// kick that session off the broker).
+const PROBE_CLIENT_ID: &str = "user:service:broker-probe";
+
+/// One MQTT 3.1.1 CONNECT → CONNACK round trip, hand-rolled.
+///
+/// Deliberately dependency-free and synchronous: it runs on the probe
+/// thread, must not need a tokio runtime (rumqttd owns its own), and
+/// only needs the four packets' worth of bytes below. Returns true only
+/// for CONNACK return code 0 (accepted).
+fn mqtt_connack_probe(addr: &SocketAddr, password: &str) -> bool {
+    use std::io::{Read, Write};
+
+    let Ok(mut stream) =
+        std::net::TcpStream::connect_timeout(addr, std::time::Duration::from_millis(200))
+    else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(500)));
+    let _ = stream.set_nodelay(true);
+
+    // Variable header: protocol name/level, flags, keep alive.
+    let mut body: Vec<u8> = vec![0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04];
+    let mut flags = 0x02u8; // clean session
+    if !password.is_empty() {
+        flags |= 0x40; // password present (no username)
+    }
+    body.push(flags);
+    body.extend_from_slice(&60u16.to_be_bytes()); // keep alive: rumqttd rejects 0
+    let id = PROBE_CLIENT_ID.as_bytes();
+    body.extend_from_slice(&(id.len() as u16).to_be_bytes());
+    body.extend_from_slice(id);
+    if !password.is_empty() {
+        let pw = password.as_bytes();
+        body.extend_from_slice(&(pw.len() as u16).to_be_bytes());
+        body.extend_from_slice(pw);
+    }
+
+    let mut packet = vec![0x10u8];
+    // Remaining length, MQTT variable-byte encoding (body is < 16 KiB).
+    let mut len = body.len();
+    loop {
+        let mut byte = (len % 128) as u8;
+        len /= 128;
+        if len > 0 {
+            byte |= 0x80;
+        }
+        packet.push(byte);
+        if len == 0 {
+            break;
+        }
+    }
+    packet.extend_from_slice(&body);
+    if stream.write_all(&packet).is_err() {
+        return false;
+    }
+
+    let mut head = [0u8; 4];
+    if stream.read_exact(&mut head).is_err() {
+        return false;
+    }
+    // CONNACK: type 2, remaining length 2, [session present, return code].
+    let accepted = head[0] == 0x20 && head[1] == 0x02 && head[3] == 0x00;
+    // Leave cleanly so no session or LWT is left behind either way.
+    let _ = stream.write_all(&[0xE0, 0x00]);
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    accepted
 }
 
 /// Gracefully shut down the broker.
@@ -546,13 +726,53 @@ pub fn start_broker_with_auth(
 /// connections. After shutdown, the broker is permanently stopped —
 /// restarting requires creating a new handle via `start_broker`.
 impl MqttBrokerHandle {
-    /// Signal the broker thread to exit, then return immediately.
+    /// Current listener state.
+    pub fn state(&self) -> BrokerState {
+        self.state.borrow().clone()
+    }
+
+    /// Watch receiver for every listener state change.
+    pub fn state_rx(&self) -> tokio::sync::watch::Receiver<BrokerState> {
+        self.state.clone()
+    }
+
+    /// Wait until the listener accepts connections, or `budget` elapses.
+    ///
+    /// This is a *consumer-side* budget, not the broker's own deadline:
+    /// the supervisor guarantees a state change on its own (Listening,
+    /// or Retrying once `Broker::start()` returns). `false` means "not
+    /// yet", never "failed forever" — consume [`Self::state_rx`] for the
+    /// authoritative picture.
+    pub async fn wait_listening(&self, budget: std::time::Duration) -> bool {
+        let mut rx = self.state.clone();
+        if rx.borrow_and_update().is_listening() {
+            return true;
+        }
+        let deadline = tokio::time::sleep(budget);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                changed = rx.changed() => {
+                    match changed {
+                        Ok(()) => {
+                            if rx.borrow_and_update().is_listening() {
+                                return true;
+                            }
+                        }
+                        Err(_) => return false,
+                    }
+                }
+                () = &mut deadline => return false,
+            }
+        }
+    }
+
+    /// Signal the broker supervisor to exit, then return immediately.
     ///
     /// This **does not wait** for the broker thread to actually exit.
-    /// Note that rumqttd's `Broker::start()` blocks the broker thread
-    /// forever (it joins the server threads), so in practice the TCP
-    /// listener stays open until process exit; the signal only ends
-    /// the broker thread's park loop. Production callers should treat
+    /// rumqttd's `Broker::start()` joins the server threads, so the TCP
+    /// listener stays open until process exit; the signal only ends the
+    /// supervisor loop between attempts. Production callers should treat
     /// the broker as process-lifetime state and never shut it down.
     pub fn signal_shutdown(&mut self) -> Result<(), String> {
         let tx = self
@@ -890,12 +1110,11 @@ mod tests {
         let port = 18975; // different from default 19875
         let host = "127.0.0.1";
 
-        // Threaded mode: `start_broker` blocks forever on rumqttd's
-        // `Broker::start()` (it joins the server threads, whose accept
-        // loops never exit), so calling it from the test thread would
-        // hang whenever the port is free. `start_broker`
-        // parks the broker on a background OS thread and returns after
-        // a bounded startup confirmation.
+        // Threaded mode: rumqttd's `Broker::start()` blocks while the
+        // broker lives (it joins the server threads, whose accept loops
+        // never exit), so calling it from the test thread would hang
+        // whenever the port is free. `start_broker` supervises it on a
+        // background OS thread and returns immediately.
         let handle = start_broker(host, port).expect("broker should start");
         assert_eq!(handle.listen_addr.port(), port);
 
@@ -949,5 +1168,152 @@ mod tests {
         // hang on shutdown.
         drop(handle);
         drop(client);
+    }
+
+    /// Bind a loopback port and hold it, so the broker cannot take it.
+    fn hold_port() -> (std::net::TcpListener, u16) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind blocker");
+        let port = l.local_addr().expect("blocker addr").port();
+        (l, port)
+    }
+
+    /// Await a state predicate, failing the test if it never arrives.
+    async fn await_state(
+        rx: &mut tokio::sync::watch::Receiver<BrokerState>,
+        budget: std::time::Duration,
+        what: &str,
+        pred: impl Fn(&BrokerState) -> bool,
+    ) -> BrokerState {
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            let current = rx.borrow_and_update().clone();
+            if pred(&current) {
+                return current;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(!remaining.is_zero(), "never reached {what}; last state {current:?}");
+            tokio::time::timeout(remaining, rx.changed())
+                .await
+                .unwrap_or_else(|_| panic!("never reached {what}; last state {current:?}"))
+                .expect("broker supervisor watch closed");
+        }
+    }
+
+    /// The core M3 regression: a taken port must NOT read as "started".
+    ///
+    /// rumqttd logs the bind failure inside its server thread and
+    /// `Broker::start()` returns Ok(()) — the old code treated that as
+    /// success and reported a live broker on a dead port. The supervisor
+    /// must instead leave `Starting` on its own, publish `Retrying`, and
+    /// recover once the port is released.
+    #[tokio::test]
+    async fn bind_conflict_reports_retrying_then_recovers() {
+        let (blocker, port) = hold_port();
+        let handle = start_broker("127.0.0.1", port).expect("supervisor should spawn");
+        let mut rx = handle.state_rx();
+
+        // Bounded exit from Starting without any consumer deadline.
+        let state = await_state(&mut rx, std::time::Duration::from_secs(5), "Retrying", |s| {
+            matches!(s, BrokerState::Retrying { .. })
+        })
+        .await;
+        match state {
+            BrokerState::Retrying { attempt, retry_in, .. } => {
+                assert!(attempt >= 1, "attempt counter must advance");
+                assert!(!retry_in.is_zero(), "retry must be scheduled");
+            }
+            other => panic!("expected Retrying, got {other:?}"),
+        }
+        assert!(!handle.state().is_listening());
+
+        // Release the port: the supervisor rebuilds the broker and the
+        // probe confirms it. No process restart involved.
+        drop(blocker);
+        await_state(&mut rx, std::time::Duration::from_secs(10), "Listening", |s| {
+            s.is_listening()
+        })
+        .await;
+        assert!(handle.wait_listening(std::time::Duration::from_millis(1)).await);
+    }
+
+    /// A consumer budget expires without killing anything: `false` means
+    /// "not yet", and the supervisor keeps working afterwards.
+    #[tokio::test]
+    async fn wait_listening_budget_is_not_destructive() {
+        let (blocker, port) = hold_port();
+        let handle = start_broker("127.0.0.1", port).expect("supervisor should spawn");
+        assert!(
+            !handle
+                .wait_listening(std::time::Duration::from_millis(200))
+                .await,
+            "a held port cannot be listening"
+        );
+        drop(blocker);
+        assert!(
+            handle.wait_listening(std::time::Duration::from_secs(10)).await,
+            "the same handle must still recover after an expired budget"
+        );
+    }
+
+    /// The probe must authenticate: with `auth_enabled` the broker
+    /// refuses an uncredentialed CONNECT, and a probe that could not get
+    /// CONNACK would report a healthy broker as never-listening.
+    #[tokio::test]
+    async fn probe_authenticates_when_auth_is_enabled() {
+        let port = crate::test_support::free_ports(1)[0];
+        let auth = BrokerAuth {
+            auth_enabled: true,
+            enrollment_tokens: Arc::new(std::sync::Mutex::new(empty_enrollment())),
+            node_tokens: Arc::new(std::sync::Mutex::new(empty_node_tokens())),
+            publisher_token: "probe-token".to_string(),
+            http_token: None,
+        };
+        let handle = start_broker_with_auth("127.0.0.1", port, Some(auth), None)
+            .expect("supervisor should spawn");
+        assert!(
+            handle
+                .wait_listening(std::time::Duration::from_secs(5))
+                .await,
+            "probe must CONNECT successfully with the publisher token"
+        );
+    }
+
+    /// A socket that holds the port without speaking MQTT must not read
+    /// as a live broker — the false positive a bare TCP connect gives.
+    #[test]
+    fn connack_probe_rejects_a_silent_port_holder() {
+        let (blocker, port) = hold_port();
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        assert!(
+            !mqtt_connack_probe(&addr, ""),
+            "a backlog-only socket answers TCP but never CONNACK"
+        );
+        drop(blocker);
+    }
+
+    /// Removing the bind-then-drop pre-probe must not regress isolation:
+    /// rumqttd runs each server on its own thread, so a remote bind
+    /// conflict leaves the main listener serving.
+    #[tokio::test]
+    async fn remote_port_conflict_keeps_main_listener_alive() {
+        let main_port = crate::test_support::free_ports(1)[0];
+        let (_remote_blocker, remote_port) = hold_port();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gw = crate::gateway::state::GatewayState::new(&dir.path().to_string_lossy());
+        let remote = RemoteMqttListener {
+            host: "127.0.0.1".to_string(),
+            port: remote_port,
+            auth: RemoteMqttAuth {
+                gateway_state: Arc::new(tokio::sync::RwLock::new(gw)),
+            },
+        };
+        let handle = start_broker_with_auth("127.0.0.1", main_port, None, Some(remote))
+            .expect("supervisor should spawn");
+        assert!(
+            handle
+                .wait_listening(std::time::Duration::from_secs(5))
+                .await,
+            "main listener must serve despite the remote port conflict"
+        );
     }
 }

@@ -44,7 +44,21 @@ impl ReconnectPolicy {
         if err_class.is_fatal() {
             return None;
         }
+        Some(Backoff {
+            duration: self.delay(consecutive_failures),
+            attempt: consecutive_failures,
+            err_class,
+        })
+    }
 
+    /// The retry delay for the `n`-th consecutive failure, independent
+    /// of any error classification.
+    ///
+    /// Split out of [`Self::backoff`] so resources that are not MQTT
+    /// clients (the embedded broker's bind supervisor) share the exact
+    /// same curve instead of re-deriving it — and without having to
+    /// invent an [`ErrClass`] that does not describe them.
+    pub fn delay(&self, consecutive_failures: u32) -> Duration {
         // Exponential growth: initial * multiplier^n
         let exp = consecutive_failures.min(20) as f64; // guard overflow
         let raw_ms = self.initial.as_millis() as f64;
@@ -60,11 +74,7 @@ impl ReconnectPolicy {
         delay_ms *= 1.0 + jitter_frac;
         delay_ms = delay_ms.max(100.0); // floor at 100ms
 
-        Some(Backoff {
-            duration: Duration::from_millis(delay_ms as u64),
-            attempt: consecutive_failures,
-            err_class,
-        })
+        Duration::from_millis(delay_ms as u64)
     }
 }
 
