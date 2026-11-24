@@ -1134,6 +1134,12 @@ impl Gateway {
             tokio::sync::Mutex<Option<crate::mqtt::InventoryNotifierTrigger>>,
         > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
+        // ADR-059: the `mqtt` readiness record is a projection of the
+        // session state, so the task that writes it must live as long
+        // as the session. Bound here rather than dropped inside the
+        // match arm below.
+        let mut _mqtt_readiness_projection: Option<tokio::task::JoinHandle<()>> = None;
+
         let mqtt_gw_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = if mqtt_broker_started {
             let reg_for_dispatch = runtime_http_registry.clone();
             let agent_reg_for_dispatch = agent_registry.clone();
@@ -1246,27 +1252,32 @@ impl Gateway {
             // rejects credential-less connections — the publisher
             // presents the internal startup token (client_id as the
             // username; the CONNECT check keys on client_id + password).
-            let publisher_result = if mqtt_config.auth_enabled {
-                crate::mqtt::GatewayMqttClient::new_publisher_with_callback_and_credentials(
-                    &mqtt_config.host,
-                    mqtt_config.port,
-                    callback,
+            //
+            // `spawn`, not `connect`: the embedded broker thread was
+            // only just started, so "not accepting connections yet" is
+            // the normal case here, not an error. Waiting for the first
+            // ConnAck and dropping the client on expiry used to abort
+            // the poll task and strand the Gateway in BOOTING forever.
+            let credentials = if mqtt_config.auth_enabled {
+                Some((
                     acowork_core::defaults::GATEWAY_MQTT_PUBLISHER_CLIENT_ID,
-                    &publisher_token,
-                )
-                .await
+                    publisher_token.as_str(),
+                ))
             } else {
-                crate::mqtt::GatewayMqttClient::new_publisher_with_callback(
-                    &mqtt_config.host,
-                    mqtt_config.port,
-                    callback,
-                )
-                .await
+                None
             };
-            match publisher_result {
+            let session_result = crate::mqtt::GatewayMqttClient::spawn(
+                &mqtt_config.host,
+                mqtt_config.port,
+                acowork_core::defaults::GATEWAY_MQTT_PUBLISHER_CLIENT_ID,
+                credentials,
+                Some(callback),
+            )
+            .await;
+            match session_result {
                 Ok(c) => {
                     tracing::info!(
-                        "MQTT Gateway client connected (persistent subscriptions handled by ConnAck handler)"
+                        "MQTT Gateway session started (persistent subscriptions handled by ConnAck handler)"
                     );
                     let client = Arc::new(c.clone());
                     // ADR-059 §7.2: attach the replay guard so the poll
@@ -1286,19 +1297,44 @@ impl Gateway {
                     *node_control_slot.lock().await = Some(
                         crate::mqtt::node_control::NodeControlClient::new(client.clone()),
                     );
-                    // ADR-059 Phase 1.2: the MQTT broker + Gateway client
-                    // are required subsystems; mark them ready as soon as
-                    // the client connected. Phase transitions are
-                    // idempotent, so re-entry is safe.
-                    mqtt_handle.mark_ready(Some("client connected".to_string()));
+                    // ADR-059: readiness is a connection fact, not a
+                    // construction fact. The record follows the session
+                    // state stream for the rest of the process:
+                    // Connected -> Ready, retrying -> Booting (with the
+                    // attempt counter, so a stuck boot names its
+                    // blocker), non-recoverable -> Failed.
+                    _mqtt_readiness_projection = Some(crate::mqtt::readiness::spawn_projection(
+                        c.state_rx(),
+                        mqtt_handle.clone(),
+                    ));
                     Some(client)
                 }
                 Err(e) => {
-                    tracing::warn!(%e, "MQTT Gateway client failed");
+                    // Construction failed — there is no session to
+                    // project, so record the failure explicitly instead
+                    // of leaving a required subsystem in Booting.
+                    tracing::error!(%e, "MQTT Gateway session could not be constructed");
+                    mqtt_handle.mark_failed(Some(format!("mqtt session construction failed: {e}")));
+                    publisher_handle
+                        .mark_failed(Some("mqtt session unavailable".to_string()));
                     None
                 }
             }
+        } else if mqtt_config.enabled {
+            // MQTT is wanted but the broker did not start. This is a
+            // failure, NOT a skip: advertising READY here would tell
+            // every consumer the platform is usable while no message
+            // can flow at all.
+            mqtt_handle.mark_failed(Some("mqtt broker failed to start".to_string()));
+            publisher_handle.mark_failed(Some("mqtt broker failed to start".to_string()));
+            None
         } else {
+            // MQTT is disabled by configuration: the subsystems are
+            // intentionally not started. Leaving them in Booting would
+            // keep a required record unsatisfied and the phase would
+            // never reach READY.
+            mqtt_handle.mark_skipped(Some("mqtt disabled by configuration".to_string()));
+            publisher_handle.mark_skipped(Some("mqtt disabled by configuration".to_string()));
             None
         };
 

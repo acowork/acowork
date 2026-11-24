@@ -201,16 +201,49 @@ impl MqttGlobalResourcesPublisher {
             }
             tracing::info!("Publisher: ready signal received, performing initial publish");
 
+            // ── Connection gate ─────────────────────────────────────
+            // The session is constructed before the embedded broker is
+            // accepting connections, so "ready to publish" and
+            // "connected" are two different facts. Publishing into a
+            // disconnected session loses the retained snapshot silently.
+            if !helper.wait_connected().await {
+                tracing::warn!("MQTT publisher: session ended before connecting; loop exiting");
+                return;
+            }
             helper.publish_all().await;
 
-            // ── Trigger-driven republish loop — no periodic polling ─────
-            // Every resource-mutating HTTP handler (add/remove/update provider,
-            // MCP catalog entry, embedding model, global config)
-            // calls `trigger()` which wakes this loop via `Notify`.
+            // ── Trigger- AND connection-driven republish ────────────
+            // Two wake sources, no polling:
+            //  * every resource-mutating HTTP handler calls `trigger()`;
+            //  * every (re)connect. A reconnect must republish because
+            //    the retained snapshot lives in the broker: a broker
+            //    restart wipes it, and subscribers that reconnect would
+            //    otherwise never see providers/models again.
+            let state_rx = helper.client.state_rx();
             loop {
-                notify_for_loop.notified().await;
-                tracing::debug!("MQTT publisher: triggered republish");
-                helper.publish_all().await;
+                tokio::select! {
+                    () = notify_for_loop.notified() => {
+                        tracing::debug!("MQTT publisher: triggered republish");
+                        if !helper.wait_connected().await {
+                            tracing::warn!("MQTT publisher: session ended; loop exiting");
+                            return;
+                        }
+                        helper.publish_all().await;
+                    }
+                    changed = state_rx.changed() => {
+                        match changed {
+                            Ok(state) if state.is_connected() => {
+                                tracing::info!("MQTT publisher: reconnected, republishing retained snapshot");
+                                helper.publish_all().await;
+                            }
+                            Ok(_) => {}
+                            Err(_) => {
+                                tracing::warn!("MQTT publisher: state source gone; loop exiting");
+                                return;
+                            }
+                        }
+                    }
+                }
             }
         });
 
@@ -235,6 +268,30 @@ struct LoopHelper {
 }
 
 impl LoopHelper {
+    /// Wait until the session is `Connected`.
+    ///
+    /// Event-driven, with no timer of its own: the session state machine
+    /// guarantees a bounded time to the next transition (watchdog /
+    /// backoff), so this loop is woken by facts, never by a clock.
+    /// Returns `false` only when the session can never connect again
+    /// (terminal state, or the state source is gone).
+    async fn wait_connected(&self) -> bool {
+        let rx = self.client.state_rx();
+        loop {
+            let state = rx.current();
+            if state.is_connected() {
+                return true;
+            }
+            if state.is_terminal() {
+                tracing::warn!(%state, "MQTT publisher: session is terminal, cannot publish");
+                return false;
+            }
+            if rx.changed().await.is_err() {
+                return false;
+            }
+        }
+    }
+
     /// Publish all `acowork/global/*` Retained topics.
     ///
     /// Reads the current GatewayState snapshot and publishes:

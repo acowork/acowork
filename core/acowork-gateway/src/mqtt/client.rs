@@ -18,8 +18,16 @@ use acowork_core::defaults;
 use acowork_core::mqtt_proto::DataEnvelope;
 use acowork_core::mqtt_proto::USER_PROFILES_CHANGED_TOPIC;
 use acowork_mqtt_session::{
-    MqttClient, MqttClientConfig, MqttClientError, MqttClientHandler,
+    MqttClient, MqttClientConfig, MqttClientError, MqttClientHandler, SessionState, SessionStateRx,
+    StateWait,
 };
+
+/// How long a *request-scoped* publisher waits for its connection.
+///
+/// This is the caller's business budget (publish once, then drop the
+/// handle), not a property of the session: the session keeps retrying
+/// on its own schedule regardless. Long-lived owners never use it.
+const PUBLISHER_CONNECT_BUDGET: Duration = Duration::from_secs(2);
 
 /// Topic filters that must be re-subscribed on every ConnAck.
 ///
@@ -199,11 +207,26 @@ impl GatewayMqttClient {
 }
 
 impl GatewayMqttClient {
-    /// Create and connect a new Gateway MQTT client.
+    /// Construct the Gateway's MQTT session **without waiting for a
+    /// connection**.
     ///
-    /// Spawns a background task that polls the event loop to maintain
-    /// the connection and handle reconnections automatically.
-    pub async fn connect(
+    /// This is the resource constructor: it returns as soon as the poll
+    /// task is running. The session then owns the connection for its
+    /// whole lifetime — connecting, retrying with backoff, soft
+    /// restart, wake recovery — and publishes every transition on
+    /// [`Self::state_rx`].
+    ///
+    /// `Err` means the session could not be *constructed* at all. It
+    /// never means "the broker is not up yet": that is a state, not a
+    /// construction failure, and treating it as one is what used to
+    /// drop the client (aborting its poll task) and strand the Gateway
+    /// in `BOOTING` forever.
+    ///
+    /// Callers that need a usable connection *now* have their own
+    /// business budget — use [`Self::connect`], which waits on top of
+    /// this constructor. Long-lived owners must not wait: they consume
+    /// the state stream instead (see `mqtt::readiness`).
+    pub async fn spawn(
         host: &str,
         port: u16,
         client_id: &str,
@@ -240,24 +263,64 @@ impl GatewayMqttClient {
 
         let inner = MqttClient::connect(config, handler, None).await?;
 
-        // Wait for the connection to be established (ADR-065: the
-        // shared client's state machine reaches `Connected` on the
-        // first ConnAck).
-        if !inner.wait_for_connected(Duration::from_secs(2)).await {
-            return Err(GatewayMqttClientError::Connection(format!(
-                "Failed to connect to MQTT broker at {}:{} within timeout",
-                host, port
-            )));
-        }
-
         tracing::info!(
             host,
             port,
             client_id,
-            "Gateway MQTT client connected to broker"
+            "Gateway MQTT session started (connection state is reported on the state stream)"
         );
 
         Ok(Self { inner, replay_guard })
+    }
+
+    /// Construct a session and wait, for at most
+    /// [`PUBLISHER_CONNECT_BUDGET`], until it is `Connected`.
+    ///
+    /// For **request-scoped** callers that publish once and drop the
+    /// handle: they need the connection established before they
+    /// publish, because dropping the client aborts its poll task.
+    ///
+    /// The budget is this caller's business decision, not a property of
+    /// the session. Expiry ends the wait; it is not a verdict on the
+    /// connection.
+    pub async fn connect(
+        host: &str,
+        port: u16,
+        client_id: &str,
+        credentials: Option<(&str, &str)>,
+        message_callback: Option<MqttMessageCallback>,
+    ) -> Result<Self, GatewayMqttClientError> {
+        let client = Self::spawn(host, port, client_id, credentials, message_callback).await?;
+        match client
+            .inner
+            .wait_for_state(SessionState::is_connected, PUBLISHER_CONNECT_BUDGET)
+            .await
+        {
+            StateWait::Matched(_) => Ok(client),
+            StateWait::Elapsed(state) => Err(GatewayMqttClientError::Connection(format!(
+                "MQTT broker at {}:{} not connected within {:?} (state: {state})",
+                host, port, PUBLISHER_CONNECT_BUDGET
+            ))),
+            StateWait::SourceGone => Err(GatewayMqttClientError::Connection(format!(
+                "MQTT session to {}:{} ended before connecting",
+                host, port
+            ))),
+        }
+    }
+
+    /// Subscribe to the session's state stream.
+    ///
+    /// The stream is the connection's contract: every transition is
+    /// published, and the session guarantees a bounded time to the next
+    /// one. Consumers drive themselves off this instead of guessing
+    /// with a timeout.
+    pub fn state_rx(&self) -> SessionStateRx {
+        self.inner.state_rx()
+    }
+
+    /// Current session state, without waiting.
+    pub fn current_state(&self) -> SessionState {
+        self.inner.current_state()
     }
 
     pub async fn new_publisher(

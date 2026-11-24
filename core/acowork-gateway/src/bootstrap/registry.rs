@@ -60,7 +60,9 @@ pub enum SubsystemState {
     Booting,
     /// Subsystem is healthy and ready to participate.
     Ready,
-    /// Subsystem is no longer healthy; further transitions are ignored.
+    /// Subsystem is not healthy and cannot become ready on its own.
+    /// A later transition is still honoured — the record describes the
+    /// subsystem now, not for the rest of the process.
     Failed,
     /// Subsystem has been intentionally marked as not required for
     /// `READY` (e.g. dev mode skipping embedding). Treated as "ready"
@@ -142,9 +144,10 @@ pub struct SubsystemHandle {
 impl SubsystemHandle {
     /// Mark the subsystem as ready.
     ///
-    /// No-op if the registry has been dropped, or if the subsystem has
-    /// already transitioned out of `Booting`. Subsystems must not
-    /// transition out of `Ready` under normal operation.
+    /// No-op if the registry has been dropped, or if the record already
+    /// holds this exact state and detail. Not a latch: a subsystem whose
+    /// readiness is a live fact (a connection, a node's control channel)
+    /// moves back to `Booting` / `Failed` and returns to `Ready` again.
     pub fn mark_ready(&self, detail: impl Into<Option<String>>) {
         if let Some(registry) = self.registry.upgrade() {
             registry.transition(&self.id, SubsystemState::Ready, detail.into());
@@ -153,9 +156,11 @@ impl SubsystemHandle {
 
     /// Mark the subsystem as failed.
     ///
-    /// Terminal: subsequent `mark_ready` calls are ignored. The
-    /// orchestrator will either drop the phase to `FAILED` (required)
-    /// or `DEGRADED` (optional).
+    /// The orchestrator drops the phase to `FAILED` (required) or
+    /// `DEGRADED` (optional). NOT a latch — a later `mark_ready` is
+    /// honoured, because "failed" describes the subsystem now, not
+    /// forever. Authors that mean a permanent failure simply stop
+    /// updating; authors whose subsystem recovers must be able to say so.
     pub fn mark_failed(&self, detail: impl Into<Option<String>>) {
         if let Some(registry) = self.registry.upgrade() {
             registry.transition(&self.id, SubsystemState::Failed, detail.into());
@@ -262,10 +267,14 @@ impl SubsystemReadinessRegistry {
     }
 
     /// Apply a state transition; emits a [`ReadinessUpdate`] if the
-    /// state actually changed.
+    /// state **or the detail** changed.
     ///
-    /// Idempotent: calling `transition(.., Ready, ..)` twice keeps the
-    /// subsystem in `Ready` and emits only one update.
+    /// Idempotent on the *value*: calling `transition(.., Ready, same)`
+    /// twice emits one update. But a subsystem that stays in `Booting`
+    /// while its detail advances (e.g. a connection retry counter) MUST
+    /// emit — otherwise a consumer rendering `phase_detail` sees a
+    /// frozen string for the whole outage and cannot tell progress from
+    /// a hang.
     fn transition(&self, id: &SubsystemId, next: SubsystemState, detail: Option<String>) {
         let update = {
             let mut inner = self.inner.lock();
@@ -275,7 +284,8 @@ impl SubsystemReadinessRegistry {
                 // was retired; the orchestrator never observes it.
                 return;
             };
-            if record.state == next {
+            let detail_changed = detail.is_some() && detail != record.detail;
+            if record.state == next && !detail_changed {
                 return;
             }
             let previous = record.state;
@@ -491,6 +501,29 @@ mod tests {
 
         // Only one update emitted: the second is a no-op.
         assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// A subsystem that stays in the same state while its detail
+    /// advances (a connection retry counter, a named blocker) must still
+    /// emit: otherwise `phase_detail` freezes for the whole outage and
+    /// an operator cannot tell progress from a hang.
+    #[test]
+    fn same_state_with_new_detail_still_emits() {
+        let registry = SubsystemReadinessRegistry::new_shared();
+        let handle = registry.register("mqtt", ReadinessKind::Required);
+        let mut rx = registry.subscribe();
+
+        handle.mark_booting(Some("attempt 1".to_string()));
+        handle.mark_booting(Some("attempt 2".to_string()));
+        handle.mark_booting(Some("attempt 2".to_string()));
+
+        let first = rx.try_recv().expect("first booting update");
+        assert_eq!(first.detail.as_deref(), Some("attempt 1"));
+        let second = rx.try_recv().expect("detail advanced, must emit");
+        assert_eq!(second.current, SubsystemState::Booting);
+        assert_eq!(second.detail.as_deref(), Some("attempt 2"));
+        // Same value again: no event.
         assert!(rx.try_recv().is_err());
     }
 

@@ -30,6 +30,7 @@ pub mod global_resources_publisher;
 pub mod inventory_notifier;
 pub mod node_control;
 pub mod node_registry;
+pub mod readiness;
 pub mod sidecar;
 pub mod tcp_filter;
 
