@@ -9,8 +9,8 @@ import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useEditorStatusStore } from "../../stores/editorStatusStore";
+import { FileStatusFooter, type FileStatusClusterActiveFile } from "./FileStatusCluster";
 import { useLspClientPool } from "../../hooks/useLspClientPool";
-import { useReportFilePanelBounds } from "../../hooks/useReportFilePanelBounds";
 import { useWorkspaceFileBlob } from "../../hooks/useWorkspaceFileBlob";
 import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
@@ -210,15 +210,6 @@ function renderDocViewer(file: OpenFile, docChat: DocChatHandoff) {
 export function FileEditorPanel({ width }: { width: number }) {
     const { t } = useTranslation();
 
-    // ── Layout bounds reporting (PR-1 of the unified status-bar refactor) ──
-    // Reports the panel's `getBoundingClientRect()` to `useLayoutStore.filePanelBounds`
-    // on every layout change. Lets the global status bar in `AppLayout` anchor
-    // file-status items (language / LSP / cursor) to the panel's left & right
-    // edges without any prop drilling or DOM cross-measurement. The hook is
-    // rAF-coalesced so dragging the resize handle does not flood the store.
-    const rootRef = useRef<HTMLDivElement | null>(null);
-    useReportFilePanelBounds(rootRef);
-
     const openFiles = useFileEditorStore((s) => s.openFiles);
     const activeFileId = useFileEditorStore((s) => s.activeFileId);
     const setActiveFile = useFileEditorStore((s) => s.setActiveFile);
@@ -331,6 +322,21 @@ export function FileEditorPanel({ width }: { width: number }) {
     const codeEditorOverriddenRef = useRef(false);
 
     const activeFile = openFiles.find((f) => f.id === activeFileId) ?? null;
+    // The status footer needs only a structural subset of the active file —
+    // trim it here so the footer stays a pure renderer.
+    const clusterActiveFile: FileStatusClusterActiveFile | null = activeFile
+        ? {
+              fileName: activeFile.fileName,
+              language: activeFile.language,
+              mimeType: activeFile.mimeType,
+              mode: activeFile.mode,
+              kind: activeFile.kind,
+              url: activeFile.url,
+              relPath: activeFile.relPath,
+              loading: activeFile.loading,
+              agentId: activeFile.agentId,
+          }
+        : null;
     const visualApp =
         activeFile && hostedApps ? pickVisualApp(hostedApps, activeFile.fileName) : null;
     const waitForVisualApp =
@@ -563,30 +569,17 @@ export function FileEditorPanel({ width }: { width: number }) {
         );
     }, [lspLanguage, lspStatus, lspEnabled]);
 
-    // ── editorStatusStore mirroring (PR-2 of the unified status-bar refactor) ──
-    // After PR-3 the cursor + selectedCount mirrors became redundant —
-    // the Monaco selection handler writes straight to the store. The
-    // LSP signals and reset effects below stay because they are driven
-    // by `useLspClientPool` (which is NOT a singleton — AppLayout would
-    // otherwise open a duplicate LSP WebSocket per language) and by
-    // lifecycle transitions respectively.
+    // ── editorStatusStore ────────────────────────────────────────────────
+    // The Monaco selection handler writes cursor + selection straight into
+    // the store, and the status footer reads them from there (see
+    // `FileStatusFooter`). Writing to a store instead of local state is
+    // what keeps the cursor move from re-rendering the whole editor panel.
     // See `stores/editorStatusStore.ts` for the data model.
 
-    // Mirror the four LSP signals together (one action keeps partial
-    // updates coherent — see the bundle comment in `editorStatusStore`).
-    useEffect(() => {
-        useEditorStatusStore.getState().setLspSignals({
-            enabled: lspEnabled,
-            language: lspLanguage,
-            status: lspStatus,
-            statusMessage: lspStatusMessage,
-        });
-    }, [lspEnabled, lspLanguage, lspStatus, lspStatusMessage]);
-
     // Reset to idle when the active file goes away or is loading — prevents
-    // stale "Ln 42, Col 13" leaking into the global status bar. The dep
-    // array uses both `id` (file switch) and `loading` (file became ready),
-    // so this fires at every meaningful transition.
+    // a stale "Ln 42, Col 13" from the previous tab. The dep array uses
+    // both `id` (file switch) and `loading` (file became ready), so this
+    // fires at every meaningful transition.
     useEffect(() => {
         if (!activeFile || activeFile.loading) {
             useEditorStatusStore.getState().resetToIdle();
@@ -1691,7 +1684,6 @@ export function FileEditorPanel({ width }: { width: number }) {
 
     return (
         <div
-            ref={rootRef}
             data-panel="file-editor"
             className={cn(CAPSULE_PANE_CN, "relative shrink-0 bg-right-panel")}
             style={{ width }}
@@ -2319,6 +2311,19 @@ export function FileEditorPanel({ width }: { width: number }) {
                     </div>
                 )}
             </div>
+
+            {/* File-status footer — language / LSP / cursor for the active
+                tab. It used to float in the app-wide bottom status bar; the
+                bottom bar is gone, and a strip that belongs to exactly one
+                panel belongs INSIDE that panel, where it cannot drift when
+                the panel is resized. */}
+            <FileStatusFooter
+                activeFile={clusterActiveFile}
+                lspEnabled={lspEnabled}
+                lspLanguage={lspLanguage}
+                lspStatus={lspStatus}
+                lspStatusMessage={lspStatusMessage}
+            />
 
             {/* ADR-078 decision 6 — GitStatusBar moved to WorkspaceExplorer
                 (workspace-panel bottom) per 2026-XX revision. The editor only

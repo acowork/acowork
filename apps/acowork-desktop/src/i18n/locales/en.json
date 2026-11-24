@@ -1923,9 +1923,6 @@
     "distillerRunFailed": "Last distill failed: {{error}}"
   },
   "statusBar": {
-    "agent": "agent",
-    "context": "context",
-    "cached": "cached",
     "mqttDisconnected": "Realtime connection lost{{reason}}, retrying…"
   },
   "exploreBlock": {

@@ -54,7 +54,8 @@ const h = vi.hoisted(() => ({
   settingsState: { theme: "light" as string, fontSize: 14, osTheme: "light" as string },
   gitState: { isExpanded: vi.fn(() => false) },
   editorStatusState: {
-    setLspSignals: vi.fn(),
+    cursor: { line: 1, column: 1 },
+    selectedCount: 0,
     resetToIdle: vi.fn(),
     setCursor: vi.fn(),
     setSelectedCount: vi.fn(),
@@ -78,7 +79,6 @@ vi.mock("./lspProviders", () => ({
 vi.mock("../../hooks/useLspClientPool", () => ({
   useLspClientPool: () => ({ activeStatus: null, activeStatusMessage: "", activeClient: null }),
 }));
-vi.mock("../../hooks/useReportFilePanelBounds", () => ({ useReportFilePanelBounds: () => {} }));
 
 function selectorStore<T>(state: T) {
   return Object.assign((selector: (s: T) => unknown) => selector(state), {
@@ -100,7 +100,10 @@ vi.mock("../../stores/workspaceStore", () => ({ useWorkspaceStore: selectorStore
 vi.mock("../../stores/layoutStore", () => ({ useLayoutStore: selectorStore(h.layoutState) }));
 vi.mock("../../stores/settingsStore", () => ({ useSettingsStore: selectorStore(h.settingsState) }));
 vi.mock("../../stores/editorStatusStore", () => ({
-  useEditorStatusStore: { getState: () => h.editorStatusState },
+  // The status footer subscribes to this store as a hook (cursor +
+  // selection), so the mock must be callable with a selector — the same
+  // shape `selectorStore` gives the other stores.
+  useEditorStatusStore: selectorStore(h.editorStatusState),
 }));
 vi.mock("../../stores/fileTree", () => ({
   useFileTreeStore: { getState: () => h.treeState },

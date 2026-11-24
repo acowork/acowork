@@ -1633,9 +1633,6 @@
     "importDropZone": "点击选择或拖入 .zip 文件"
   },
   "statusBar": {
-    "agent": "agent",
-    "context": "context",
-    "cached": "已缓存",
     "mqttDisconnected": "实时连接已断开{{reason}}，正在自动重连…"
   },
   "debugPanel": {

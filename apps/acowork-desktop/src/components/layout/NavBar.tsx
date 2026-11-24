@@ -1,4 +1,4 @@
-import { type ComponentType, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { NavView } from "../../lib/types";
 import { listApps, type AppDto } from "../../lib/apps-api";
 import { fetchGalleryIndex } from "../../lib/appGallery";
@@ -8,14 +8,18 @@ import {
   hostedNavApps,
 } from "../../lib/hostedNavApps";
 import { NavButton } from "../common/NavButton";
-import { OutlineSettingsIcon, FilledSettingsIcon } from "../common/SettingsIcon";
-import { OutlineChatIcon, FilledChatIcon } from "../common/ChatIcon";
 import { AccountMenu } from "../account/AccountMenu";
-import { useSettingsStore } from "../../stores/settingsStore";
 import { useAuthStore } from "../../stores/authStore";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useTranslation } from "../../i18n/useTranslation";
+import { cn } from "../../lib/utils";
+import chatNavIcon from "../../assets/nav-icons/chat.png";
+import pmNavIcon from "../../assets/nav-icons/projects.png";
+import docNavIcon from "../../assets/nav-icons/docs.png";
+import appsNavIcon from "../../assets/nav-icons/apps.png";
+import harnessNavIcon from "../../assets/nav-icons/harness.png";
+import settingsNavIcon from "../../assets/nav-icons/settings.png";
 
 interface NavBarProps {
   currentView: NavView;
@@ -24,160 +28,70 @@ interface NavBarProps {
   onAvatarClick: () => void;
 }
 
-const topNavItems: { view: NavView; icon: ComponentType<{ className?: string }>; i18nKey: string }[] = [
-  { view: "chat", icon: OutlineChatIcon, i18nKey: "navBar.chat" },
-  { view: "projects", icon: OutlineProjectsIcon, i18nKey: "navBar.projects" },
-  { view: "docs", icon: OutlineDocsIcon, i18nKey: "navBar.docs" },
+/**
+ * The four product surfaces that own an artwork icon: chat, PM, docs and the
+ * app gallery. The artwork is a raster PNG, so both states come from ONE file
+ * — see `NavArtworkIcon`.
+ */
+const topNavItems: { view: NavView; iconSrc: string; i18nKey: string }[] = [
+  { view: "chat", iconSrc: chatNavIcon, i18nKey: "navBar.chat" },
+  { view: "projects", iconSrc: pmNavIcon, i18nKey: "navBar.projects" },
+  { view: "docs", iconSrc: docNavIcon, i18nKey: "navBar.docs" },
 ];
 
-const bottomNavItems: { view: NavView; icon: ComponentType<{ className?: string }>; i18nKey: string }[] = [
-  { view: "harness", icon: OutlineHarnessIcon, i18nKey: "navBar.harness" },
-  { view: "settings", icon: OutlineSettingsIcon, i18nKey: "navBar.settings" },
+/**
+ * The utility surfaces at the foot of the rail. They were stroked line icons
+ * once; they are artwork now, in the same family as the product surfaces
+ * above, so they carry their own raster icon and take the same grayscale
+ * treatment for the inactive state.
+ */
+const bottomNavItems: { view: NavView; iconSrc: string; i18nKey: string }[] = [
+  { view: "harness", iconSrc: harnessNavIcon, i18nKey: "navBar.harness" },
+  { view: "settings", iconSrc: settingsNavIcon, i18nKey: "navBar.settings" },
 ];
 
-/** Outline puzzle piece icon — stroke-only for non-selected harness state */
-function OutlineHarnessIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-      <g transform="translate(1.2, 1.2) scale(0.9, 0.9)">
-        <path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837l-1.61 1.611a2.404 2.404 0 0 1-1.705.706 2.404 2.404 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877l-1.568-1.568A2.404 2.404 0 0 1 1.998 12c0-.617.236-1.234.706-1.704L4.315 8.685a.98.98 0 0 1 .837-.276c.47.07.802.48.968.925a2.501 2.501 0 1 0 3.214-3.214c-.446-.166-.855-.497-.925-.968a.979.979 0 0 1 .276-.837l1.611-1.611a2.404 2.404 0 0 1 1.704-.706c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877.29.493-.074.84-.504 1.02-.969a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02Z" />
-      </g>
-    </svg>
-  );
-}
-
-/** Filled puzzle piece icon — solid version for active harness state */
-function FilledHarnessIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2">
-      <g transform="translate(1.2, 1.2) scale(0.9, 0.9)">
-        <path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837l-1.61 1.611a2.404 2.404 0 0 1-1.705.706 2.404 2.404 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877l-1.568-1.568A2.404 2.404 0 0 1 1.998 12c0-.617.236-1.234.706-1.704L4.315 8.685a.98.98 0 0 1 .837-.276c.47.07.802.48.968.925a2.501 2.501 0 1 0 3.214-3.214c-.446-.166-.855-.497-.925-.968a.979.979 0 0 1 .276-.837l1.611-1.611a2.404 2.404 0 0 1 1.704-.706c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877.29.493-.074.84-.504 1.02-.969a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02Z" />
-      </g>
-    </svg>
-  );
-}
-
-/** Outline Extensions icon — VSCode-style 2×2 grid of tiles (extensions panel glyph) */
-function OutlineExtensionsIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
-      {/* Top-left small tile */}
-      <rect x="3" y="3" width="8" height="8" rx="1.5" />
-      {/* Top-right wide tile */}
-      <rect x="13" y="3" width="8" height="6" rx="1.5" />
-      {/* Bottom-left tall tile */}
-      <rect x="3" y="13" width="6" height="8" rx="1.5" />
-      {/* Bottom-right square tile */}
-      <rect x="11" y="11" width="10" height="10" rx="1.5" />
-    </svg>
-  );
-}
-
-/** Filled Extensions icon — solid version for active state */
-function FilledExtensionsIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round">
-      <rect x="3" y="3" width="8" height="8" rx="1.5" />
-      <rect x="13" y="3" width="8" height="6" rx="1.5" />
-      <rect x="3" y="13" width="6" height="8" rx="1.5" />
-      <rect x="11" y="11" width="10" height="10" rx="1.5" />
-    </svg>
-  );
-}
-
-/** Outline document icon */
-function OutlineDocsIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-      {/* Document */}
-      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9.5L14 3z" />
-      <polyline points="14,3 14,9 20,9" />
-      <line x1="8" y1="12" x2="16" y2="12" />
-      <line x1="8" y1="15" x2="12" y2="15" />
-    </svg>
-  );
-}
-
-/** Filled document icon */
-function FilledDocsIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.75">
-      {/* Document */}
-      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9.5L14 3z" />
-      <polyline points="14,3 14,9 20,9" fill="none" stroke="white" />
-      <line x1="8" y1="12" x2="16" y2="12" stroke="white" />
-      <line x1="8" y1="15" x2="12" y2="15" stroke="white" />
-    </svg>
-  );
-}
-
 /**
- * Outline Gantt-style icon — a board frame with three rows of a leading dot
- * plus a horizontal bar of varying length, evoking a task timeline.
- * `isDark` is accepted for API compatibility with the call site but the outline
- * variant looks identical in both themes (stroke uses currentColor).
+ * Product artwork for a nav slot (chat / PM / docs / apps).
+ *
+ * The inactive state is the CSS grayscale filter — the same treatment a hosted
+ * third-party app icon gets below (see the `hostedApps.map` block). One asset
+ * therefore serves both states: there is no second "grey" file to ship and no
+ * way for the two to drift apart. The artwork is a rounded square, so
+ * `object-contain` keeps it whole; `object-cover` would crop the corners.
+ *
+ * Hover drops the grayscale (`group-hover:grayscale-0`, the `group` lives on
+ * the `NavButton` tile). A tinted hover background alone does not read as
+ * "this is clickable" — the icon has to come back to colour with the
+ * pointer, or the affordance is invisible on a mostly-grey rail. Leaving
+ * the tile restores the grey.
+ *
+ * `NAV_ARTWORK_CLASS` is the one size every artwork tile in this column uses
+ * — the four product surfaces, the two utility surfaces at the foot of the
+ * rail, and the hosted third-party apps. They share a 40px tile, so a tile
+ * that is not the same size reads as a mistake rather than a hierarchy. 32px
+ * in a 40px tile (4px of breathing room) is the density a desktop app dock
+ * uses; the tile and the gap are untouched, only the artwork inside them grew.
  */
-function OutlineProjectsIcon({ className }: { className?: string; isDark?: boolean }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.75"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      {/* Board frame */}
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      {/* Row 1: medium bar */}
-      <circle cx="6.5" cy="8.5" r="0.6" />
-      <line x1="10.5" y1="8.5" x2="15" y2="8.5" />
-      {/* Row 2: longest bar (offset right) */}
-      <circle cx="6.5" cy="12" r="0.6" />
-      <line x1="10.5" y1="12" x2="18" y2="12" />
-      {/* Row 3: shortest bar */}
-      <circle cx="6.5" cy="15.5" r="0.6" />
-      <line x1="10.5" y1="15.5" x2="13" y2="15.5" />
-    </svg>
-  );
-}
+const NAV_ARTWORK_CLASS = "h-7 w-7";
 
-/**
- * Filled Gantt-style icon — solid filled board with white dots + bars "carved" out,
- * matching the FilledDocsIcon style (solid currentColor shape + white inner strokes).
- */
-function FilledProjectsIcon({ className }: { className?: string }) {
+function NavArtworkIcon({ src, active, className }: { src: string; active: boolean; className?: string }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      stroke="currentColor"
-      strokeWidth="1.75"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      {/* Solid board frame — same stroke width as outline version, so the outer
-          visual bounds match exactly (the 0.875 stroke half-extends the fill). */}
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      {/* Row 1: medium bar carved in white */}
-      <circle cx="6.5" cy="8.5" r="0.6" fill="white" stroke="white" />
-      <line x1="10.5" y1="8.5" x2="15" y2="8.5" stroke="white" />
-      {/* Row 2: longest bar carved in white (offset right) */}
-      <circle cx="6.5" cy="12" r="0.6" fill="white" stroke="white" />
-      <line x1="10.5" y1="12" x2="18" y2="12" stroke="white" />
-      {/* Row 3: shortest bar carved in white */}
-      <circle cx="6.5" cy="15.5" r="0.6" fill="white" stroke="white" />
-      <line x1="10.5" y1="15.5" x2="13" y2="15.5" stroke="white" />
-    </svg>
+    <img
+      src={src}
+      alt=""
+      draggable={false}
+      className={cn(
+        NAV_ARTWORK_CLASS,
+        "rounded-md object-contain",
+        !active && "grayscale group-hover:grayscale-0",
+        className,
+      )}
+    />
   );
 }
 
 export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps) {
   const { t } = useTranslation();
-  const { theme, osTheme } = useSettingsStore();
-  const isDark = theme === "dark" || (theme === "system" && osTheme === "dark");
   // The nav dot is the unified chat surface's unread total — DMs (`user_user`)
   // and project groups alike, read straight off their chat sessions. Kept live
   // by `AgentList`'s fetch + the `user-chat-changed` doorbell (see chatStore).
@@ -235,7 +149,7 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
       <AccountMenu onOpenProfile={onAvatarClick} />
 
       {/* Top navigation items */}
-      {topNavItems.map(({ view, icon: Icon, i18nKey }) => (
+      {topNavItems.map(({ view, iconSrc, i18nKey }) => (
         <NavButton
           key={view}
           active={currentView === view}
@@ -244,23 +158,7 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
           tooltipPosition="right"
           badge={view === "chat" ? unreadChats : undefined}
         >
-          {currentView === view ? (
-            view === "chat" ? (
-              <FilledChatIcon className="h-6 w-6" />
-            ) : view === "docs" ? (
-              <FilledDocsIcon className="h-6 w-6" />
-            ) : view === "projects" ? (
-              <FilledProjectsIcon className="h-6 w-6" />
-            ) : (
-              <FilledSettingsIcon className="h-6 w-6" />
-            )
-          ) : (
-            view === "projects" ? (
-              <OutlineProjectsIcon className="h-6 w-6" isDark={isDark} />
-            ) : (
-              <Icon className="h-6 w-6" />
-            )
-          )}
+          <NavArtworkIcon src={iconSrc} active={currentView === view} />
         </NavButton>
       ))}
 
@@ -272,11 +170,7 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
         tooltip={t("navBar.extensions")}
         tooltipPosition="right"
       >
-        {currentView === "extensions" ? (
-          <FilledExtensionsIcon className="h-6 w-6" />
-        ) : (
-          <OutlineExtensionsIcon className="h-6 w-6" />
-        )}
+        <NavArtworkIcon src={appsNavIcon} active={currentView === "extensions"} />
       </NavButton>
 
       {/* Hosted webview apps (ADR-116) — appended below the gallery, oldest
@@ -299,22 +193,37 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
                 draggable={false}
                 className={
                   active
-                    ? "h-6 w-6 rounded-md object-cover"
-                    : "h-6 w-6 rounded-md object-cover grayscale"
+                    ? `${NAV_ARTWORK_CLASS} rounded-md object-cover`
+                    : `${NAV_ARTWORK_CLASS} rounded-md object-cover grayscale group-hover:grayscale-0`
                 }
               />
             ) : (
               <span
-                className="flex h-6 w-6 items-center justify-center rounded-md text-[11px] font-semibold"
-                style={{
-                  // Both branches are `color-mix(... transparent)` off a theme
-                  // token: a literal fallback inside `var()` would win on every
-                  // theme that does not declare the token, which is exactly the
-                  // hard-coded colour the theme-pack red line exists to catch.
-                  background: active
-                    ? "color-mix(in srgb, var(--color-accent) 22%, transparent)"
-                    : "color-mix(in srgb, var(--color-text-tertiary) 18%, transparent)",
-                }}
+                className={cn(
+                  NAV_ARTWORK_CLASS,
+                  "flex items-center justify-center rounded-md text-[13px] font-semibold",
+                  // The letter mark has no artwork to un-grey, so hover
+                  // brightens its own background instead — the same affordance
+                  // the artwork icons get from `group-hover:grayscale-0`.
+                  // The two colours live in custom properties because an
+                  // inline `background` would outrank the hover class and
+                  // the hover would never show.
+                  "bg-[var(--letter-bg)] transition-colors group-hover:bg-[var(--letter-bg-hover)]",
+                )}
+                style={
+                  {
+                    // Both branches are `color-mix(... transparent)` off a theme
+                    // token: a literal fallback inside `var()` would win on every
+                    // theme that does not declare the token, which is exactly the
+                    // hard-coded colour the theme-pack red line exists to catch.
+                    "--letter-bg": active
+                      ? "color-mix(in srgb, var(--color-accent) 22%, transparent)"
+                      : "color-mix(in srgb, var(--color-text-tertiary) 18%, transparent)",
+                    "--letter-bg-hover": active
+                      ? "color-mix(in srgb, var(--color-accent) 22%, transparent)"
+                      : "color-mix(in srgb, var(--color-accent) 20%, transparent)",
+                  } as React.CSSProperties
+                }
               >
                 {hostedAppLetter(app)}
               </span>
@@ -327,7 +236,7 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
       <div className="flex-1" />
 
       {/* Bottom navigation items */}
-      {bottomNavItems.map(({ view, icon: Icon, i18nKey }) => (
+      {bottomNavItems.map(({ view, iconSrc, i18nKey }) => (
         <NavButton
           key={view}
           active={currentView === view}
@@ -335,15 +244,7 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
           tooltip={t(i18nKey)}
           tooltipPosition="right"
         >
-          {currentView === view ? (
-            view === "harness" ? (
-              <FilledHarnessIcon className="h-6 w-6" />
-            ) : (
-              <FilledSettingsIcon className="h-6 w-6" />
-            )
-          ) : (
-            <Icon className="h-6 w-6" />
-          )}
+          <NavArtworkIcon src={iconSrc} active={currentView === view} />
         </NavButton>
       ))}
     </nav>

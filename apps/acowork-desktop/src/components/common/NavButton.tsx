@@ -46,7 +46,9 @@ export function NavButton({ active, onClick, tooltip, tooltipPosition = "right",
             onMouseEnter={onMouseEnter}
             onMouseLeave={onMouseLeave}
             className={cn(
-                "relative flex h-10 w-10 items-center justify-center rounded-md transition-colors duration-150",
+                // `group` so children can react to the tile's hover state
+                // (the artwork icon drops its grayscale on hover).
+                "group relative flex h-10 w-10 items-center justify-center rounded-md transition-colors duration-150",
                 active
                     ? "hover:bg-[var(--color-accent)]/10"
                     : "text-text-tertiary hover:text-text-tertiary hover:bg-[var(--color-accent)]/10 ",

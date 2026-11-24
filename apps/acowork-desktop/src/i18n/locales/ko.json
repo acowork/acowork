@@ -1392,9 +1392,6 @@
     "importDropZone": "클릭하여 선택하거나 .zip 을 드롭하세요"
   },
   "statusBar": {
-    "agent": "agent",
-    "context": "context",
-    "cached": "캐시됨",
     "mqttDisconnected": "실시간 연결이 끊겼습니다{{reason}}. 자동 재연결 중…"
   },
   "debugPanel": {

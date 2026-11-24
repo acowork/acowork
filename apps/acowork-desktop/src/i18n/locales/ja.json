@@ -1391,9 +1391,6 @@
     "importDropZone": "クリックして選択、または .zip をドロップ"
   },
   "statusBar": {
-    "agent": "agent",
-    "context": "context",
-    "cached": "キャッシュ済み",
     "mqttDisconnected": "リアルタイム接続が切断されました{{reason}}。再接続中…"
   },
   "debugPanel": {

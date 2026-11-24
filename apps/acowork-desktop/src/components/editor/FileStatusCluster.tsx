@@ -1,6 +1,7 @@
 import { type LspStatus } from "../../lib/lspUtils";
 import { LspIndicator } from "./LspIndicator";
 import { useTranslation } from "../../i18n/useTranslation";
+import { useEditorStatusStore } from "../../stores/editorStatusStore";
 
 /**
  * Minimal shape of the currently active file that the cluster needs.
@@ -8,7 +9,7 @@ import { useTranslation } from "../../i18n/useTranslation";
  * This is intentionally a structural subset of `OpenFile` (not the full
  * type) so the cluster stays a pure renderer with no store coupling.
  * The wiring up (which fields map to which `OpenFile` fields) lives in
- * `AppLayout` — single source of data-flow.
+ * `FileEditorPanel` — single source of data-flow.
  */
 export interface FileStatusClusterActiveFile {
     fileName: string;
@@ -28,7 +29,7 @@ export interface EditorCursorPosition {
     column: number;
 }
 
-interface FileStatusClusterProps {
+export interface FileStatusClusterProps {
     /**
      * The currently active file. Cluster renders nothing when `null`
      * or while `loading` — keeps the global-bar layout clean during
@@ -45,17 +46,16 @@ interface FileStatusClusterProps {
 
 /**
  * Renders the three file-status segments — language / LSP / cursor —
- * for the active file tab.
+ * as the FOOTER of the file editor panel.
  *
- * Designed to be wrapped by an absolutely-positioned container anchored
- * to `useLayoutStore.filePanelBounds` (positioning math is the caller's
- * responsibility — this stays a layout-pure component, easy to test
- * and snapshot).
+ * It used to float in the app-wide bottom status bar, absolutely
+ * positioned over the panel's column. The bottom bar is gone, and a
+ * floating strip over the content is the wrong shape for a footer that
+ * belongs to exactly one panel: it now sits inside the panel's own
+ * flex column, so it cannot drift when the panel is resized or when the
+ * right panel opens.
  *
- * Visual spec mirrors the original per-file bar
- * (`FileEditorPanel.tsx` pre-refactor lines 1540–1572) so the
- * parallel-run period in PR-2 feels unchanged. PR-3 will remove the
- * copy in `FileEditorPanel` entirely.
+ * Layout-pure: props in, DOM out. No store coupling, no positioning math.
  *
  * Visibility rule (single):
  *   - Returns `null` if `activeFile` is absent or still loading —
@@ -82,7 +82,7 @@ export function FileStatusCluster({
 
     return (
         <div
-            className="flex items-center justify-between gap-4 rounded-md border border-border-outer/50 bg-surface/80 px-3 py-px text-11 text-text-tertiary select-none "
+            className="flex shrink-0 items-center justify-between gap-4 border-t border-border-divider bg-surface/60 px-3 py-px text-11 text-text-tertiary select-none"
         >
             {isEdit ? (
                 <>
@@ -131,4 +131,22 @@ export function FileStatusCluster({
             )}
         </div>
     );
+}
+
+/**
+ * The store-connected footer.
+ *
+ * `FileStatusCluster` stays a pure renderer (props in / DOM out) so it can
+ * be tested and snapshot in isolation. THIS wrapper is what the panel
+ * mounts, and it subscribes to the cursor/selection store itself — so a
+ * cursor move re-renders the two-line footer, not the whole editor panel.
+ * The panel used to hold the subscription for the app-wide bottom bar and
+ * paid that re-render on every keystroke-sized selection change.
+ */
+export function FileStatusFooter(
+    props: Omit<FileStatusClusterProps, "cursor" | "selectedCount">,
+) {
+    const cursor = useEditorStatusStore((s) => s.cursor);
+    const selectedCount = useEditorStatusStore((s) => s.selectedCount);
+    return <FileStatusCluster {...props} cursor={cursor} selectedCount={selectedCount} />;
 }

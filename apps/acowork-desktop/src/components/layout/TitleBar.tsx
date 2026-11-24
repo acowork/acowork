@@ -7,6 +7,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { GatewaySwitcherMenu } from "./GatewaySwitcherMenu";
 import { AppearanceMenu } from "./AppearanceMenu";
+import { StatusPill } from "./StatusPill";
 
 /**
  * Right-panel toggle — VS Code's "layout panel" glyph: one outer frame with
@@ -135,6 +136,11 @@ export function TitleBar({
         onMouseDown={(e) => e.stopPropagation()}
       >
         <GatewaySwitcherMenu onOpenGatewaySettings={onOpenGatewaySettings} />
+        {/* Transient status message (Gateway outage / MQTT loss / debug
+            output). It sits next to the Gateway outage pill so both read as
+            one family of "something is wrong with the connection" markers
+            in the same corner of the title bar. */}
+        <StatusPill />
         {/* Appearance quick-settings — theme mode + accent color, next to
             the Gateway switcher so the two popovers share one visual
             language in the title bar's right cluster. */}

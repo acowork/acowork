@@ -41,10 +41,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useServicesStore } from "../../stores/servicesStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useStatusBarStore } from "../../stores/statusBarStore";
-import { useEditorStatusStore } from "../../stores/editorStatusStore";
-import { FileStatusCluster, type FileStatusClusterActiveFile } from "../editor/FileStatusCluster";
-import { cn, formatPercent } from "../../lib/utils";
-import { computeCacheHitRate, formatCacheHitRate, hasCacheData } from "../../lib/cacheHitRate";
+import { cn } from "../../lib/utils";
 import { resolveAccentPreset } from "../../lib/accentPresets";
 import { SettingsPage } from "../settings/SettingsPage";
 import { useLocalNodeAutoStart } from "../../hooks/useLocalNodeAutoStart";
@@ -58,15 +55,13 @@ import { ExtensionsView } from "../../views/ExtensionsView";
 import { AppFrame, type AppFrameSaveFile } from "../apps/AppFrame";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { listApps, type AppDto } from "../../lib/apps-api";
-import { MqttDebugControls } from "../debug/MqttDebugControls";
-import { Tooltip } from "../common/Tooltip";
 import { useChatStore } from "../../stores/chatStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useSearchStore, isGlobalSearchShortcut } from "../../stores/searchStore";
 import { GlobalSearchDialog } from "../search/GlobalSearchDialog";
 import { useTranslation } from "../../i18n/useTranslation";
-import { AlertTriangle, Bot, Check, Cpu, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import { ChunkLoadBoundary } from "../common/ErrorBoundary";
 import { log } from "../../lib/logger";
 // Pane floors and the overflow ladder live in panelClamp.ts so the drag
@@ -461,48 +456,10 @@ export function AppLayout() {
   // hiding is always the safe reading of an unknown.
   const memoryServiceReady = useGatewayStore((s) => s.memoryService?.ready ?? false);
   const refreshMemoryService = useGatewayStore((s) => s.refreshMemoryService);
+  // AppLayout only WRITES the status message (Gateway outage, MQTT loss);
+  // the pill that renders it lives in the title bar — see `TitleBar`.
   const setStatus = useStatusBarStore((s) => s.setStatus);
-  const statusMsg = useStatusBarStore((s) => s.message);
-  const statusType = useStatusBarStore((s) => s.type);
-  const statusVisible = useStatusBarStore((s) => s.visible);
   const clearStatus = useStatusBarStore((s) => s.clearStatus);
-
-  // ── File-status cluster subscriptions (PR-2 of the unified status-bar refactor) ──
-  // Read the live bounding rect reported by `useReportFilePanelBounds`
-  // (mounted inside `FileEditorPanel`). Use individual field selectors so
-  // unrelated components do not re-render on every state mutation — e.g.
-  // each Monaco cursor move updates only `cursor`, not the LSP signals.
-  const filePanelBounds = useLayoutStore((s) => s.filePanelBounds);
-  const editorCursor = useEditorStatusStore((s) => s.cursor);
-  const editorSelectedCount = useEditorStatusStore((s) => s.selectedCount);
-  const editorLspEnabled = useEditorStatusStore((s) => s.lspEnabled);
-  const editorLspLanguage = useEditorStatusStore((s) => s.lspLanguage);
-  const editorLspStatus = useEditorStatusStore((s) => s.lspStatus);
-  const editorLspStatusMessage = useEditorStatusStore((s) => s.lspStatusMessage);
-
-  // Active file — pulled from `fileEditorStore` and trimmed to the cluster's
-  // minimal structural shape so the cluster does not have to import the
-  // full `OpenFile` type.
-  const openFiles = useFileEditorStore((s) => s.openFiles);
-  const activeFileId = useFileEditorStore((s) => s.activeFileId);
-  const clusterActiveFile: FileStatusClusterActiveFile | null =
-    activeFileId !== null
-      ? (() => {
-            const f = openFiles.find((file) => file.id === activeFileId);
-            if (!f) return null;
-            return {
-                fileName: f.fileName,
-                language: f.language,
-                mimeType: f.mimeType,
-                mode: f.mode,
-                kind: f.kind,
-                url: f.url,
-                relPath: f.relPath,
-                loading: f.loading,
-                agentId: f.agentId,
-            };
-        })()
-      : null;
 
   // ── Window width tracking ────────────────────────────────────────────
   // The cluster is positioned absolutely inside the global bar with
@@ -586,73 +543,11 @@ export function AppLayout() {
   // The name is server-side: the Runtime owns it in the instance's
   // `agent_config.json`, the Gateway mirrors it into its list view. No
   // local fallback — a second source is how the two names drifted apart.
-  const agentName = selectedAgent
-    ? selectedAgent.name
-    : null;
-  // Context usage for the bottom status bar.
-  // (Session count was removed — see PR-3 follow-up: users found it noisy
-  // without adding actionable signal beyond the active session indicator
-  // already present in the chat panel tab bar.)
-  const contextUsage = useChatStore((s) => {
-    if (!selectedAgentId) return null;
-    const agent = s.agentStates[selectedAgentId];
-    if (!agent?.activeSessionId) return null;
-    return agent.sessionStates[agent.activeSessionId]?.contextUsage ?? null;
-  });
-  // ADR-066: provider for the active session — needed to pick the
-  // cache-hit-ratio formula (Anthropic vs OpenAI) for the status bar.
-  const sessionProvider = useChatStore((s) => {
-    if (!selectedAgentId) return null;
-    const agent = s.agentStates[selectedAgentId];
-    if (!agent?.activeSessionId) return null;
-    return agent.sessionStates[agent.activeSessionId]?.provider ?? null;
-  });
-  // ADR-066 §6: cache hit rate for the status bar.  The status bar is a
-  // session-level surface, so it shows the session-lifetime (cumulative)
-  // rate — the input-box popover shows the per-turn rate instead.
-  // `null` means "no signal" — provider doesn't report cache tokens, no
-  // LLM call yet, or a zero denominator — in which case we hide the pill
-  // entirely.
-  const cacheHitRateLabel = formatCacheHitRate(
-    computeCacheHitRate(sessionProvider, contextUsage, "cumulative"),
-  );
   // ADR-036: MQTT connection liveness is pushed from Rust via the
   // `mqtt-status` Tauri event.  The Rust eventloop owns reconnection —
   // we just reflect state into the UI.
   const mqttConnected = useChatStore((s) => s.mqttConnected);
   const lastMqttError = useChatStore((s) => s.lastMqttError);
-  // Status message click-to-copy: short-lived "Copied!" feedback.
-  // Reset whenever the underlying message changes so a new warning
-  // arriving mid-feedback doesn't leave a stale checkmark.
-  const [statusCopied, setStatusCopied] = useState(false);
-  const statusCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    setStatusCopied(false);
-    if (statusCopyTimerRef.current) {
-      clearTimeout(statusCopyTimerRef.current);
-      statusCopyTimerRef.current = null;
-    }
-  }, [statusMsg]);
-  useEffect(() => {
-    return () => {
-      if (statusCopyTimerRef.current) clearTimeout(statusCopyTimerRef.current);
-    };
-  }, []);
-  const handleCopyStatusMsg = useCallback(() => {
-    if (!statusMsg) return;
-    void navigator.clipboard.writeText(statusMsg)
-      .then(() => {
-        setStatusCopied(true);
-        if (statusCopyTimerRef.current) clearTimeout(statusCopyTimerRef.current);
-        statusCopyTimerRef.current = setTimeout(() => setStatusCopied(false), 1500);
-      })
-      .catch(() => {
-        // Clipboard API can fail in some sandboxed contexts (e.g. a
-        // future hardened WKWebView policy); fail silently — the
-        // hover Tooltip still surfaces the full message.
-      });
-  }, [statusMsg]);
-
   const { t } = useTranslation();
 
   /**
@@ -1694,126 +1589,9 @@ export function AppLayout() {
         )}
       </div>
 
-      {/* Bottom status bar */}
-      {/* Per-key:value pill style: opaque backdrop so the text stays readable when window opacity < 1 */}
-      {/* `relative` so the file-status cluster can anchor absolutely to */}
-      {/* the file editor panel's left/right edges via PR-1's filePanelBounds. */}
-      <div className="relative flex h-6 shrink-0 items-center gap-2 pl-14 pr-3 text-11 select-none ">
-        {statusVisible && (
-          <Tooltip
-            content={statusMsg}
-            variant="plain"
-            position="top"
-            delayMs={200}
-            maxWidth="60vw"
-          >
-            <button
-              type="button"
-              onClick={handleCopyStatusMsg}
-              aria-label={t("common.ariaLabelCopyError")}
-              title={t("common.copy")}
-              className={cn(
-                // `max-w-[min(60%,32rem)]` caps the pill so a long
-                // error never squeezes the agent/context pills off
-                // screen. `truncate` (already on the inner span) only
-                // engages once the button has a finite width.
-                "inline-flex items-center gap-1 rounded-md px-2 py-0.5 max-w-[min(60%,32rem)] cursor-pointer transition-colors",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/40",
-                statusType === "error" &&
-                  "text-danger-text bg-danger-surface-hover border-danger-border/70 hover:bg-danger-surface-hover/80",
-                statusType === "warning" &&
-                  "text-warning-quiet bg-warning-surface-hover border-warning-border/70 hover:bg-warning-surface-hover/80",
-                statusType === "info" &&
-                  "text-text-tertiary  bg-surface/80 border border-border-outer/50 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
-              )}
-            >
-              {statusCopied ? (
-                <>
-                  <Check className="h-3 w-3 shrink-0" aria-hidden="true" />
-                  <span className="truncate">{t("common.copied")}</span>
-                </>
-              ) : (
-                <span className="truncate">{statusMsg}</span>
-              )}
-            </button>
-          </Tooltip>
-        )}
-        {(rightPanelCollapsed || activeTab !== "status") && selectedAgent?.alive && agentName && (
-          <span className="flex items-center gap-2 truncate">
-            <span className="flex items-center gap-1 pl-1 pr-4 py-px rounded-md bg-surface/80 border border-border-outer/50">
-              <Bot className="h-3 w-3 text-text-tertiary " aria-hidden="true" />
-              <span className="text-text-tertiary ">{t("statusBar.agent")}: </span>
-              <span className="font-medium text-text-tertiary ">{agentName}</span>
-            </span>
-            {contextUsage && (
-              <span className="flex items-center gap-1 px-2 py-px rounded-md bg-surface/80 border border-border-outer/50">
-                <Cpu className="h-3 w-3 text-text-tertiary " aria-hidden="true" />
-                <span className="text-text-tertiary ">{t("statusBar.context")}: </span>
-                <span
-                  className="tabular-nums font-medium text-text-tertiary "
-                  style={{
-                    color:
-                      contextUsage.usage_percent >= 90
-                        ? "var(--color-accent)"
-                        : undefined,
-                  }}
-                >
-                  {formatPercent(contextUsage.usage_percent)}%
-                </span>
-                <span className="text-text-tertiary "> | </span>
-                <span className="tabular-nums font-medium text-text-tertiary ">
-                  {formatTokenCount(contextUsage.total_tokens)}/{formatTokenCount(contextUsage.context_window)}
-                </span>
-              </span>
-            )}
-            {/* ADR-066: cache hit rate — deliberately terse (`90% cached`)
-                because the status bar has limited horizontal space.  Shows
-                the session-lifetime (cumulative) rate.  Shown whenever the
-                Runtime reports any cumulative cache accounting; the ratio
-                falls back to a dash when it isn't computable yet. */}
-            {hasCacheData(contextUsage, "cumulative") && (
-              <span className="flex items-center gap-1 px-2 py-px rounded-md bg-surface/80 border border-border-outer/50">
-                <span className="tabular-nums font-medium text-text-tertiary ">
-                  {cacheHitRateLabel ?? "\u2014"}
-                </span>
-                <span className="text-text-tertiary ">{t("statusBar.cached")}</span>
-              </span>
-            )}
-          </span>
-        )}
-        <MqttDebugControls />
-
-        {/* File-status cluster (PR-2). Absolutely positioned inside this */}
-        {/* bar so it visually floats over the file editor column without */}
-        {/* forcing the other pills to reflow. Hidden when no file is open */}
-        {/* (the panel is unmounted, so bounds stay at mounted:false) — */}
-        {/* keeps the global bar untouched for the dominant no-file state. */}
-        {filePanelBounds.mounted && (
-          <div
-            style={{
-              position: "absolute",
-              display: "flex",
-              alignItems: "center",
-              left: filePanelBounds.left,
-              // `right` is measured from window right edge; CSS clamps
-              // negative values to 0, so a window narrower than the
-              // panel's last known right edge degrades to full bleed
-              // until ResizeObserver catches up.
-              right: Math.max(0, windowWidth - filePanelBounds.right),
-            }}
-          >
-            <FileStatusCluster
-              activeFile={clusterActiveFile}
-              cursor={editorCursor}
-              selectedCount={editorSelectedCount}
-              lspEnabled={editorLspEnabled}
-              lspLanguage={editorLspLanguage}
-              lspStatus={editorLspStatus}
-              lspStatusMessage={editorLspStatusMessage}
-            />
-          </div>
-        )}
-      </div>
+      {/* Bottom breathing room — the floating capsules would otherwise sit
+          flush against the window edge. */}
+      <div className="h-2 shrink-0" aria-hidden="true" />
 
       {/* ADR-081: app-wide global search dialog (Ctrl+Shift+F). Fixed
           overlay; mounted regardless of current view. */}
@@ -1826,12 +1604,5 @@ export function AppLayout() {
 
     </div>
   );
-}
-
-function formatTokenCount(n: number | null | undefined): string {
-  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toString();
 }
 

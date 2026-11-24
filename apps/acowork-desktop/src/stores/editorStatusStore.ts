@@ -1,33 +1,25 @@
 import { create } from "zustand";
-import { type LspStatus } from "../lib/lspUtils";
 
 /**
- * Cross-component transient signals for the currently active file tab.
+ * Transient cursor / selection signals for the currently active file tab.
  *
- * Why this store exists (instead of `AppLayout` calling `useLspClientPool`
- * directly or `react-drilling` the values up from `FileEditorPanel`):
- *
- *   - `useLspClientPool` is **not** a module-level singleton — each call
- *     constructs a fresh `LspPoolManager` (see `hooks/useLspClientPool.ts`
- *     line 184–187) and opens its own LSP WebSocket. Subscribing from a
- *     second caller would create a duplicate connection per language —
- *     unacceptable.
+ * Why a store instead of local `useState` in `FileEditorPanel`:
  *
  *   - Cursor position changes on every selection move (mouse click,
- *     arrow key, drag-select). It is already triggering a re-render of
- *     `FileEditorPanel` via local `useState`. Mirroring the change into a
- *     Zustand store costs the same single synchronous write but lets the
- *     cluster subscribe with its own selector so unrelated components do
- *     not re-render.
+ *     arrow key, drag-select). As local state that re-renders the WHOLE
+ *     editor panel — Monaco, the tab bar, the diff banners — on every
+ *     arrow key. The store lets the two-line status footer subscribe on
+ *     its own, so only the footer re-renders.
  *
- *   - Keeping the cluster a *pure renderer* (props in / DOM out) is what
- *     makes it easy to test, snapshot, and reuse — see the
- *     `FileStatusCluster` component contract.
+ *   - The panel WRITES and the footer READS. That split is the whole
+ *     reason this store exists; the LSP signals it used to carry are
+ *     gone (the footer gets them as props from the panel, which already
+ *     holds them).
  *
  * Reset semantics: every field is keyed on "the file panel currently has
  * an active file". When the panel unmounts or `activeFile` becomes `null`,
- * `FileEditorPanel` resets the relevant slices to their idle sentinel
- * (see the `editorStatusReset` effect in `FileEditorPanel`).
+ * `FileEditorPanel` resets the slices to their idle sentinel (see the
+ * reset effects in `FileEditorPanel`).
  */
 
 export interface EditorCursorPosition {
@@ -44,16 +36,6 @@ interface EditorStatusState {
     selectedCount: number;
 
     /**
-     * LSP signals for the active file's language. `null` / `""` when no
-     * editor is mounted, so the cluster can render nothing rather than a
-     * stale "ready" pill from a previously-closed file.
-     */
-    lspEnabled: boolean;
-    lspLanguage: string | null;
-    lspStatus: LspStatus | null;
-    lspStatusMessage: string;
-
-    /**
      * Push a new cursor position. Called on every Monaco
      * `onDidChangeCursorSelection`.
      */
@@ -63,18 +45,6 @@ interface EditorStatusState {
      */
     setSelectedCount: (count: number) => void;
     /**
-     * Mirror the four LSP signals that `FileEditorPanel` reads from
-     * `useLspClientPool`. Bundled into one action so callers do not have
-     * to remember to keep partial updates coherent (e.g. setting `status`
-     * without clearing `message`).
-     */
-    setLspSignals: (signals: {
-        enabled: boolean;
-        language: string | null;
-        status: LspStatus | null;
-        statusMessage: string;
-    }) => void;
-    /**
      * Reset everything to the idle sentinel — called when the panel
      * unmounts or becomes empty so the cluster cannot show stale data
      * from a previously-closed file.
@@ -82,16 +52,9 @@ interface EditorStatusState {
     resetToIdle: () => void;
 }
 
-const INITIAL_STATE: Pick<
-    EditorStatusState,
-    "cursor" | "selectedCount" | "lspEnabled" | "lspLanguage" | "lspStatus" | "lspStatusMessage"
-> = {
+const INITIAL_STATE: Pick<EditorStatusState, "cursor" | "selectedCount"> = {
     cursor: { line: 1, column: 1 },
     selectedCount: 0,
-    lspEnabled: false,
-    lspLanguage: null,
-    lspStatus: null,
-    lspStatusMessage: "",
 };
 
 export const useEditorStatusStore = create<EditorStatusState>((set) => ({
@@ -99,12 +62,5 @@ export const useEditorStatusStore = create<EditorStatusState>((set) => ({
 
     setCursor: (cursor) => set({ cursor }),
     setSelectedCount: (selectedCount) => set({ selectedCount }),
-    setLspSignals: ({ enabled, language, status, statusMessage }) =>
-        set({
-            lspEnabled: enabled,
-            lspLanguage: language,
-            lspStatus: status,
-            lspStatusMessage: statusMessage,
-        }),
     resetToIdle: () => set({ ...INITIAL_STATE }),
 }));
