@@ -410,11 +410,12 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
       setExpanded(true);
       openedByApproval.current = true;
       // Auto-scroll to bottom so the approval button is visible
-      setTimeout(() => {
+      const t = setTimeout(() => {
         if (contentRef.current) {
           contentRef.current.scrollTop = contentRef.current.scrollHeight;
         }
       }, 0);
+      return () => clearTimeout(t);
     } else if (openedByApproval.current) {
       // Every decision landed (allow / deny / timeout): the questions are
       // settled, so the block returns to its resting folded shape.

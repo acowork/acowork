@@ -1060,6 +1060,35 @@ describe("useScrollController: viewport fill", () => {
     expect(loadPrevPage).not.toHaveBeenCalled();
   });
 
+  it("never fill-loads into a zero-height pane", async () => {
+    // Regression: a collapsed/hidden pane measures clientHeight 0, so
+    // scrollHeight >= clientHeight is ALWAYS true and the fill loop kept
+    // pulling every older page — each page a full transcript re-render on
+    // the shared main thread.  Opening a workspace tab while a session
+    // streamed froze the window for tens of seconds this way.
+    const container = {
+      scrollTop: 0,
+      scrollHeight: 0,
+      clientHeight: 0,
+    } as unknown as HTMLDivElement;
+    const loadPrevPage = vi.fn(async () => {});
+    const adapter = makeMockAdapter({ hasOlder: true, loadPrevPage });
+    const { result } = renderHook(() =>
+      useScrollController({
+        containerRef: { current: container },
+        adapter,
+        vmlRef: { current: null },
+        sessionKey: "agent:sess",
+      }),
+    );
+    // Leave follow mode so the fill branch (not follow) is what runs.
+    act(() => {
+      result.current.jumpToTop();
+    });
+    for (let i = 0; i < 10; i++) await flushRaf();
+    expect(loadPrevPage).not.toHaveBeenCalled();
+  });
+
   it("keeps pulling past the old 10-page budget while a long explore run is still truncated", async () => {
     // Regression: pagination is measured in RAW JSONL entries, but the UI
     // folds a whole thought/tool_call/tool_result run into ONE explore

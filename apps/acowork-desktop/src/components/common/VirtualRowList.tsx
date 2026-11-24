@@ -65,6 +65,55 @@ const BOTTOM_PIN_MAX_MS = 2000;
 // element is removed from the DOM (virtual list recycling).
 const resizeObservers = new WeakMap<HTMLElement, ResizeObserver>();
 
+/** Temporary probe throttle, remove with the [vrl] probe. */
+let probeAt = 0;
+
+/**
+ * Shared scrollToFn for every virtualized surface (chat transcript included).
+ * Synchronous scrollTop assignment (WKWebView's scrollTo can be async even
+ * with behavior:"auto"), plus a clamped-target refresh.
+ *
+ * Force a scroll event ONLY when the element can actually scroll AND the
+ * virtualizer's own offset is stale. An unconditional toggle fires two scroll
+ * events on every clamped call; each event commits a re-render whose follow
+ * logic calls scrollToFn again, clamped again — a sync commit ping-pong that
+ * re-rendered the whole visible window hundreds of times per task (the 23s
+ * stall). A hidden pane never delivers scroll events at all, so forcing there
+ * loops forever; an up-to-date offset has nothing to refresh. Either way: no
+ * force. One implementation, so a fix here reaches every caller.
+ */
+export function clampedScrollToFn<TScrollElement extends HTMLElement, TItemElement extends Element>(
+  offset: number,
+  options: { adjustments?: number; behavior?: ScrollBehavior },
+  instance: Virtualizer<TScrollElement, TItemElement>,
+): void {
+  const element = instance.scrollElement;
+  if (!element) return;
+  const target = offset + (options.adjustments ?? 0);
+  if (options.behavior === "smooth") {
+    element.scrollTo({
+      [instance.options.horizontal ? "left" : "top"]: target,
+      behavior: "smooth",
+    });
+    return;
+  }
+  const axis = instance.options.horizontal ? "scrollLeft" : "scrollTop";
+  const current = element[axis] as number;
+  element[axis] = target;
+  const canScroll = instance.options.horizontal
+    ? element.scrollWidth > element.clientWidth
+    : element.scrollHeight > element.clientHeight;
+  if (
+    canScroll &&
+    element[axis] === current &&
+    target === current &&
+    instance.scrollOffset !== target
+  ) {
+    element[axis] = current + 1;
+    element[axis] = target;
+  }
+}
+
 // Module-level measured-height cache, keyed by the adapter's item key.
 // Once an item has been in view, its real height is preserved across
 // re-mounts (recycling) and re-opens of the same window — the same trick
@@ -179,8 +228,15 @@ export function VirtualRowList<T>({
   // before paint, so estimateSize sees the real width on the first measured
   // pass without flushSync or rAF.
   const [containerWidth, setContainerWidth] = useState(0);
+  // Scroll element identity, captured once the parent's ref populates. Keying
+  // the ResizeObserver on it builds the observer ONCE per element, not on every
+  // commit; identity-stable so the same node never re-renders.
+  const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
+  // deps-less-ok: identity-stable late-ref capture (setScrollEl bails on same
+  // node) + first-paint width read; no feedback — the RO below owns later changes.
   useLayoutEffect(() => {
     const el = scrollContainerRef.current;
+    setScrollEl((prev) => (prev === el ? prev : el));
     if (el && el.clientWidth > 0) {
       setContainerWidth((prev) => {
         const w = el.clientWidth;
@@ -188,18 +244,17 @@ export function VirtualRowList<T>({
       });
     }
   });
+  // ONE width source (clientWidth, same as the layout effect) — contentRect.width
+  // excludes padding and is fractional, mixing the two ping-ponged every frame.
   useEffect(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const w = Math.round(entry.contentRect.width);
-        setContainerWidth((prev) => (prev === w ? prev : w));
-      }
+    if (!scrollEl) return;
+    const ro = new ResizeObserver(() => {
+      const w = scrollEl.clientWidth;
+      setContainerWidth((prev) => (prev === w ? prev : w));
     });
-    ro.observe(el);
+    ro.observe(scrollEl);
     return () => ro.disconnect();
-  });
+  }, [scrollEl]);
   const containerWidthRef = useRef(containerWidth);
   containerWidthRef.current = containerWidth;
 
@@ -276,25 +331,7 @@ export function VirtualRowList<T>({
     // asynchronously on macOS and delay the scroll event. When the position
     // does not actually change (already clamped), toggle to force a scroll
     // event — otherwise the virtualizer's internal scrollOffset stays stale.
-    scrollToFn: (offset, options, instance) => {
-      const element = instance.scrollElement;
-      if (!element) return;
-      const target = offset + (options.adjustments ?? 0);
-      if (options.behavior === "smooth") {
-        element.scrollTo({
-          [instance.options.horizontal ? "left" : "top"]: target,
-          behavior: "smooth",
-        });
-      } else {
-        const axis = instance.options.horizontal ? "scrollLeft" : "scrollTop";
-        const current = element[axis] as number;
-        element[axis] = target;
-        if (element[axis] === current && target === current) {
-          element[axis] = current + 1;
-          element[axis] = target;
-        }
-      }
-    },
+    scrollToFn: clampedScrollToFn,
   });
 
   // ── Late-ref self-heal ───────────────────────────────────────────
@@ -308,6 +345,8 @@ export function VirtualRowList<T>({
   // the ref populated; the guard prevents any loop.
   const [, remeasure] = useReducer((n: number) => n + 1, 0);
   const attachedForEl = useRef<HTMLElement | null>(null);
+  // deps-less-ok: late-ref self-heal, guarded by attachedForEl — bumps exactly
+  // once per element identity, never loops.
   useEffect(() => {
     const el = scrollContainerRef.current;
     if (el && !virtualizer.scrollElement && attachedForEl.current !== el) {
@@ -500,14 +539,32 @@ export function VirtualRowList<T>({
   //      the sizing pane only. One frame of no rows, then the bump
   //      re-renders virtualized. Cheaper than mounting the whole
   //      transcript on the first paint of a huge session.
-  //   2. container attached but viewport measures 0 (jsdom without
-  //      layout mocks, or a hidden container): fall back to every row in
-  //      normal flow — pre-virtualization behavior, so degraded
-  //      environments can never produce a white pane.
+  //   2. container attached but viewport measures 0 (a hidden pane — the
+  //      editor tab takes the middle, display:none chat): render NO rows.
+  //      The old all-rows fallback mounted the entire transcript (thousands
+  //      of markdown bubbles) into an invisible pane on every layout change
+  //      and re-committed it on each pointermove — a 23s main-thread stall.
+  //      A hidden pane has nothing to paint; when it becomes visible the
+  //      ResizeObserver / late-ref bump re-renders the windowed branch.
+  //      Layout-less test setups mock clientHeight > 0, so they stay on
+  //      branch 3.
   //   3. normal: the virtualized window.
   const container = scrollContainerRef.current;
   const viewportPx = container ? container.offsetHeight || container.clientHeight : 0;
   const virtualized = container !== null && viewportPx > 0;
+
+  // Temporary diagnosis probe: a window bigger than a screenful means the
+  // viewport measurement swallowed the content height (or the hidden-pane
+  // fallback fired). Remove with the AppFrame marks.
+  const probeRows = virtualized ? virtualizer.getVirtualItems().length : 0;
+  if (container && (probeRows > 60 || !virtualized) && performance.now() - probeAt > 1000) {
+    probeAt = performance.now();
+    console.warn(
+      `[vrl] rows=${probeRows} items=${items.length} viewport=${viewportPx} ` +
+        `scrollH=${container.scrollHeight} clientH=${container.clientHeight} ` +
+        `class=${container.className}`,
+    );
+  }
 
   const rowDiv = (
     key: string | number,
@@ -530,9 +587,9 @@ export function VirtualRowList<T>({
   return (
     // The sizer: `containerRef` (directDomUpdates) lets the virtualizer write
     // its height itself, so a React-owned value must not fight it — the `auto`
-    // below only exists to CLEAR a height the library left behind when the
-    // fallback branch takes over (a viewport that collapses to zero), where
-    // there is no library write to correct it.
+    // below only exists to CLEAR a height the library left behind while the
+    // viewport measures zero (hidden pane), where there is no library write
+    // to correct it.
     <div
       ref={virtualized ? virtualizer.containerRef : undefined}
       style={{
@@ -562,17 +619,7 @@ export function VirtualRowList<T>({
               true,
             );
           })
-        : container
-          ? items.map((item, index) =>
-              rowDiv(
-                keyOf(item, index),
-                item,
-                index,
-                { ...(rowStyle?.(item, index) ?? {}) },
-                false,
-              ),
-            )
-          : null}
+        : null}
     </div>
   );
 }

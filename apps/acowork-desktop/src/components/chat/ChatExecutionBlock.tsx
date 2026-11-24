@@ -381,11 +381,12 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
     if (hasOpenCard) {
       // The answer buttons have to be on screen, not just in the pane.
       setExpanded(true);
-      setTimeout(() => {
+      const t = setTimeout(() => {
         if (contentRef.current) {
           contentRef.current.scrollTop = contentRef.current.scrollHeight;
         }
       }, 0);
+      return () => clearTimeout(t);
     }
   }, [hasOpenCard]);
 

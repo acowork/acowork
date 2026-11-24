@@ -96,4 +96,40 @@ describe("OverlayScrollTarget", () => {
     // maxScroll 400 spread over maxTop 80 → 5 px of scroll per px dragged.
     expect(scrollTo).toHaveBeenCalledWith(200);
   });
+
+  it("does not re-measure on a pure re-render (no per-commit feedback loop)", () => {
+    // The thumb is a read-only projection of geometry: a host re-render with
+    // unchanged geometry must not read geometry again. A deps-less re-measure
+    // effect reads on EVERY commit; mid-stream (virtualizer height + pin
+    // scrollTop keep geometry in flux) under a discrete event that setState
+    // runs at sync lane and cascades synchronously — the 23s workspace-open
+    // freeze. Observers (resize/mutation/scroll/input) are the only drivers.
+    let reads = 0;
+    function Host() {
+      const ref = useRef<HTMLDivElement | null>(null);
+      return (
+        <div className={OVERLAY_SCROLL_HOST_CLASS}>
+          <div
+            ref={(node) => {
+              ref.current = node;
+              const el = node as (HTMLElement & { __stubbed?: boolean }) | null;
+              if (el && !el.__stubbed) {
+                el.__stubbed = true;
+                Object.defineProperty(el, "clientHeight", { configurable: true, get: () => { reads++; return 100; } });
+                Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => { reads++; return 500; } });
+                Object.defineProperty(el, "scrollTop", { configurable: true, get: () => 0 });
+              }
+            }}
+            className={OVERLAY_SCROLL_VIEWPORT_CLASS}
+          />
+          <OverlayScrollTarget targetRef={ref} />
+        </div>
+      );
+    }
+    const { rerender } = render(<Host />);
+    reads = 0; // mount measured once via the observer effect; ignore it
+    rerender(<Host />);
+    rerender(<Host />);
+    expect(reads).toBe(0);
+  });
 });

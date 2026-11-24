@@ -67,7 +67,8 @@ export function CloneDialog({
       setNewAgentId(packageId);
       setNewName("");
       setError(null);
-      setTimeout(() => inputRef.current?.focus(), 50);
+      const t = setTimeout(() => inputRef.current?.focus(), 50);
+      return () => clearTimeout(t);
     }
   }, [open, packageId]);
 

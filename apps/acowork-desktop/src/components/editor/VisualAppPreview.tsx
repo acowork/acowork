@@ -5,7 +5,7 @@
  * Bytes come from the workspace file API; the iframe is a viewer, not the
  * MCP backend.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, AlertCircle } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { listApps, type AppDto } from "../../lib/apps-api";
@@ -19,7 +19,13 @@ export function VisualAppPreview({ file }: { file: OpenFile }) {
     const { t } = useTranslation();
     const [app, setApp] = useState<AppDto | null>(null);
     const [appError, setAppError] = useState<string | null>(null);
-    const [bytes, setBytes] = useState<Uint8Array | null>(null);
+    // Bytes live in a REF, not state: React's dev performance track walks every
+    // state/prop value, and a large PDF's Uint8Array would be iterated index by
+    // index on every render (20s+ freeze). A version counter re-renders when
+    // they arrive; the getter below hands them to AppFrame without React ever
+    // seeing the array.
+    const bytesRef = useRef<Uint8Array | null>(null);
+    const [bytesVersion, setBytesVersion] = useState(0);
 
     const blobState = useWorkspaceFileBlob(
         {
@@ -67,12 +73,15 @@ export function VisualAppPreview({ file }: { file: OpenFile }) {
 
     useEffect(() => {
         if (!blobState.blob) {
-            setBytes(null);
+            bytesRef.current = null;
+            setBytesVersion((v) => v + 1);
             return;
         }
         let cancelled = false;
         void blobState.blob.arrayBuffer().then((buf) => {
-            if (!cancelled) setBytes(new Uint8Array(buf));
+            if (cancelled) return;
+            bytesRef.current = new Uint8Array(buf);
+            setBytesVersion((v) => v + 1);
         });
         return () => {
             cancelled = true;
@@ -86,10 +95,10 @@ export function VisualAppPreview({ file }: { file: OpenFile }) {
      * re-render of this pane — a file-tree refresh, a status tick — look like
      * an edit from outside.
      */
-    const openFile = useMemo(
-        () => (bytes ? { name: file.fileName, bytes } : null),
-        [file.fileName, bytes],
-    );
+    const openFile = useMemo(() => {
+        const bytes = bytesRef.current;
+        return bytes ? { name: file.fileName, getBytes: () => bytes } : null;
+    }, [file.fileName, bytesVersion]);
 
     if (appError) {
         return (

@@ -543,6 +543,15 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     const container = containerRefRef.current.current;
     const a = adapterRef.current;
     if (!container) return;
+    // Module invariant: a zero-height viewport has no scroll semantics.
+    // scrollTop there is a CLAMP artifact (collapsed/hidden pane, a follow
+    // pin the element cannot honour), never reading intent. Edge detection
+    // on it cascaded: each prepend re-pins, re-clamps, re-fires — the whole
+    // session history mounted and markdown-parsed in one sync task (the 27s
+    // stall when a workspace tab opened mid-stream). The fill rule below is
+    // unreachable at height 0 anyway (range < 0 is impossible), so one guard
+    // here covers every branch.
+    if (container.clientHeight === 0) return;
 
     // ── Update scroll-position state (drives arrow buttons) ──
     const scrollTop = container.scrollTop;
@@ -754,7 +763,9 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
       // Programmatic scrolls (jumpToBottom / liveUpdate auto-follow)
       // only move scrollTop DOWN (scrollingUp=false), so they cannot
       // trip this branch — see "Guard #1" above.
-      if (scrollingUp && distFromBottom > EDGE_THRESHOLD_PX) {
+      // A clamp to 0 in a zero-height viewport looks like scroll-up but is
+      // the pane collapsing, not the user leaving the tail.
+      if (scrollingUp && distFromBottom > EDGE_THRESHOLD_PX && container.clientHeight > 0) {
         setFollowModeSync(false);
       }
     } else {

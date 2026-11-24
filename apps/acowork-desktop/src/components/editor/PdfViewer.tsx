@@ -29,7 +29,7 @@
  * agent a look at the print layout of something we cannot even preview would be
  * a promise we cannot keep. The degraded JS renderers stay on their own path.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Crop, Loader2, MessageSquarePlus, X } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { log } from "../../lib/logger";
@@ -142,7 +142,12 @@ export default function PdfViewer(props: PdfViewerProps) {
      *  converter's cached array: `pdfRasterize` takes its own copy at the pdf.js
      *  transfer point, so opening a document never eats the bytes the tab still
      *  holds. */
-    const [bytes, setBytes] = useState<Uint8Array | null>(null);
+    const bytesRef = useRef<Uint8Array | null>(null);
+    // Version ticks only when the array behind the ref changes, so the column
+    // remounts (and re-opens) exactly once per new document while the bytes
+    // stay out of state — React's dev perf track walks a Uint8Array index by
+    // index, which on a 30 MB PDF froze the tab.
+    const [bytesVersion, setBytesVersion] = useState(0);
     /** The read settled with nothing in hand. Distinct from `bytes === null`
      *  (still reading) because the body has to say which of the two it is: a
      *  spinner that never ends is how a dead document gets presented. */
@@ -179,13 +184,15 @@ export default function PdfViewer(props: PdfViewerProps) {
                 // An empty read is a failed read: a zero-length array is truthy
                 // and would otherwise be handed to the column as a document.
                 const ok = next !== null && next.length > 0;
-                setBytes(ok ? next : null);
+                bytesRef.current = ok ? next : null;
+                setBytesVersion((v) => v + 1);
                 setReadFailed(!ok);
             })
             .catch((err) => {
                 log.error("[PdfViewer] reading the PDF bytes failed:", err);
                 if (!cancelled) {
-                    setBytes(null);
+                    bytesRef.current = null;
+                    setBytesVersion((v) => v + 1);
                     setReadFailed(true);
                 }
             });
@@ -196,6 +203,7 @@ export default function PdfViewer(props: PdfViewerProps) {
 
     const sendDocument = useCallback(() => {
         const onAddDocumentToChat = props.onAddDocumentToChat;
+        const bytes = bytesRef.current;
         if (!onAddDocumentToChat || !bytes) return;
         // `File` copies its parts, so `bytes` stays usable afterwards — and
         // pdf.js, which *transfers* whatever it is given, only ever sees the
@@ -205,7 +213,7 @@ export default function PdfViewer(props: PdfViewerProps) {
                 type: "application/pdf",
             }),
         );
-    }, [bytes, props.fileName, props.onAddDocumentToChat]);
+    }, [props.fileName, props.onAddDocumentToChat]);
 
     const headerBtn =
         "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text disabled:opacity-50";
@@ -216,7 +224,7 @@ export default function PdfViewer(props: PdfViewerProps) {
     // needs the bytes — neither is offered before the preview itself has
     // succeeded, and neither is offered at all without a callback to take it.
     const extraActions =
-        bytes !== null && (onAddRegionToChat || props.onAddDocumentToChat) ? (
+        bytesRef.current !== null && (onAddRegionToChat || props.onAddDocumentToChat) ? (
             <>
                 {onAddRegionToChat && (
                     <button
@@ -249,7 +257,7 @@ export default function PdfViewer(props: PdfViewerProps) {
 
     return (
         <DocumentViewerFrame file={props} state={state} extraActions={extraActions}>
-            {bytes ? (
+            {bytesRef.current ? (
                 /*  One surface for both jobs: the column stays mounted, and
                  *  `framing` decides whether a pointer draws a box or pans the
                  *  document. The region callback is only ever handed to the
@@ -257,7 +265,8 @@ export default function PdfViewer(props: PdfViewerProps) {
                  *  not lose it — the column would remount and the user would be
                  *  back at the top of the document. */
                 <PdfColumnViewer
-                    bytes={bytes}
+                    key={bytesVersion}
+                    bytes={bytesRef.current}
                     framing={picking}
                     onExitFraming={stopPicking}
                     {...(onAddRegionToChat ? { onAddRegionToChat } : {})}

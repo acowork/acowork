@@ -15,6 +15,20 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 
+// jsdom has no layout: give the virtualizer a measurable viewport so the
+// windowed branch renders rows (the hidden-pane all-rows fallback is gone).
+for (const [prop, px] of [
+  ["offsetHeight", 400],
+  ["offsetWidth", 800],
+  ["clientHeight", 400],
+  ["clientWidth", 800],
+] as const) {
+  Object.defineProperty(HTMLElement.prototype, prop, {
+    configurable: true,
+    get: () => px,
+  });
+}
+
 const h = vi.hoisted(() => ({
   hookState: {
     blob: null as Blob | null,

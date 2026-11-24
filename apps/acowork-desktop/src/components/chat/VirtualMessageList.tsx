@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { clampedScrollToFn } from "../common/VirtualRowList";
 import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { ExploreBlock } from "./ExploreBlock";
@@ -22,6 +23,18 @@ import type { SpeakerKind } from "./speakerBubble";
 // ResizeObserver instances per element.  WeakMap so they're GC'd when the
 // element is removed from the DOM (virtual list recycling).
 const resizeObservers = new WeakMap<HTMLElement, ResizeObserver>();
+
+// Identity-preserving `items.slice(1)` (AGENTS.md store rule): a fresh array
+// per render breaks React.memo on every user row. Keyed by the items array,
+// which the adapter keeps stable while the block's content is unchanged.
+const partsCache = new WeakMap<ChatMessage[], { len: number; parts: ChatMessage[] }>();
+function partsOf(items: ChatMessage[]): ChatMessage[] {
+  const hit = partsCache.get(items);
+  if (hit && hit.len === items.length) return hit.parts;
+  const parts = items.slice(1);
+  partsCache.set(items, { len: items.length, parts });
+  return parts;
+}
 
 // Bottom-anchor tuning for `scrollToBottom`.  While armed, the viewport is
 // re-pinned to the bottom on every commit until the layout settles
@@ -233,9 +246,17 @@ export const VirtualMessageList = React.forwardRef<
   // synchronous re-render (containerWidth > 0), all before the first
   // paint.  No flushSync, no rAF, no force-overscan.
   const [containerWidth, setContainerWidth] = useState(0);
+  // Scroll element identity, captured once the parent's ref populates (it lands
+  // after this child's effects). Identity-stable: same node -> no re-render.
+  // Keying the ResizeObserver on it builds the observer ONCE per element instead
+  // of tearing it down and rebuilding on every commit.
+  const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
 
+  // deps-less-ok: identity-stable late-ref capture (setScrollEl bails on same
+  // node) + first-paint width read; no feedback — the RO below owns later changes.
   useLayoutEffect(() => {
     const el = scrollContainerRef.current;
+    setScrollEl((prev) => (prev === el ? prev : el));
     if (el && el.clientWidth > 0) {
       setContainerWidth((prev) => {
         const w = el.clientWidth;
@@ -244,19 +265,19 @@ export const VirtualMessageList = React.forwardRef<
     }
   });
 
-  // ResizeObserver for subsequent width changes (window resize, etc.)
+  // Subsequent width changes (window resize, pane split). ONE source —
+  // clientWidth, the same value the layout effect reads — so the two paths can
+  // never disagree. (contentRect.width excludes padding and is fractional;
+  // mixing it with clientWidth ping-ponged the width every frame.)
   useEffect(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const w = Math.round(entry.contentRect.width);
-        setContainerWidth((prev) => (prev === w ? prev : w));
-      }
+    if (!scrollEl) return;
+    const ro = new ResizeObserver(() => {
+      const w = scrollEl.clientWidth;
+      setContainerWidth((prev) => (prev === w ? prev : w));
     });
-    ro.observe(el);
+    ro.observe(scrollEl);
     return () => ro.disconnect();
-  });
+  }, [scrollEl]);
 
   // ── Virtualizer ──────────────────────────────────────────────────
     // Created fresh on every mount (thanks to parent's key={currentScrollKey}).
@@ -296,38 +317,13 @@ export const VirtualMessageList = React.forwardRef<
     // keyed by index and all measurements shift when items are prepended,
     // making getTotalSize() inaccurate and breaking the scrollHeight delta.
     getItemKey: (index: number) => messageBlocksRef.current[index]?.blockId ?? index,
-    // Custom scrollToFn: use synchronous scrollTop assignment instead of
-    // element.scrollTo().  On WKWebView (macOS Safari), element.scrollTo()
-    // can be asynchronous even with behavior:"auto", causing the scroll
-    // event to fire after a delay.  Direct scrollTop assignment triggers
-    // a synchronous scroll event in all browsers.
-    //
-    // Also handles the edge case where scrollTop doesn't change (e.g.
-    // browser already clamped it to the target value).  In that case no
-    // scroll event fires, so we toggle to force one — otherwise the
-    // virtualizer's internal scrollOffset stays stale.
-    scrollToFn: (offset, options, instance) => {
-      const element = instance.scrollElement;
-      if (!element) return;
-      const target = offset + (options.adjustments ?? 0);
-      if (options.behavior === "smooth") {
-        element.scrollTo({
-          [instance.options.horizontal ? "left" : "top"]: target,
-          behavior: "smooth",
-        });
-      } else {
-        const axis = instance.options.horizontal ? "scrollLeft" : "scrollTop";
-        const current = element[axis] as number;
-        element[axis] = target;
-        // If the browser didn't actually change the scroll position
-        // (e.g. it was already clamped to target), no scroll event fires.
-        // Toggle to a different value and back to force one.
-        if (element[axis] === current && target === current) {
-          element[axis] = current + 1;
-          element[axis] = target;
-        }
-      }
-    },
+    // Shared clamped scrollToFn. The forced +1/back toggle MUST only fire
+    // when the virtualizer's offset is actually stale: at steady state it
+    // manufactured two scroll events per call, each committing a re-render
+    // whose follow logic called scrollToFn again — a feedback loop that
+    // never converges (the 23.6s sync commit storm on tab open). Layout
+    // changes once; after one correcting re-render nothing may re-fire.
+    scrollToFn: clampedScrollToFn,
   });
 
   // ── measureElement + ResizeObserver ──────────────────────────────
@@ -439,7 +435,10 @@ export const VirtualMessageList = React.forwardRef<
       pinToBottomRef.current = false;
       return;
     }
-    el.scrollTop = max;
+    // Converge: write only when the pin actually moves. An unconditional
+    // write re-fires scroll events at steady state and feeds the commit
+    // loop (layout changes once; the correction must settle, not oscillate).
+    if (el.scrollTop !== max) el.scrollTop = max;
     lastPinTopRef.current = max;
   });
 
@@ -674,7 +673,7 @@ export const VirtualMessageList = React.forwardRef<
                         isStreaming={isStreamingGroup}
                         pendingApproval={pendingApproval}
                         currentSessionId={currentSessionId}
-                        onApprove={(action, approval) => onApprove(action, approval)}
+                        onApprove={onApprove}
                         onCancelTool={onCancelTool}
                         toolProgress={toolProgress}
                         hasFollowUpReply={hasFollowUpReply}
@@ -733,7 +732,7 @@ export const VirtualMessageList = React.forwardRef<
                     ADR-046, references ADR-107) */}
                 {item.type === "user_with_parts" && (() => {
                   const userMsg = item.items[0];
-                  const parts = item.items.slice(1);
+                  const parts = partsOf(item.items);
                   return (
                     <UserWithAttachmentsBubble
                       userMessage={userMsg}

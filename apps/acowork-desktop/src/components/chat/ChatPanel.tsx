@@ -480,6 +480,11 @@ function ConnectionStatusBanner({
   );
 }
 
+// Stable empty defaults so memoized transcript rows keep prop identity when
+// the session has no pending approvals / questions (AGENTS.md store rule).
+const EMPTY_APPROVALS: Record<string, ToolApprovalNeededEvent> = {};
+const EMPTY_QUESTIONS: never[] = [];
+
 export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   const shellCn = embedded ? CHAT_PANEL_EMBEDDED_CN : CHAT_PANEL_SHELL_CN;
   const { t } = useTranslation();
@@ -593,8 +598,10 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     ? { message: pausedDetail.message ?? "Loop detected — session paused." }
     : null;
   const serverError = sessionState?.serverError ?? null;
-  const pendingApproval = sessionState?.pendingApproval ?? {};
-  const pendingQuestions = sessionState?.pendingQuestions ?? [];
+  // Identity-preserving defaults (AGENTS.md): a fresh `{}` / `[]` per render
+  // breaks React.memo on every transcript row that receives them.
+  const pendingApproval = sessionState?.pendingApproval ?? EMPTY_APPROVALS;
+  const pendingQuestions = sessionState?.pendingQuestions ?? EMPTY_QUESTIONS;
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   // Reset to first question when the list changes (new question arrives)
   useEffect(() => {
@@ -1827,7 +1834,8 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   // broker, where any client could have sent `{approved: true}` into someone
   // else's session — i.e. arbitrary command execution. The Runtime now
   // verifies the caller owns the session before acting.
-  const handleToolApprove = async (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => {
+  // Stable identity: transcript rows memoize on this callback (AGENTS.md).
+  const handleToolApprove = useCallback(async (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => {
     // ADR-073: the approval event carries no `agent_id` — identity is the
     // instance key from the connection context (`selectedAgentId`).
     const instanceId = String(selectedAgentId ?? "");
@@ -1851,7 +1859,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     } else {
       resolveApproval(selectedAgentId ?? "");
     }
-  };
+  }, [selectedAgentId]);
 
   // Ask question answer: send over the authenticated HTTP API, then clear the
   // answered question from the queue.

@@ -16,7 +16,7 @@ const h = vi.hoisted(() => ({
     frames: [] as Array<{
         app: AppDto;
         search?: string;
-        openFile?: { name: string; bytes: Uint8Array } | null;
+        openFile?: { name: string; getBytes: () => Uint8Array } | null;
         onSaveFile?: (f: { name: string; bytes: Uint8Array; saveAs: boolean }) => Promise<void>;
     }>,
     saveHostedAppFile: vi.fn(async () => undefined),
@@ -35,7 +35,7 @@ vi.mock("../apps/AppFrame", () => ({
     AppFrame: (props: {
         app: AppDto;
         search?: string;
-        openFile?: { name: string; bytes: Uint8Array } | null;
+        openFile?: { name: string; getBytes: () => Uint8Array } | null;
         onSaveFile?: (f: { name: string; bytes: Uint8Array; saveAs: boolean }) => Promise<void>;
     }) => {
         h.frames.push(props);
@@ -124,7 +124,7 @@ describe("VisualAppPreview", () => {
             expect(last?.search).toContain("file=designs");
             expect(last?.search).toContain("control=1");
             expect(last?.openFile?.name).toBe("home.figcraft");
-            expect(Array.from(last!.openFile!.bytes)).toEqual([1, 2, 3]);
+            expect(Array.from(last!.openFile!.getBytes())).toEqual([1, 2, 3]);
         });
     });
     it("keeps the document it handed over across an unrelated re-render", async () => {

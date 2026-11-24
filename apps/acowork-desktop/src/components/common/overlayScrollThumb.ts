@@ -174,6 +174,14 @@ export function useOverlayScrollThumb(options: OverlayScrollThumbOptions = {}): 
     if (target.firstElementChild) resize.observe(target.firstElementChild);
     const mutations = new MutationObserver(updateMetrics);
     mutations.observe(target, { childList: true, subtree: true, characterData: true });
+    // A virtualizer grows its total-size wrapper by writing inline `height`
+    // (attribute-only, no child mutation). The content-box ResizeObserver above
+    // already reports the resulting resize; observing the style attribute too
+    // covers hosts where the write lands on a box we do not observe. This is
+    // the event-driven signal the old per-commit re-measure was hacking around.
+    if (target.firstElementChild) {
+      mutations.observe(target.firstElementChild, { attributes: true, attributeFilter: ["style"] });
+    }
     target.addEventListener("scroll", updateMetrics, { passive: true });
     target.addEventListener("input", updateMetrics, { passive: true });
     updateMetrics();
@@ -185,15 +193,16 @@ export function useOverlayScrollThumb(options: OverlayScrollThumbOptions = {}): 
     };
   }, [target, updateMetrics]);
 
-  // Safety net, not the main path: content can change height with no child
-  // mutation and no box resize — a virtualizer setting its total-size wrapper's
-  // inline `height` is attribute-only, which MutationObserver (childList /
-  // characterData) does not report. Re-measuring once per commit is what the
-  // pre-refactor component effectively did, and `updateMetrics`' identity-stable
-  // writes keep it from looping.
-  useEffect(() => {
-    updateMetrics();
-  });
+  // NO per-commit re-measure here. A deps-less `useEffect(updateMetrics)` looks
+  // harmless because `updateMetrics` writes identity-stable metrics — but that
+  // only bails while geometry is STILL. Mid-stream the virtualizer's directDom
+  // height writes and the bottom-pin's scrollTop writes keep geometry in flux,
+  // so every commit measured a NEW value and setMetrics re-rendered. Under a
+  // discrete event (workspace dblclick) React runs passive effects at sync lane,
+  // so that setState spawned a synchronous commit → new geometry → new setState:
+  // the 23s frozen cascade. The thumb is a read-only projection of geometry; it
+  // must be driven ONLY by the observers above (resize / mutation / scroll /
+  // input), which fire when geometry actually changes and settle to silence.
 
   const onThumbPointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || metrics.maxScroll === 0 || !target) return;
@@ -289,6 +298,8 @@ export function useOverlayScrollThumb(options: OverlayScrollThumbOptions = {}): 
 export function useRefElement(targetRef: { current: HTMLElement | null }): HTMLElement | null {
   const [element, setElement] = useState<HTMLElement | null>(null);
   const seenRef = useRef<HTMLElement | null>(null);
+  // deps-less-ok: late-ref read guarded by seenRef — same node bails, no state
+  // write, no extra render in steady state.
   useEffect(() => {
     const node = targetRef.current;
     if (seenRef.current === node) return;

@@ -38,6 +38,17 @@ export interface AppFrameOpenFile {
     bytes: Uint8Array;
 }
 
+/** The visual-preview INPUT form: bytes sit behind a getter so React's dev
+ *  performance track never walks a multi-MB Uint8Array index-by-index. A large
+ *  PDF passed as a plain `bytes` prop made the pane freeze 20s+ in dev (the
+ *  track deep-inspects props and `for..in`s a typed array = O(file size) per
+ *  render); a getter is a function, which it stringifies instead. Caller keeps
+ *  the array in a ref. */
+export interface AppFrameOpenFileInput {
+    name: string;
+    getBytes: () => Uint8Array;
+}
+
 /** The app's Save: its bytes, plus whether the user picked the destination. */
 export interface AppFrameSaveFile extends AppFrameOpenFile {
     saveAs: boolean;
@@ -58,8 +69,9 @@ export function AppFrame({
     app: AppDto;
     /** Extra query string (ticket stays in the fragment). */
     search?: string;
-    /** Workspace file bytes for a visual preview iframe. */
-    openFile?: AppFrameOpenFile | null;
+    /** Workspace file bytes for a visual preview iframe (behind a getter so a
+     *  large file never lands in React props — see AppFrameOpenFileInput). */
+    openFile?: AppFrameOpenFileInput | null;
     /** Write-back: the app's Save, landed on the workspace file it came from. */
     onSaveFile?: (file: AppFrameSaveFile) => Promise<void>;
 }) {
@@ -83,7 +95,7 @@ export function AppFrame({
     /** Bridge version the app announced (`hello` = 2; `ready` alone = 1). */
     const bridgeRef = useRef(0);
     /** What the app already took, so the same bytes do not re-open it. */
-    const ackedRef = useRef<AppFrameOpenFile | null>(null);
+    const ackedRef = useRef<AppFrameOpenFileInput | null>(null);
     /** What the app asked us to save — it comes back as `openFile`. */
     const lastSavedRef = useRef<AppFrameOpenFile | null>(null);
     const deliveryRef = useRef<{
@@ -178,7 +190,7 @@ export function AppFrame({
                 setNotice(`The app did not take ${payload?.name ?? "the document"}. Reopen it to try again.`);
                 return;
             }
-            post({ type: "openFile", name: payload.name, bytes: payload.bytes, id });
+            post({ type: "openFile", name: payload.name, bytes: payload.getBytes(), id });
             armDelivery(id, tries + 1);
         }, DELIVERY_RETRY_MS);
         deliveryRef.current = { id, timer };
@@ -195,7 +207,7 @@ export function AppFrame({
         if (deliveryRef.current) return; // one document in flight at a time
         const id = ++deliverySeq.current;
         deliveryRef.current = { id, timer: null };
-        post({ type: "openFile", name: payload.name, bytes: payload.bytes, id });
+        post({ type: "openFile", name: payload.name, bytes: payload.getBytes(), id });
         setDocInFlight(true);
         // A v1 package answers nothing: one hand-over and no verdict.
         if (bridgeRef.current >= 2) armDelivery(id, 0);
@@ -349,10 +361,16 @@ export function AppFrame({
     );
 }
 
-function sameBytes(a: AppFrameOpenFile | null, b: AppFrameOpenFile | null): boolean {
+function sameBytes(
+    a: AppFrameOpenFileInput | AppFrameOpenFile | null,
+    b: AppFrameOpenFileInput | AppFrameOpenFile | null,
+): boolean {
     if (!a || !b) return false;
-    if (a.name !== b.name || a.bytes.length !== b.bytes.length) return false;
-    for (let i = 0; i < a.bytes.length; i += 1) if (a.bytes[i] !== b.bytes[i]) return false;
+    if (a.name !== b.name) return false;
+    const ab = "getBytes" in a ? a.getBytes() : a.bytes;
+    const bb = "getBytes" in b ? b.getBytes() : b.bytes;
+    if (ab.length !== bb.length) return false;
+    for (let i = 0; i < ab.length; i += 1) if (ab[i] !== bb[i]) return false;
     return true;
 }
 

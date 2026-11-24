@@ -344,6 +344,50 @@ describe("VirtualRowList followBottom", () => {
     }
   });
 
+  it("a hidden pane (viewport 0) renders no rows, not the whole transcript", async () => {
+    const prefix = nextPrefix();
+    const s = setup(items(500, prefix));
+    await s.settle();
+    expect(s.container.querySelectorAll("[data-testid=row]").length).toBeGreaterThan(0);
+    // Collapse the viewport the way display:none does when the editor tab
+    // takes the middle pane: the windowed branch must yield, and the old
+    // all-rows fallback must NOT mount 500 bubbles into an invisible pane.
+    Object.defineProperty(s.container, "clientHeight", { configurable: true, get: () => 0 });
+    Object.defineProperty(s.container, "offsetHeight", { configurable: true, get: () => 0 });
+    s.commit(items(500, prefix));
+    await s.settle();
+    expect(s.container.querySelectorAll("[data-testid=row]").length).toBe(0);
+  });
+
+  it("a clamped scroll with an up-to-date offset does not force scroll events", async () => {
+    const prefix = nextPrefix();
+    const s = setup(items(1, prefix)); // total size < viewport: every offset clamps
+    await s.settle();
+    const written: number[] = [];
+    let st = 0;
+    Object.defineProperty(s.container, "scrollTop", {
+      configurable: true,
+      get: () => st,
+      set: (v: number) => {
+        // Real browsers clamp; the jsdom slot does not, and an unclamped
+        // negative would hide the clamped-toggle path this test pins.
+        const max = Math.max(0, s.container.scrollHeight - s.container.clientHeight);
+        st = Math.max(0, Math.min(v, max));
+        written.push(st);
+      },
+    });
+    act(() => {
+      s.handle.current?.scrollToBottom();
+      s.handle.current?.scrollToBottom();
+    });
+    // Every write lands on the clamped target (0). The old unconditional
+    // +1/target toggle wrote a transient 1 to force a scroll event; each
+    // forced event committed a re-render that scrolled again — the
+    // hidden-pane commit ping-pong. No transient, no loop.
+    expect(written.length).toBeGreaterThan(0);
+    expect(written.every((v) => v === 0)).toBe(true);
+  });
+
   it("without the prop the shell does NOT ride late growth (one-shot only)", async () => {
     const prefix = nextPrefix();
     const s = setup(items(30, prefix)); // no follow policy wired

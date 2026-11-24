@@ -179,7 +179,8 @@ describe("AppFrame", () => {
         vi.useFakeTimers();
         try {
             const posted: Array<Record<string, unknown>> = [];
-            const openFile = { name: "a.docx", bytes: new Uint8Array([1, 2, 3]) };
+            const openBytes = new Uint8Array([1, 2, 3]);
+            const openFile = { name: "a.docx", getBytes: () => openBytes };
             await act(async () => {
                 render(<AppFrame app={makeApp("figcraft")} openFile={openFile} />);
             });
@@ -251,7 +252,7 @@ describe("AppFrame", () => {
         render(
             <AppFrame
                 app={makeApp("doc")}
-                openFile={{ name: "report.docx", bytes: new Uint8Array([1, 2, 3]) }}
+                openFile={{ name: "report.docx", getBytes: () => new Uint8Array([1, 2, 3]) }}
             />,
         );
         const frame = await mountedFrame();

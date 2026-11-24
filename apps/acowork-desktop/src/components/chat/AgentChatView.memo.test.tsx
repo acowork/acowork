@@ -27,6 +27,17 @@ import type { ChatMessageRow } from "../../stores/chatSessionStore";
 const AGENT = "agent-1";
 const SESSION = "chat-1";
 
+// This contract counts EVERY loaded row, so the pane must be tall enough to
+// window them all in (jsdom has no layout; the shared setup default is 600px).
+Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+  configurable: true,
+  get: () => 100000,
+});
+Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+  configurable: true,
+  get: () => 100000,
+});
+
 /** Counts `RowView` renders (one per render — see header). */
 const rowRenders = vi.hoisted(() => ({ n: 0 }));
 

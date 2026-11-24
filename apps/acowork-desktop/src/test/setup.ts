@@ -15,6 +15,25 @@ class ResizeObserverStub {
   disconnect(): void {}
 }
 
+/**
+ * jsdom ships no layout: every element measures 0, which the virtualized
+ * surfaces correctly read as "hidden pane — render nothing". Tests that mount
+ * a transcript therefore need a measurable viewport, exactly as a real
+ * browser gives them. One shared default here instead of a per-file mock;
+ * configurable so a test can still pin its own geometry (including 0).
+ */
+for (const [prop, px] of [
+  ["offsetHeight", 600],
+  ["offsetWidth", 800],
+  ["clientHeight", 600],
+  ["clientWidth", 800],
+] as const) {
+  Object.defineProperty(HTMLElement.prototype, prop, {
+    configurable: true,
+    get: () => px,
+  });
+}
+
 if (typeof globalThis.ResizeObserver === "undefined") {
   globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
 }

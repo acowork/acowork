@@ -8,7 +8,7 @@
  * This is the rendering counterpart of the `user_with_parts`
  * block type produced by `foldMessages`.
  */
-import { useCallback } from "react";
+import { memo, useCallback } from "react";
 import { UserAvatar } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { ChatMarkdown } from "./ChatMarkdown";
@@ -118,7 +118,9 @@ function metadataToAttachedItem(msg: ChatMessage): AttachedItem | null {
   }
 }
 
-export function UserWithAttachmentsBubble({
+// Memoized like MessageBubble: a stream flush must re-render only the live
+// row, not every user turn in the window (AGENTS.md transcript rule).
+export const UserWithAttachmentsBubble = memo(function UserWithAttachmentsBubble({
   userMessage,
   parts,
   liveUserName,
@@ -339,4 +341,4 @@ export function UserWithAttachmentsBubble({
       )}
     </div>
   );
-}
+});
