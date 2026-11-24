@@ -1,55 +1,108 @@
-//! Session state machine (ADR-039 §5.1).
+//! Session state machine (ADR-039 §5.1, ADR-065).
 //!
 //! Provides a `tokio::sync::watch`-based broadcast so that external
-//! consumers (Tauri events, DevMode, health ledger) can observe
-//! the MQTT connection lifecycle in real time.
+//! consumers (Tauri events, DevMode, health ledger, the Gateway's
+//! bootstrap readiness projection) can observe the MQTT connection
+//! lifecycle in real time.
+//!
+//! # State completeness contract
+//!
+//! Every non-terminal state MUST have a bounded exit: either an
+//! event-driven transition or a time-driven one. A timeout is not a
+//! mechanism bolted on next to the state machine — it is one of its
+//! transitions, and its value comes from this module's own machinery
+//! (keepalive, poll watchdog, reconnect backoff).
+//!
+//! ```mermaid
+//! graph LR
+//!     Idle --> Connecting
+//!     Connecting --> Connected
+//!     Connecting --> Retrying
+//!     Connected --> Retrying
+//!     Retrying --> Connecting
+//!     Retrying --> Failed
+//!     Connecting --> Closed
+//!     Connected --> Closed
+//!     Retrying --> Closed
+//! ```
+//!
+//! | state | event exit | time exit | bound |
+//! |---|---|---|---|
+//! | `Idle` | connect call | — | entered only before the first attempt |
+//! | `Connecting` | ConnAck / error | poll watchdog | `POLL_WATCHDOG_TIMEOUT` |
+//! | `Connected` | error / DISCONNECT | poll watchdog + keepalive | `POLL_WATCHDOG_TIMEOUT` |
+//! | `Retrying` | force-restart | backoff elapses | `ReconnectPolicy.max` / `FATAL_BACKOFF` |
+//! | `Disabled` / `Failed` / `Closed` | terminal — always emitted | — | — |
+//!
+//! Two consequences a consumer can rely on:
+//!
+//! 1. **The state value changes within a bounded time even during a
+//!    total outage.** `Retrying` carries `attempt` and `retry_in`, so
+//!    every retry is a *distinct* value, not the same string republished.
+//!    A consumer that renders state therefore always makes progress and
+//!    needs no compensating timeout of its own.
+//! 2. **A terminal state is always published before the sender goes
+//!    away.** A closed watch channel is an implementation bug, not a
+//!    normal branch (see [`StateWait::SourceGone`]).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::watch;
 
 /// The lifecycle state of an MQTT session.
 ///
-/// ```mermaid
-/// graph LR
-///     Idle --> Connecting
-///     Connecting --> Connected
-///     Connecting --> Disconnected
-///     Connected --> Reconnecting
-///     Reconnecting --> Connected
-///     Reconnecting --> Disconnected
-///     Connected --> Disconnected
-///     Disconnected --> Connecting
-/// ```
+/// Match exhaustively: a wildcard arm silently swallows states added
+/// later, which is exactly how a consumer ends up stuck in an
+/// intermediate state it does not know about.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SessionState {
+    /// The connection is switched off by configuration. Terminal, and
+    /// deliberately distinct from a failure: nothing is wrong and
+    /// nothing will ever connect, so a readiness projection maps this
+    /// to "skipped" rather than "booting".
+    Disabled,
+
     /// No connection attempt has been made yet.
     Idle,
 
-    /// `AsyncClient` created, waiting for the first `ConnAck`.
+    /// `AsyncClient` created, waiting for `ConnAck`. Bounded by the
+    /// poll watchdog: a black-holed TCP connect cannot park here
+    /// forever.
     Connecting,
 
     /// `ConnAck` received, bootstrap completed. Ready for
     /// publish/subscribe.
     Connected,
 
-    /// Was connected, lost the connection, waiting for rumqttc's
-    /// automatic reconnect to deliver a new `ConnAck`.
+    /// An attempt failed (or the connection dropped) and the next
+    /// attempt is scheduled. This is the *only* failure state a
+    /// healthy-but-unreachable broker produces — it is not terminal.
     ///
-    /// `reason` carries the transport / event-loop error that caused the
-    /// drop. It lives on the *state* (not only on the `MqttStatus`
-    /// callback) so that snapshot readers — `get_mqtt_status` and the
-    /// Desktop's full-stack diagnostic panel — can report the real cause
-    /// instead of a generic "reconnecting".
-    Reconnecting {
-        /// Human-readable reason for the connection drop.
+    /// `attempt` and `retry_in` are what make an outage observable:
+    /// without them the value would be identical on every retry and a
+    /// state-driven consumer would see no progress at all.
+    Retrying {
+        /// Human-readable cause of the failed attempt.
+        reason: String,
+        /// 1-based count of consecutive failed attempts.
+        attempt: u32,
+        /// How long until the next attempt starts. `Duration::ZERO`
+        /// means the retry is immediate (soft-restart path).
+        retry_in: Duration,
+    },
+
+    /// Stopped for a reason that retrying cannot fix (bad
+    /// configuration, rejected credentials). Terminal.
+    Failed {
+        /// Human-readable, actionable reason.
         reason: String,
     },
 
-    /// Permanently disconnected (fatal error or explicit shutdown).
-    /// No further reconnect attempts will be made.
-    Disconnected {
-        /// Human-readable reason for disconnection.
+    /// Stopped because the owner asked for it (shutdown, client
+    /// dropped, gateway URL switched). Terminal.
+    Closed {
+        /// Human-readable reason.
         reason: String,
     },
 }
@@ -64,32 +117,73 @@ impl SessionState {
     /// Returns `true` if the session is in a transient (non-terminal)
     /// state that may progress to `Connected`.
     pub fn is_transient(&self) -> bool {
-        matches!(
-            self,
-            SessionState::Idle
-                | SessionState::Connecting
-                | SessionState::Reconnecting { .. }
-        )
+        match self {
+            SessionState::Idle | SessionState::Connecting | SessionState::Retrying { .. } => true,
+            SessionState::Connected
+            | SessionState::Disabled
+            | SessionState::Failed { .. }
+            | SessionState::Closed { .. } => false,
+        }
     }
 
-    /// Returns `true` if the session is permanently stopped.
+    /// Returns `true` if the session has stopped for good.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, SessionState::Disconnected { .. })
+        match self {
+            SessionState::Disabled | SessionState::Failed { .. } | SessionState::Closed { .. } => {
+                true
+            }
+            SessionState::Idle
+            | SessionState::Connecting
+            | SessionState::Connected
+            | SessionState::Retrying { .. } => false,
+        }
+    }
+
+    /// Consecutive failed attempts, when the state is `Retrying`.
+    pub fn attempt(&self) -> Option<u32> {
+        match self {
+            SessionState::Retrying { attempt, .. } => Some(*attempt),
+            SessionState::Disabled
+            | SessionState::Idle
+            | SessionState::Connecting
+            | SessionState::Connected
+            | SessionState::Failed { .. }
+            | SessionState::Closed { .. } => None,
+        }
+    }
+
+    /// The cause carried by this state, if any.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            SessionState::Retrying { reason, .. }
+            | SessionState::Failed { reason }
+            | SessionState::Closed { reason } => Some(reason),
+            SessionState::Disabled
+            | SessionState::Idle
+            | SessionState::Connecting
+            | SessionState::Connected => None,
+        }
     }
 }
 
 impl std::fmt::Display for SessionState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SessionState::Disabled => write!(f, "disabled"),
             SessionState::Idle => write!(f, "idle"),
             SessionState::Connecting => write!(f, "connecting"),
             SessionState::Connected => write!(f, "connected"),
-            SessionState::Reconnecting { reason } => {
-                write!(f, "reconnecting ({reason})")
-            }
-            SessionState::Disconnected { reason } => {
-                write!(f, "disconnected ({reason})")
-            }
+            SessionState::Retrying {
+                reason,
+                attempt,
+                retry_in,
+            } => write!(
+                f,
+                "retrying #{attempt} in {}ms ({reason})",
+                retry_in.as_millis()
+            ),
+            SessionState::Failed { reason } => write!(f, "failed ({reason})"),
+            SessionState::Closed { reason } => write!(f, "closed ({reason})"),
         }
     }
 }
@@ -152,13 +246,31 @@ impl SessionStateTx {
     }
 }
 
+/// Outcome of a bounded wait on the state broadcast.
+///
+/// The three cases are deliberately distinct types rather than a
+/// `bool` / `Option`: "the event has not arrived yet" and "the event
+/// source is gone" are different faults and must not collapse into
+/// one branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateWait {
+    /// The predicate holds; carries the state that satisfied it.
+    Matched(SessionState),
+    /// The budget elapsed first. **Not a failure verdict** — the
+    /// resource keeps working; this only tells the caller that its own
+    /// wait is over. Carries the state observed at expiry.
+    Elapsed(SessionState),
+    /// Every sender was dropped without publishing a terminal state.
+    /// A correct implementation publishes `Closed` / `Failed` first, so
+    /// reaching this means the owner died abnormally.
+    SourceGone,
+}
+
 /// Receiver side of the session-state broadcast.
 ///
 /// Held by external consumers (Tauri command handlers, DevMode,
-/// health ledger). Cloning is NOT supported – wrap in `Arc` if
-/// multiple consumers need the same receiver, or create multiple
-/// receivers from the same `SessionStateTx` (not yet supported –
-/// use `tokio::sync::broadcast` if fan-out is needed).
+/// health ledger). Cloning is NOT supported – create separate
+/// receivers with [`SessionStateTx::subscribe`] instead.
 pub struct SessionStateRx {
     rx: Arc<Mutex<watch::Receiver<SessionState>>>,
 }
@@ -170,29 +282,74 @@ impl SessionStateRx {
     ///
     /// Returns `Err` if all senders have been dropped.
     pub async fn changed(&self) -> Result<SessionState, watch::error::SendError<SessionState>> {
-        let mut rx = {
-            // Clone the receiver out of the mutex so we don't hold
-            // the lock across the `.await` below (clippy:
-            // await_holding_lock).
-            self.rx.lock().unwrap().clone()
-        };
-        rx.changed().await.map_err(|_| {
-            watch::error::SendError(SessionState::Disconnected {
-                reason: "sender dropped".into(),
-            })
-        })?;
-        Ok(rx.borrow().clone())
+        // Clone the receiver out of the mutex so the lock is not held
+        // across the `.await` (clippy: await_holding_lock), then write
+        // the advanced clone back. Without the write-back the stored
+        // receiver keeps its old "seen" version, so every subsequent
+        // call would observe the same already-consumed change and
+        // return immediately — a busy loop for any consumer driving
+        // itself off `changed()`.
+        let mut rx = self.rx.lock().unwrap().clone();
+        let result = rx.changed().await;
+        let state = rx.borrow().clone();
+        *self.rx.lock().unwrap() = rx;
+        result.map_err(|_| watch::error::SendError(SessionState::Closed {
+            reason: "sender dropped".into(),
+        }))?;
+        Ok(state)
     }
 
     /// Read the current state without waiting.
     pub fn current(&self) -> SessionState {
         self.rx.lock().unwrap().borrow().clone()
     }
+
+    /// Wait until `predicate` holds, for at most `budget`.
+    ///
+    /// Level-triggered: the current state is tested first, so a
+    /// consumer that subscribes after the transition still matches.
+    /// Implemented as `select!` over the watch channel and a timer —
+    /// never a sleep-and-poll loop.
+    ///
+    /// Expiry does not touch the connection: it ends *this wait*, and
+    /// the caller decides what its own business logic does next.
+    pub async fn wait_for(
+        &self,
+        predicate: impl Fn(&SessionState) -> bool,
+        budget: Duration,
+    ) -> StateWait {
+        let current = self.current();
+        if predicate(&current) {
+            return StateWait::Matched(current);
+        }
+        let deadline = tokio::time::sleep(budget);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                changed = self.changed() => {
+                    match changed {
+                        Ok(state) if predicate(&state) => return StateWait::Matched(state),
+                        Ok(_) => continue,
+                        Err(_) => return StateWait::SourceGone,
+                    }
+                }
+                () = &mut deadline => return StateWait::Elapsed(self.current()),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn retrying(reason: &str) -> SessionState {
+        SessionState::Retrying {
+            reason: reason.into(),
+            attempt: 1,
+            retry_in: Duration::from_millis(500),
+        }
+    }
 
     #[test]
     fn state_transitions() {
@@ -202,25 +359,31 @@ mod tests {
         assert!(SessionState::Connected.is_connected());
         assert!(!SessionState::Connected.is_transient());
 
-        assert!(
-            SessionState::Reconnecting {
-                reason: "test".into()
-            }
-            .is_transient()
-        );
-        assert!(
-            !SessionState::Reconnecting {
-                reason: "test".into()
-            }
-            .is_connected()
-        );
+        assert!(retrying("test").is_transient());
+        assert!(!retrying("test").is_connected());
 
-        let d = SessionState::Disconnected {
-            reason: "test".into(),
-        };
-        assert!(d.is_terminal());
-        assert!(!d.is_connected());
-        assert!(!d.is_transient());
+        for terminal in [
+            SessionState::Disabled,
+            SessionState::Failed {
+                reason: "test".into(),
+            },
+            SessionState::Closed {
+                reason: "test".into(),
+            },
+        ] {
+            assert!(terminal.is_terminal(), "{terminal} must be terminal");
+            assert!(!terminal.is_connected());
+            assert!(!terminal.is_transient());
+        }
+    }
+
+    /// `Disabled` is a terminal state, not a failure: a readiness
+    /// projection must be able to tell "switched off" from "broken".
+    #[test]
+    fn disabled_is_terminal_and_carries_no_reason() {
+        assert!(SessionState::Disabled.is_terminal());
+        assert_eq!(SessionState::Disabled.reason(), None);
+        assert_eq!(SessionState::Disabled.to_string(), "disabled");
     }
 
     #[test]
@@ -228,50 +391,60 @@ mod tests {
         assert_eq!(SessionState::Idle.to_string(), "idle");
         assert_eq!(SessionState::Connected.to_string(), "connected");
         assert_eq!(
-            SessionState::Disconnected {
+            SessionState::Failed {
                 reason: "boom".into()
             }
             .to_string(),
-            "disconnected (boom)"
+            "failed (boom)"
+        );
+        assert_eq!(
+            SessionState::Closed {
+                reason: "bye".into()
+            }
+            .to_string(),
+            "closed (bye)"
         );
     }
 
     /// Regression: the drop reason must survive into the snapshot the
-    /// Desktop's diagnostic panel reads. Before this, `Reconnecting`
-    /// carried no reason at all, so `get_mqtt_status` had to hardcode
-    /// "reconnecting" and the panel hid the real cause (e.g. a TLS
-    /// handshake failure) behind a useless label.
+    /// Desktop's diagnostic panel reads.
     #[test]
-    fn reconnecting_carries_the_drop_reason() {
-        let state = SessionState::Reconnecting {
-            reason: "eventloop error: Websocket: IO error".into(),
-        };
-        assert_eq!(
-            state.to_string(),
-            "reconnecting (eventloop error: Websocket: IO error)"
-        );
+    fn retrying_carries_the_drop_reason() {
+        let state = retrying("eventloop error: Websocket: IO error");
+        assert!(state.to_string().contains("Websocket: IO error"));
         assert!(state.is_transient());
         assert!(!state.is_connected());
         assert!(!state.is_terminal());
     }
 
-    /// A *different* reason is a real transition: the `set` path compares
-    /// states to decide whether to log, so a changed cause must never be
-    /// silently dropped as "same state".
+    /// The completeness contract in value terms: two consecutive
+    /// retries of the *same* cause must still be different states, so
+    /// a consumer rendering state sees progress during a total outage.
+    #[test]
+    fn consecutive_retries_are_distinct_values() {
+        let first = SessionState::Retrying {
+            reason: "connection refused".into(),
+            attempt: 1,
+            retry_in: Duration::from_millis(500),
+        };
+        let second = SessionState::Retrying {
+            reason: "connection refused".into(),
+            attempt: 2,
+            retry_in: Duration::from_secs(1),
+        };
+        assert_ne!(first, second);
+        assert_eq!(first.attempt(), Some(1));
+        assert_eq!(second.attempt(), Some(2));
+    }
+
     #[test]
     fn changed_reason_is_a_distinct_state() {
         let (tx, _rx) = SessionStateTx::new(SessionState::Connecting);
-        tx.set(SessionState::Reconnecting {
-            reason: "broker sent DISCONNECT".into(),
-        });
-        tx.set(SessionState::Reconnecting {
-            reason: "poll watchdog timeout".into(),
-        });
+        tx.set(retrying("broker sent DISCONNECT"));
+        tx.set(retrying("poll watchdog timeout"));
         assert_eq!(
-            tx.current(),
-            SessionState::Reconnecting {
-                reason: "poll watchdog timeout".into()
-            },
+            tx.current().reason(),
+            Some("poll watchdog timeout"),
             "the latest reason must win"
         );
     }
@@ -282,7 +455,6 @@ mod tests {
         assert_eq!(rx.current(), SessionState::Idle);
 
         tx.set(SessionState::Connecting);
-        // Give the watch channel a tick to propagate.
         tokio::task::yield_now().await;
 
         let state = rx.changed().await.unwrap();
@@ -293,6 +465,25 @@ mod tests {
         assert_eq!(state, SessionState::Connected);
     }
 
+    /// Regression (I5): `changed()` used to clone the receiver, await
+    /// on the clone and throw it away, so the stored receiver never
+    /// advanced its seen version. The second call then returned
+    /// immediately, for ever — a busy loop for any event-driven
+    /// consumer.
+    #[tokio::test]
+    async fn changed_does_not_replay_an_already_consumed_change() {
+        let (tx, rx) = SessionStateTx::new(SessionState::Idle);
+        tx.set(SessionState::Connecting);
+        assert_eq!(rx.changed().await.unwrap(), SessionState::Connecting);
+
+        // Nothing else is published: a second wait must NOT return.
+        let second = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+        assert!(
+            second.is_err(),
+            "changed() replayed an already-consumed change"
+        );
+    }
+
     #[tokio::test]
     async fn watch_channel_current_is_instant() {
         let (tx, rx) = SessionStateTx::new(SessionState::Connected);
@@ -300,62 +491,90 @@ mod tests {
         assert_eq!(rx.current(), SessionState::Connected);
     }
 
-    /// Regression test: `set` must update the value even when no
-    /// receiver is held.  This was the root cause of the MQTT
-    /// "perpetually connecting" bug – `watch::Sender::send` returns
-    /// `Err` (and does NOT update the stored value) when there are
-    /// zero receivers.  The fix uses `send_modify` which unconditionally
-    /// writes.
+    /// Regression: `set` must update the value even when no receiver
+    /// is held (`watch::Sender::send` refuses to write with zero
+    /// receivers; `send_modify` does not).
     #[test]
     fn set_works_without_receiver() {
-        let (tx, _rx) = SessionStateTx::new(SessionState::Connecting);
-        drop(_rx); // drop the only receiver
+        let (tx, rx) = SessionStateTx::new(SessionState::Connecting);
+        drop(rx);
 
         tx.set(SessionState::Connected);
-        assert_eq!(
-            tx.current(),
-            SessionState::Connected,
-            "set() must update the value even with no receivers"
-        );
+        assert_eq!(tx.current(), SessionState::Connected);
 
-        tx.set(SessionState::Reconnecting {
+        tx.set(retrying("test"));
+        assert_eq!(tx.current().attempt(), Some(1));
+
+        tx.set(SessionState::Closed {
             reason: "test".into(),
         });
-        assert_eq!(
-            tx.current(),
-            SessionState::Reconnecting {
-                reason: "test".into()
-            }
-        );
-
-        tx.set(SessionState::Disconnected {
-            reason: "test".into(),
-        });
-        assert!(matches!(
-            tx.current(),
-            SessionState::Disconnected { .. }
-        ));
+        assert!(tx.current().is_terminal());
     }
 
-    /// `current()` on a clone must see writes from the original,
-    /// and vice-versa – they share the same internal channel.
     #[test]
     fn clone_shares_state() {
-        let (tx, _rx) = SessionStateTx::new(SessionState::Idle);
+        let (tx, rx) = SessionStateTx::new(SessionState::Idle);
         let tx_clone = tx.clone();
-        drop(_rx);
+        drop(rx);
 
         tx_clone.set(SessionState::Connected);
         assert_eq!(tx.current(), SessionState::Connected);
 
-        tx.set(SessionState::Reconnecting {
-            reason: "test".into(),
+        tx.set(retrying("test"));
+        assert_eq!(tx_clone.current().attempt(), Some(1));
+    }
+
+    /// A bounded wait is level-triggered: a late subscriber still
+    /// matches the state that is already there.
+    #[tokio::test]
+    async fn wait_for_matches_the_current_state_immediately() {
+        let (tx, rx) = SessionStateTx::new(SessionState::Connected);
+        let outcome = rx
+            .wait_for(SessionState::is_connected, Duration::from_secs(30))
+            .await;
+        assert_eq!(outcome, StateWait::Matched(SessionState::Connected));
+        drop(tx);
+    }
+
+    /// Expiry ends the wait, not the resource: it reports the state
+    /// observed at expiry so the caller can render progress.
+    #[tokio::test]
+    async fn wait_for_reports_the_state_on_expiry() {
+        let (tx, rx) = SessionStateTx::new(SessionState::Connecting);
+        tx.set(retrying("connection refused"));
+        let outcome = rx
+            .wait_for(SessionState::is_connected, Duration::from_millis(20))
+            .await;
+        match outcome {
+            StateWait::Elapsed(state) => assert_eq!(state.attempt(), Some(1)),
+            other => panic!("expected Elapsed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_wakes_on_the_matching_transition() {
+        let (tx, rx) = SessionStateTx::new(SessionState::Connecting);
+        let waiter = tokio::spawn(async move {
+            rx.wait_for(SessionState::is_connected, Duration::from_secs(5))
+                .await
         });
+        tokio::task::yield_now().await;
+        tx.set(SessionState::Connected);
         assert_eq!(
-            tx_clone.current(),
-            SessionState::Reconnecting {
-                reason: "test".into()
-            }
+            waiter.await.unwrap(),
+            StateWait::Matched(SessionState::Connected)
         );
+    }
+
+    /// A dead event source is its own outcome, never an expiry: the
+    /// caller must fail fast instead of waiting out a budget.
+    #[tokio::test]
+    async fn wait_for_reports_a_dead_source() {
+        let (tx, rx) = SessionStateTx::new(SessionState::Connecting);
+        drop(tx);
+        let outcome = rx
+            .wait_for(SessionState::is_connected, Duration::from_secs(30))
+            .await;
+        assert_eq!(outcome, StateWait::SourceGone);
     }
 }

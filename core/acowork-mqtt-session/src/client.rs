@@ -26,7 +26,7 @@ use crate::config::{
 use crate::err_class::{classify, ErrClass, ErrorDescriptor};
 use crate::force_restart::ForceRestart;
 use crate::reconnect::ReconnectPolicy;
-use crate::session_state::{SessionState, SessionStateRx, SessionStateTx};
+use crate::session_state::{SessionState, SessionStateRx, SessionStateTx, StateWait};
 
 /// Entity-specific MQTT client behavior (ADR-065 §5.5).
 ///
@@ -100,10 +100,17 @@ pub enum MqttClientError {
 /// exists in `AppState::mqtt_client`.
 struct EventLoopGuard {
     task: tokio::task::JoinHandle<()>,
+    state: SessionStateTx,
 }
 
 impl Drop for EventLoopGuard {
     fn drop(&mut self) {
+        // Publish the terminal state BEFORE tearing the loop down: a
+        // consumer must learn "this connection is gone for good" from a
+        // state event, never from a watch channel that silently closed.
+        self.state.set(SessionState::Closed {
+            reason: "client dropped".into(),
+        });
         self.task.abort();
     }
 }
@@ -323,9 +330,21 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                             error = %e,
                                             "MQTT bootstrap after (re)connect failed"
                                         );
-                                        set_state(SessionState::Disconnected {
+                                        // A failed bootstrap (subscribe /
+                                        // retained publish) is retryable:
+                                        // soft-restart so the handler runs
+                                        // again on the next ConnAck. It used
+                                        // to publish a terminal state while
+                                        // the loop kept running — the state
+                                        // said "stopped for good" and the
+                                        // resource disagreed.
+                                        consecutive_failures += 1;
+                                        set_state(SessionState::Retrying {
                                             reason: format!("bootstrap failed: {e}"),
+                                            attempt: consecutive_failures,
+                                            retry_in: Duration::ZERO,
                                         });
+                                        break;
                                     }
                                 }
                                 Ok(Event::Incoming(Incoming::Disconnect)) => {
@@ -335,8 +354,10 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                          relying on next poll() to surface the socket error. \
                                          SessionState set to Reconnecting, on_disconnect callback fired."
                                     );
-                                    set_state(SessionState::Reconnecting {
+                                    set_state(SessionState::Retrying {
                                         reason: "broker sent DISCONNECT".to_string(),
+                                        attempt: consecutive_failures,
+                                        retry_in: Duration::ZERO,
                                     });
                                     let poll_client = task_shared_handle.lock().await.clone();
                                     task_handler_poll.on_disconnect(&poll_client).await;
@@ -349,9 +370,7 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                     task_handler_poll
                                         .on_error(&poll_client, class, &e.to_string())
                                         .await;
-                                    set_state(SessionState::Reconnecting {
-                                        reason: format!("eventloop error: {e}"),
-                                    });
+                                    let reason = format!("eventloop error: {e}");
 
                                     if class.is_fatal() {
                                         // E2/E3/E4/E6: the EventLoop's
@@ -368,6 +387,11 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                         );
                                         if fatal_streak >= FATAL_STREAK_LIMIT {
                                             soft_restart_count += 1;
+                                            set_state(SessionState::Retrying {
+                                                reason,
+                                                attempt: fatal_streak,
+                                                retry_in: Duration::ZERO,
+                                            });
                                             tracing::warn!(
                                                 soft_restart_count,
                                                 "consecutive fatal errors - soft-restarting MQTT client"
@@ -377,6 +401,11 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                         // 60 s backoff, interruptible by a
                                         // force-restart request (wake
                                         // recovery must never wait it out).
+                                        set_state(SessionState::Retrying {
+                                            reason,
+                                            attempt: fatal_streak,
+                                            retry_in: FATAL_BACKOFF,
+                                        });
                                         if task_force_restart
                                             .interruptible_backoff(FATAL_BACKOFF, "fatal")
                                             .await
@@ -387,18 +416,42 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                         // E1/E5: retryable. Apply
                                         // exponential backoff.
                                         consecutive_failures += 1;
-                                        if let Some(backoff) = reconnect_policy
+                                        let retry_in = reconnect_policy
                                             .backoff(class, consecutive_failures - 1)
-                                            && task_force_restart
-                                                .interruptible_backoff(
-                                                    backoff.duration,
-                                                    "retryable",
-                                                )
-                                                .await
+                                            .map(|b| b.duration)
+                                            .unwrap_or_else(|| {
+                                                // `backoff` only returns None for
+                                                // fatal classes, which cannot reach
+                                                // this branch. Log the violated
+                                                // invariant instead of hiding it.
+                                                tracing::error!(
+                                                    err_class = class.label(),
+                                                    "retryable class produced no backoff; using fatal backoff"
+                                                );
+                                                FATAL_BACKOFF
+                                            });
+                                        // Publish the attempt BEFORE sleeping:
+                                        // `attempt` + `retry_in` are what make a
+                                        // sustained outage observable. Without
+                                        // them every retry republished the same
+                                        // value and a state-driven consumer saw
+                                        // no progress at all.
+                                        set_state(SessionState::Retrying {
+                                            reason,
+                                            attempt: consecutive_failures,
+                                            retry_in,
+                                        });
+                                        if task_force_restart
+                                            .interruptible_backoff(retry_in, "retryable")
+                                            .await
                                         {
                                             break;
                                         }
                                     }
+                                    // The backoff is over and the loop is about
+                                    // to poll again: the state must say
+                                    // "attempting", not "waiting to retry".
+                                    set_state(SessionState::Connecting);
                                 }
                             }
                         }
@@ -414,11 +467,13 @@ impl<B: MqttClientHandler> MqttClient<B> {
                                 timeout_s = POLL_WATCHDOG_TIMEOUT.as_secs(),
                                 "MQTT poll() watchdog timeout - forcing soft-restart (possible half-dead socket)"
                             );
-                            set_state(SessionState::Reconnecting {
+                            set_state(SessionState::Retrying {
                                 reason: format!(
                                     "poll watchdog timeout ({}s of silence)",
                                     POLL_WATCHDOG_TIMEOUT.as_secs()
                                 ),
+                                attempt: consecutive_failures,
+                                retry_in: Duration::ZERO,
                             });
                             break;
                         }
@@ -468,9 +523,12 @@ impl<B: MqttClientHandler> MqttClient<B> {
 
         Ok(Self {
             shared_handle,
-            state: state_tx,
+            state: state_tx.clone(),
             force_restart,
-            _eventloop_guard: Arc::new(EventLoopGuard { task: poll_task }),
+            _eventloop_guard: Arc::new(EventLoopGuard {
+                task: poll_task,
+                state: state_tx,
+            }),
             _handler: task_handler,
         })
     }
@@ -528,24 +586,36 @@ impl<B: MqttClientHandler> MqttClient<B> {
         self.state.current()
     }
 
-    /// Wait for the client to reach `Connected` state.
+    /// Wait for the client to reach `Connected`, for at most `budget`.
     ///
-    /// Returns `true` if connected within the timeout, `false`
-    /// otherwise. Uses a simple polling loop instead of `subscribe()` +
-    /// `changed()` to avoid the race where `Connected` is set between
-    /// the subscribe and the `changed()` wait.
-    pub async fn wait_for_connected(&self, timeout: Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
-        if self.state.current().is_connected() {
-            return true;
-        }
-        while tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            if self.state.current().is_connected() {
-                return true;
-            }
-        }
-        false
+    /// Returns `true` if connected within the budget. **Expiry is not a
+    /// verdict on the connection**: the poll task keeps retrying and
+    /// the handle stays alive, so a caller that gives up waiting must
+    /// not drop the client on the strength of a `false`.
+    ///
+    /// Prefer [`MqttClient::wait_for_state`] when the caller needs to
+    /// tell "still trying" from "the event source is gone", or
+    /// [`MqttClient::state_rx`] to consume every transition instead of
+    /// waiting for one.
+    pub async fn wait_for_connected(&self, budget: Duration) -> bool {
+        matches!(
+            self.wait_for_state(SessionState::is_connected, budget).await,
+            StateWait::Matched(_)
+        )
+    }
+
+    /// Bounded, level-triggered wait on an arbitrary state predicate.
+    ///
+    /// Watch-driven (`select!` over the state channel and a timer), not
+    /// a sleep-and-poll loop: the transition is observed the moment it
+    /// is published, and the current state is tested first so a late
+    /// caller cannot miss a transition that already happened.
+    pub async fn wait_for_state(
+        &self,
+        predicate: impl Fn(&SessionState) -> bool,
+        budget: Duration,
+    ) -> StateWait {
+        self.state.subscribe().wait_for(predicate, budget).await
     }
 }
 
@@ -644,8 +714,16 @@ mod tests {
         });
         let abort_handle = task.abort_handle();
 
-        let guard = EventLoopGuard { task };
+        let (state_tx, state_rx) = SessionStateTx::new(SessionState::Connecting);
+        let guard = EventLoopGuard {
+            task,
+            state: state_tx,
+        };
         drop(guard);
+        assert!(
+            state_rx.current().is_terminal(),
+            "dropping the guard must publish a terminal state before aborting the task"
+        );
 
         let mut finished = false;
         for _ in 0..100 {
@@ -659,5 +737,112 @@ mod tests {
             finished,
             "EventLoopGuard::drop did not abort the wrapped task within              2s; the Drop impl is missing or broken (this is the desktop              disconnect/reconnect-loop bug)."
         );
+    }
+}
+/// State-completeness regression gate (review v4 §6).
+///
+/// These tests inject a dependency that never succeeds — a broker port
+/// with nothing listening — and assert the contract every async
+/// subsystem owes its consumers: the state VALUE keeps changing within
+/// a bounded time, and no wait ever destroys the resource.
+#[cfg(test)]
+mod completeness_tests {
+    use super::*;
+    use crate::config::MqttClientConfig;
+
+    /// A port that is guaranteed to refuse connections: bind, read the
+    /// assigned port, drop the listener.
+    fn dead_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    struct Noop;
+    #[async_trait]
+    impl MqttClientHandler for Noop {}
+
+    async fn client_to_dead_broker() -> MqttClient<Noop> {
+        let config = MqttClientConfig::new("completeness-test", "127.0.0.1", dead_port());
+        MqttClient::connect(config, Noop, None)
+            .await
+            .expect("connect must not fail just because the broker is absent")
+    }
+
+    /// The core invariant: during a total outage the state value must
+    /// still advance, carrying a growing attempt count. Before this
+    /// change every retry republished the identical
+    /// `Reconnecting { reason }`, so a state-driven consumer saw one
+    /// event and then nothing for ever.
+    #[tokio::test]
+    async fn an_unreachable_broker_keeps_publishing_distinct_retry_states() {
+        let client = client_to_dead_broker().await;
+        let rx = client.state_rx();
+
+        let outcome = rx
+            .wait_for(
+                |s| s.attempt().unwrap_or(0) >= 2,
+                Duration::from_secs(10),
+            )
+            .await;
+
+        match outcome {
+            StateWait::Matched(state) => {
+                assert!(state.attempt().unwrap() >= 2);
+                assert!(state.reason().is_some(), "a retry must name its cause");
+                assert!(state.is_transient(), "an outage is not a terminal state");
+            }
+            other => panic!("state stopped advancing during an outage: {other:?}"),
+        }
+    }
+
+    /// A caller giving up on its own wait must not cost the connection
+    /// anything: the poll task keeps retrying and the handle stays
+    /// usable. This is the exact inverse of the Gateway bug, where a
+    /// 2 s wait expiring dropped the client and aborted its own
+    /// reconnect machinery.
+    #[tokio::test]
+    async fn an_expired_wait_does_not_stop_the_connection() {
+        let client = client_to_dead_broker().await;
+
+        assert!(
+            !client.wait_for_connected(Duration::from_millis(50)).await,
+            "nothing is listening, so the wait must expire"
+        );
+        assert!(
+            client.current_state().is_transient(),
+            "expiry must not turn the session terminal"
+        );
+
+        // Still retrying afterwards, with the attempt count advancing.
+        let outcome = client
+            .wait_for_state(
+                |s| s.attempt().unwrap_or(0) >= 2,
+                Duration::from_secs(10),
+            )
+            .await;
+        assert!(
+            matches!(outcome, StateWait::Matched(_)),
+            "the connection stopped retrying after a wait expired: {outcome:?}"
+        );
+    }
+
+    /// `wait_for_connected` must observe the transition itself rather
+    /// than sampling on a timer: with a generous budget it returns as
+    /// soon as the state is published.
+    #[tokio::test]
+    async fn wait_for_connected_is_level_triggered() {
+        let (tx, _rx) = SessionStateTx::new(SessionState::Connected);
+        let rx = tx.subscribe();
+        // Already connected before the wait starts — a polling
+        // implementation that sleeps first would still pass, so assert
+        // it completes well inside one former 100 ms poll tick.
+        let started = tokio::time::Instant::now();
+        let outcome = rx
+            .wait_for(SessionState::is_connected, Duration::from_secs(30))
+            .await;
+        assert_eq!(outcome, StateWait::Matched(SessionState::Connected));
+        assert!(started.elapsed() < Duration::from_millis(50));
     }
 }

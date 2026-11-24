@@ -35,4 +35,4 @@ pub use err_class::{classify, ErrorDescriptor, ErrorKind, ErrClass, RefusedReaso
 pub use force_restart::ForceRestart;
 pub use reconnect::{Backoff, ReconnectPolicy};
 pub use session::MqttSession;
-pub use session_state::{SessionState, SessionStateRx, SessionStateTx};
+pub use session_state::{SessionState, SessionStateRx, SessionStateTx, StateWait};

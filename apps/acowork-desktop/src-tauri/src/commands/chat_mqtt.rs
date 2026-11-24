@@ -2043,6 +2043,10 @@ mod tests {
 /// Convert a `SessionState` into the JSON payload returned by `get_mqtt_status`
 /// and emitted as `mqtt-status` events.  Centralised so the snapshot and
 /// the event use byte-for-byte identical shapes.
+// A wildcard arm here would silently swallow any state added to the
+// session state machine later, leaving the UI stuck on a stale label.
+// The compiler must fail instead.
+#[deny(clippy::wildcard_enum_match_arm)]
 fn mqtt_status_to_payload(state: &acowork_mqtt_session::SessionState) -> serde_json::Value {
     use acowork_mqtt_session::SessionState;
     match state {
@@ -2061,19 +2065,45 @@ fn mqtt_status_to_payload(state: &acowork_mqtt_session::SessionState) -> serde_j
             "connecting": true,
             "reason": null,
         }),
-        SessionState::Reconnecting { reason } => serde_json::json!({
+        // An attempt failed and the next one is scheduled. `attempt` and
+        // `retry_in_ms` are what let the UI show progress during a total
+        // outage instead of a frozen "reconnecting" label.
+        SessionState::Retrying {
+            reason,
+            attempt,
+            retry_in,
+        } => serde_json::json!({
             "known": true,
             "connected": false,
             "reconnecting": true,
             "reason": reason,
+            "attempt": attempt,
+            "retry_in_ms": retry_in.as_millis(),
         }),
         SessionState::Connected => serde_json::json!({
             "known": true,
             "connected": true,
         }),
-        SessionState::Disconnected { reason } => serde_json::json!({
+        // Switched off by configuration — not a failure, and nothing will
+        // ever connect.
+        SessionState::Disabled => serde_json::json!({
             "known": true,
             "connected": false,
+            "disabled": true,
+            "reason": null,
+        }),
+        // Terminal: retrying cannot fix it.
+        SessionState::Failed { reason } => serde_json::json!({
+            "known": true,
+            "connected": false,
+            "failed": true,
+            "reason": reason,
+        }),
+        // Terminal: the owner closed it (shutdown, gateway URL switch).
+        SessionState::Closed { reason } => serde_json::json!({
+            "known": true,
+            "connected": false,
+            "closed": true,
             "reason": reason,
         }),
     }
