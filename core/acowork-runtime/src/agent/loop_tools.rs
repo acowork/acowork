@@ -42,6 +42,11 @@ pub(crate) struct ToolOutput {
     pub parts: Vec<ContentPart>,
     /// Parsed source path for a multimodal tool result label.
     pub image_path: Option<String>,
+    /// Files this call produced (workspace writes + persisted image artifacts),
+    /// drained from the call's own [`acowork_core::tools::traits::ProducedFileSink`].
+    /// Stamped on this call's `tool_result` metadata so the frontend can derive
+    /// the deliverables banner from the transcript's tool calls.
+    pub produced: Vec<acowork_core::tools::traits::ProducedFile>,
 }
 
 impl From<(String, bool)> for ToolOutput {
@@ -51,6 +56,7 @@ impl From<(String, bool)> for ToolOutput {
             is_transient,
             parts: Vec::new(),
             image_path: None,
+            produced: Vec::new(),
         }
     }
 }
@@ -143,7 +149,12 @@ impl AgentLoop {
                     self.core.get_model_capabilities(&model).as_ref(),
                 );
                 let image_read_budget = self.image_read_budget.clone();
-                let produced_files = self.produced_files.clone();
+                // Per-call sink: each tool call declares into its own list so the
+                // produced files can be stamped on THAT call's tool_result. A
+                // shared per-turn sink could not attribute a write to its call.
+                let produced_files: acowork_core::tools::traits::ProducedFileSink =
+                    Default::default();
+                let produced_sink = produced_files.clone();
                 let tool_ctx = ToolContext {
                     supports_image_input,
                     image_read_budget: Some(image_read_budget),
@@ -273,7 +284,7 @@ impl AgentLoop {
                     // child process handle and triggers its `Drop` impl
                     // (`child.kill()` + `child.wait()`) — see
                     // `tools/builtin/shell.rs` for the Drop semantics.
-                    let result = tokio::select! {
+                    let mut result = tokio::select! {
                         // Branch A: tool completes (or per-tool timeout fires)
                         res = tokio::time::timeout(
                             tool_timeout,
@@ -330,6 +341,11 @@ impl AgentLoop {
                         ht.abort();
                     }
 
+                    // Drain this call's produced-file declarations into its output
+                    // so the loop can stamp them on this call's tool_result row.
+                    if let Ok(mut sink) = produced_sink.lock() {
+                        result.produced.append(&mut *sink);
+                    }
                     let _ = tx.send((idx, result)).await;
                     // `cancel_rx` is dropped here when this async block
                     // ends; after that point, any further `send(true)`
@@ -922,6 +938,9 @@ pub(crate) async fn execute_single_tool_output(
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned),
                     parts: result.content_parts.unwrap_or_default(),
+                    // Filled by the spawning task, which drains this call's
+                    // per-call produced-file sink after execution returns.
+                    produced: Vec::new(),
                 }
             }
             Err(e) => ToolOutput::from((format!("Tool execution error: {e}"), false)),
@@ -1335,6 +1354,7 @@ impl AgentLoop {
                         tool_call_id: tc.id.clone(),
                         is_error: false,
                         seq: self.session_core.next_seq(),
+                        metadata: None,
                     },
                 );
             }
@@ -1534,15 +1554,49 @@ impl AgentLoop {
     pub(crate) fn persist_and_emit_tool_results(
         &mut self,
         deduped_calls: &[ToolCall],
-        tool_results: &[String],
+        outputs: &[ToolOutput],
     ) {
         // Persist tool results to JSONL
         if let Some(ref conversation) = self.session.conversation {
-            for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
-                let metadata = serde_json::json!({
+            // Workspace roots for mapping produced files onto addressable
+            // coordinates. No resolver bound → no addressable deliverable, so the
+            // produced stamp is omitted (the tool result itself still persists).
+            let roots = self.core.workspace_resolver().map(|resolver| {
+                let guard = match resolver.read() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                crate::agent::turn_deliverables::roots_from_resolver(&guard)
+            });
+            for (tc, output) in deduped_calls.iter().zip(outputs.iter()) {
+                let result_content = &output.content;
+                let mut metadata = serde_json::json!({
                     "tool_name": tc.function.name,
                     "tool_call_id": tc.id,
                 });
+                // Stamp the files this call produced as structured facts on its own
+                // result row. Metadata only: the session restorer reads `content` +
+                // `tool_call_id` / `tool_name`, so `produced` never reaches the model.
+                // The frontend derives the deliverables banner from these facts.
+                if let Some(roots) = roots.as_ref()
+                    && !output.produced.is_empty()
+                {
+                    let coords =
+                        crate::agent::turn_deliverables::to_coordinates(&output.produced, roots);
+                    if !coords.is_empty() {
+                        metadata["produced"] = serde_json::json!(coords);
+                    }
+                }
+                // Stamp the doc-service deliverable fact (if this call wrote or
+                // moved a doc). Like `produced`, it rides metadata so it survives
+                // the live 5-line content truncation; the frontend derives the doc
+                // card from it. Doc recognition is isolated in `doc_deliverables`
+                // (the file path above stays tool-agnostic, ADR-119).
+                if let Some(doc) =
+                    crate::agent::doc_deliverables::doc_fact(&tc.function.name, result_content)
+                {
+                    metadata["doc"] = doc;
+                }
                 // ADR-035 M2: pre-assign a stable message_id so the JSONL
                 // entry (full content) and the record_complete event
                 // (truncated to 5 lines at publish time, D9.2) share the
@@ -1551,7 +1605,7 @@ impl AgentLoop {
                 conversation.append_message_with_id(
                     "tool_result",
                     result_content,
-                    Some(metadata),
+                    Some(metadata.clone()),
                     Some(message_id.clone()),
                 );
                 // ADR-035 C1/D9.2: emit record_complete with the FULL
@@ -1574,6 +1628,9 @@ impl AgentLoop {
                         tool_call_id: tc.id.clone(),
                         is_error,
                         seq: self.session_core.next_seq(),
+                        // Same facts the JSONL row carries, so the live banner
+                        // derivation matches the restored one (no extra fetch).
+                        metadata: Some(metadata),
                     },
                 );
             }

@@ -577,6 +577,7 @@ impl SessionCore {
                 tool_call_id: String::new(),
                 is_error: false,
                 seq: self.next_seq(),
+                metadata: None,
             });
         } else if content.trim().is_empty() {
             tracing::warn!(

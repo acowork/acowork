@@ -295,6 +295,10 @@ pub enum ChunkEvent {
         /// `persist_and_emit_tool_results` it's a fresh seq that fits
         /// between the assistant that owned them and the next round.
         seq: u64,
+        /// The row's persisted metadata (e.g. a tool_result's `produced`
+        /// deliverable facts), carried live so the frontend's projection equals
+        /// the JSONL-restored one. `None` for records without metadata.
+        metadata: Option<serde_json::Value>,
     },
     /// ADR-043: config fields changed (title, model, provider, workspace,
     /// reasoning_effort, temperature). Published Retained to sessions/{sid}/config.
@@ -463,12 +467,6 @@ pub struct AgentLoop {
     /// Per-turn read_image budget shared by parallel tool calls.
     pub(crate) image_read_budget:
         Arc<std::sync::Mutex<acowork_core::tools::traits::ImageReadBudget>>,
-    /// Files this turn's tools declared, drained into one deliverables row when
-    /// the turn ends (`turn_deliverables`). Shared the same way as the budget
-    /// above: parallel tool calls of one turn append to the same list, while a
-    /// concurrent session appends to its own.
-    pub(crate) produced_files: acowork_core::tools::traits::ProducedFileSink,
-
     /// ADR-032 C4b: Compression action receiver.
     ///
     /// Set by the creator (SessionTask / Gateway wiring) to enable
@@ -644,7 +642,6 @@ impl AgentLoop {
             current_turn_user_message: None,
             output_budget_resends: 0,
             image_read_budget: Arc::new(std::sync::Mutex::new(Default::default())),
-            produced_files: Default::default(),
             compress_action_rx: None,
             pending_intent: None,
             chat_writeback: None,
@@ -725,7 +722,6 @@ impl AgentLoop {
             current_turn_user_message: None,
             output_budget_resends: 0,
             image_read_budget: Arc::new(std::sync::Mutex::new(Default::default())),
-            produced_files: Default::default(),
             compress_action_rx: None,
             pending_intent: None,
             chat_writeback: None,
@@ -1101,10 +1097,6 @@ impl AgentLoop {
         // closure, because closing a round clears the writer's active round —
         // asking afterwards would return the next turn's id, or none at all.
         let round_id = self.current_round_id();
-        // Deliverables first, while the round is still open: the row belongs to
-        // this turn's round (`append_message_with_id` stamps the active round),
-        // and it must land after the assistant row it sits under.
-        crate::agent::turn_deliverables::write_turn_row(self);
         if let Some(conv) = &self.session.conversation {
             match &outcome {
                 Err(_) => conv.end_round("failed", None),
@@ -1327,9 +1319,6 @@ impl AgentLoop {
             // instances.
             self.current_turn_user_message = Some(user_message.to_string());
             *self.image_read_budget.lock().unwrap() = Default::default();
-            // Deliverables are per-turn too: last turn's list must not leak
-            // into this turn's row.
-            self.produced_files.lock().unwrap().clear();
             self.output_budget_resends = 0;
             // ADR-060 §5.5 erratum: the message is appended to history only.
             // It is NOT re-staged as a "Block D" tail duplicate — `build()`
@@ -2492,7 +2481,7 @@ impl AgentLoop {
             .debug_observer
             .on_phase_enter(crate::debug::protocol::DebugPhase::ToolExecution)
             .await;
-        let (tagged_results, interrupt) = self
+        let (mut tagged_results, interrupt) = self
             .dispatch_and_merge_tools(calls_to_execute, &deduped_calls, &blocked_info)
             .await;
 
@@ -2501,14 +2490,16 @@ impl AgentLoop {
         let transient_flags: Vec<bool> = tagged_results.iter().map(|out| out.is_transient).collect();
         let mut image_parts = Vec::new();
         let mut image_labels = Vec::new();
-        for (tc, output) in deduped_calls.iter().zip(tagged_results.iter()) {
+        for (tc, output) in deduped_calls.iter().zip(tagged_results.iter_mut()) {
             tool_contents.push(output.content.clone());
             if !output.parts.is_empty() {
-                // Persist the bytes and declare them to this turn. Deliberately
-                // before the label/parts merge below and independent of it:
-                // whether the model gets to *see* the image (capability, budget)
-                // and whether the human gets to *open* it are two questions.
-                self.absorb_image_parts(tc, &output.parts);
+                // Persist the bytes and attach them to THIS call's produced list.
+                // Deliberately before the label/parts merge below and independent
+                // of it: whether the model gets to *see* the image (capability,
+                // budget) and whether the human gets to *open* it are two questions.
+                let artifacts =
+                    self.absorb_image_parts(tc, &output.parts, output.image_path.as_deref());
+                output.produced.extend(artifacts);
                 let label = output.image_path.as_deref().map(|path| {
                     let escaped = path.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
                     format!("<tool_image tool=\"{}\" path=\"{}\"/>", tc.function.name, escaped)
@@ -2518,7 +2509,11 @@ impl AgentLoop {
             }
         }
         // ── ⑧ Persist + emit + append + pre-trim tool results ──
-        self.persist_and_emit_tool_results(&deduped_calls, &tool_contents);
+        // Each call's produced files ride on its own tool_result metadata; the
+        // frontend derives the deliverables banner from them (no turn-end row).
+        // The outputs are the single source of truth for both content and
+        // produced facts — no parallel slice to keep index-aligned.
+        self.persist_and_emit_tool_results(&deduped_calls, &tagged_results);
         // Single 90% projected-input line, enforced again before appending
         // tool results (the tool-loop's next LLM call is guarded pre-request,
         // but compacting here keeps the results from ever landing in history
@@ -3821,6 +3816,7 @@ mod tests {
                     chat_attachment_ids: Vec::new(),
                     chat_row_id: String::new(),
                     aware_users: Vec::new(),
+                    interrupt: None,
                 },
             )))
             .unwrap();

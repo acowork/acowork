@@ -958,6 +958,12 @@ message RecordCompletePayload {
   string tool_call_id = 6; // empty unless role is tool_call / tool_result
   bool is_error = 7;       // only meaningful when role is tool_result
   optional uint64 seq = 8;
+  // JSON-encoded row metadata, mirroring the JSONL entry's metadata for this
+  // record (e.g. a tool_result's `produced` deliverable facts). Carried so the
+  // live projection equals the restored one: the frontend derives the
+  // deliverables banner from these facts without an extra HTTP fetch. Empty
+  // when the record has no metadata. Additive wire field — old peers ignore it.
+  optional string metadata_json = 9;
 }
 
 // ── Workspace FS events (ADR-058, Runtime → Desktop, QoS 1, non-retained) ──

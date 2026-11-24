@@ -15,16 +15,41 @@
 //!   whether the path existed before (a `created` flag), and guessing from
 //!   mtimes or scanning the workspace is both expensive and wrong (see the
 //!   module docs on [`ProducedFile`]).
-//! - This module *decides* what counts: it maps node-local absolute paths onto
-//!   `(workspace_id, rel_path)`, drops process noise, dedupes, and caps. Pure
-//!   functions, so the rules are unit-tested without a session.
-//! - The loop writes the row at turn end; the desktop renders it.
+//! - This module supplies the *facts* the frontend cannot derive itself: it maps
+//!   node-local absolute paths onto `(workspace_id, rel_path)` ([`to_coordinates`]),
+//!   the one step that must run on the node. The loop stamps the result on the
+//!   producing tool's own `tool_result` row as `metadata.produced`.
+//! - The frontend *decides* what counts and how to show it (created-only, dedupe,
+//!   caps, image-vs-file): display policy lives there, shared by every client.
+//!   [`collect`] retains the legacy turn-row policy for older sessions that still
+//!   carry a `deliverables` system row.
+//!
+//! ## Why facts ride on `tool_result`, not a turn-end row
+//!
+//! A deliverable is a file on disk with an address; the address is a fact the
+//! producing tool already holds. Stamping it on that tool's result keeps one
+//! source of truth (the transcript's tool calls) and lets the frontend derive the
+//! whole banner — files, images and doc-service documents alike — with a single
+//! pure function. The metadata never enters the model context: the session
+//! restorer reads only `content` + `tool_call_id` / `tool_name` from a tool_result
+//! row, so `produced` is invisible to the LLM.
 //!
 //! ## What never leaves the node
 //!
 //! Only `(workspace_id, rel_path)` — never an absolute path. A node-local path
 //! breaks the moment the desktop is on another machine, leaks the node's
 //! layout, and cannot be re-addressed after the session is replayed.
+//!
+//! ## The name a human reads
+//!
+//! An artifact's file name is `<stem>-<content tag>.<ext>`: the stem is the
+//! file the tool was pointed at (or, when it named nothing, the tool itself),
+//! and the tag is a digest of the bytes. Both are computed here from facts the
+//! runtime already holds, so the name is deterministic without being
+//! meaningless — the previous scheme (tool-call id plus index) produced
+//! `call_01a2095c7dba7734ae7a-0.png`, which is unreadable in a chip, in an
+//! editor tab, and in the OS file manager, and which turned two reads of the
+//! same picture into two deliverables.
 
 use std::path::{Path, PathBuf};
 
@@ -52,6 +77,14 @@ pub const MAX_OTHER_FILES: usize = 8;
 pub const MAX_DELIVERABLE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// One deliverable, in the shape the transcript stores and the desktop reads.
+///
+/// Stamped on the producing tool's own `tool_result` row as `metadata.produced`
+/// (an array). The backend supplies the *facts* — addressable coordinates, MIME,
+/// size, and whether the write created the file — and the frontend owns the
+/// display policy (which of these to show, dedupe, caps). It never enters the
+/// model context: the session restorer reads only `content` + `tool_call_id` /
+/// `tool_name` from a tool_result row, so extra metadata keys are invisible to
+/// the LLM.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Deliverable {
     /// Workspace the file belongs to (`__agent_home__` for the agent home).
@@ -62,6 +95,10 @@ pub struct Deliverable {
     pub mime: String,
     /// Size in bytes at turn end.
     pub bytes: u64,
+    /// `true` when the write created the file (it did not exist before). The
+    /// frontend decides whether a rewrite counts as a deliverable; the backend
+    /// only reports the fact the writer knows.
+    pub created: bool,
 }
 
 /// Build / environment noise. Matched against **any** segment: a workspace can
@@ -165,78 +202,107 @@ fn to_wire_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// Decide what of `produced` becomes a deliverable.
+/// Map one produced file onto addressable `(workspace_id, rel_path)` coordinates.
+///
+/// This is the *fact* half of the pipeline, and the only half that must run on the
+/// node: resolving a node-local absolute path against the workspace roots is the
+/// one thing the frontend cannot do. It keeps the writer's `created` flag and
+/// applies only addressability rules — a known root, an identifiable MIME, a sane
+/// size, and not process noise. It does **not** decide what counts as a
+/// deliverable (created-only, dedupe, caps): that is display policy and lives in
+/// the frontend. `roots` must already be sorted innermost-first.
+fn map_one(file: &ProducedFile, roots: &[&(String, PathBuf)]) -> Option<Deliverable> {
+    if file.bytes > MAX_DELIVERABLE_BYTES {
+        return None;
+    }
+    let abs = Path::new(&file.abs_path);
+    let mime = match file.mime.as_deref() {
+        Some(declared) if !declared.is_empty() => declared.to_string(),
+        _ => mime_for_path(abs)?.to_string(),
+    };
+    // Longest-first root list: the first match is the innermost workspace.
+    let (workspace_id, rel_path) = roots.iter().find_map(|(id, root)| {
+        abs.strip_prefix(root)
+            .ok()
+            .map(|rel| (id.clone(), to_wire_path(rel)))
+    })?;
+    if rel_path.is_empty() || is_excluded(&workspace_id, &rel_path) {
+        return None;
+    }
+    Some(Deliverable {
+        workspace_id,
+        rel_path,
+        mime,
+        bytes: file.bytes,
+        created: file.created,
+    })
+}
+
+/// Sort roots innermost-first so the first prefix match is the deepest workspace.
+///
+/// Owned here rather than trusted of the caller: a caller that forgets would
+/// silently attribute every project file to the agent home, and the link would
+/// open the wrong workspace. Sorting a handful of roots per call is free.
+fn sorted_roots(roots: &[(String, PathBuf)]) -> Vec<&(String, PathBuf)> {
+    let mut roots: Vec<&(String, PathBuf)> = roots.iter().collect();
+    roots.sort_by_key(|(_, root)| std::cmp::Reverse(root.as_os_str().len()));
+    roots
+}
+
+/// Stamp-ready coordinates for one tool call's produced files.
+///
+/// The backend fact-provider path: every addressable file the call wrote, with
+/// its `created` flag intact, in declaration order. The frontend derives the
+/// banner from these (filtering, dedupe, caps), so this applies no display policy.
+pub fn to_coordinates(produced: &[ProducedFile], roots: &[(String, PathBuf)]) -> Vec<Deliverable> {
+    let roots = sorted_roots(roots);
+    produced.iter().filter_map(|f| map_one(f, &roots)).collect()
+}
+
+/// Decide what of `produced` becomes a deliverable (the legacy turn-row policy).
 ///
 /// Rules, in order: only `created` files, never inside an excluded segment, must
 /// fall under a known workspace root, must have an identifiable MIME, must be
 /// under the size cap. Then dedupe by `(workspace_id, rel_path)` keeping the
 /// first occurrence, and cap images and other files independently.
 ///
-/// Returning partial results (rather than an error) is deliberate: a turn that
-/// wrote one unidentifiable file still has deliverables.
+/// Retained for the legacy `deliverables` turn row that older sessions still
+/// carry; the live path now stamps [`to_coordinates`] per tool_result and lets
+/// the frontend own this policy. Returning partial results (rather than an
+/// error) is deliberate: a turn that wrote one unidentifiable file still has
+/// deliverables.
 pub fn collect(produced: &[ProducedFile], roots: &[(String, PathBuf)]) -> Vec<Deliverable> {
-    // Innermost root wins, and this function owns that rule rather than
-    // trusting its caller to have sorted: a caller that forgets would silently
-    // attribute every project file to the agent home, and the link would open
-    // the wrong workspace. Sorting a handful of roots per turn is free.
-    let mut roots: Vec<&(String, PathBuf)> = roots.iter().collect();
-    roots.sort_by_key(|(_, root)| std::cmp::Reverse(root.as_os_str().len()));
-
+    let roots = sorted_roots(roots);
     let mut out: Vec<Deliverable> = Vec::new();
     let mut images = 0usize;
     let mut others = 0usize;
 
     for file in produced {
-        if !file.created || file.bytes > MAX_DELIVERABLE_BYTES {
+        if !file.created {
             continue;
         }
-        let abs = Path::new(&file.abs_path);
-        let mime = match file.mime.as_deref() {
-            Some(declared) if !declared.is_empty() => declared.to_string(),
-            _ => match mime_for_path(abs) {
-                Some(known) => known.to_string(),
-                None => continue,
-            },
-        };
-
-        // Longest-first root list: the first match is the innermost workspace.
-        let Some((workspace_id, rel_path)) = roots.iter().find_map(|(id, root)| {
-            abs.strip_prefix(root)
-                .ok()
-                .map(|rel| (id.clone(), to_wire_path(rel)))
-        }) else {
+        let Some(d) = map_one(file, &roots) else {
             continue;
         };
-        if rel_path.is_empty() || is_excluded(&workspace_id, &rel_path) {
-            continue;
-        }
-
         if out
             .iter()
-            .any(|d| d.workspace_id == workspace_id && d.rel_path == rel_path)
+            .any(|x| x.workspace_id == d.workspace_id && x.rel_path == d.rel_path)
         {
             continue;
         }
-
-        let is_image = mime.starts_with("image/");
+        let is_image = d.mime.starts_with("image/");
         if is_image && images >= MAX_IMAGES {
             continue;
         }
         if !is_image && others >= MAX_OTHER_FILES {
             continue;
         }
-
         if is_image {
             images += 1;
         } else {
             others += 1;
         }
-        out.push(Deliverable {
-            workspace_id,
-            rel_path,
-            mime,
-            bytes: file.bytes,
-        });
+        out.push(d);
     }
 
     out
@@ -276,17 +342,108 @@ pub fn artifacts_dir(agent_home: &Path, session_id: &str) -> PathBuf {
     agent_home.join("artifacts").join(session_id)
 }
 
+/// Longest stem an artifact name may take from its source. Long enough to
+/// read, short enough that the name still fits in a chip and in the 255-byte
+/// limit of every filesystem we run on.
+const MAX_STEM_CHARS: usize = 48;
+
+/// Names Windows refuses as file names on any filesystem, extension included.
+/// A source called `nul.png` would otherwise produce a name `fs::write` fails
+/// on with a confusing `STATUS_INVALID_NAME`, only on one platform. (`CLOCK$`
+/// is not listed: `$` never survives [`sanitize_stem`], so it cannot be hit.)
+const WINDOWS_RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "CLOCK$", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+    "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Reduce one model-supplied path segment to a safe, readable stem.
+///
+/// Returns `None` when nothing readable survives — the caller then falls back
+/// to another name source rather than writing a file called `-`.
+fn sanitize_stem(raw: &str) -> Option<String> {
+    // Last segment only, on either separator: the path comes from the model,
+    // so `..` and separators must not survive even as substrings.
+    let last = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    // Drop the source's extension — the artifact's own comes from the MIME.
+    // A leading dot (`.gitignore`) is not an extension, so it is kept.
+    let stem = match last.rfind('.') {
+        Some(i) if i > 0 => &last[..i],
+        _ => last,
+    };
+
+    let mut out = String::with_capacity(stem.len());
+    let mut pending_sep = false;
+    for ch in stem.chars() {
+        if ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            // Alphanumeric covers non-ASCII letters on purpose: a Chinese
+            // source file name is friendlier to a human than `_-_-`.
+            out.push(ch);
+            pending_sep = false;
+        } else if !pending_sep {
+            // Anything else (space, `@`, `#`, control characters) becomes one
+            // space, and runs collapse: `report final v2` reads better than
+            // `report__final__v2`, and a space is legal on every filesystem
+            // we run on — the desktop percent-encodes each path segment.
+            out.push(' ');
+            pending_sep = true;
+        }
+    }
+    let out = out.trim_matches(|c| c == '.' || c == '_' || c == ' ');
+    if out.is_empty() {
+        return None;
+    }
+    // Truncate by characters (not bytes) and keep the head: the head is what
+    // distinguishes `icon-home` from `icon-settings`.
+    let capped: String = out.chars().take(MAX_STEM_CHARS).collect();
+    let capped = capped.trim_matches(|c| c == '.' || c == '_' || c == ' ');
+    if capped.is_empty() {
+        return None;
+    }
+    if WINDOWS_RESERVED.contains(&capped.to_ascii_uppercase().as_str()) {
+        return Some(format!("_{capped}"));
+    }
+    Some(capped.to_string())
+}
+
+/// The readable half of an artifact name: what the tool was *about*.
+///
+/// Falls back to the tool's own name when the call carried no path (an MCP
+/// server that returns a screenshot it never named), then to `image`. Never
+/// empty, never a path separator.
+pub fn artifact_stem(source_path: Option<&str>, tool_name: &str) -> String {
+    source_path
+        .and_then(sanitize_stem)
+        .or_else(|| sanitize_stem(tool_name))
+        .unwrap_or_else(|| "image".to_string())
+}
+
+/// The disambiguating half of an artifact name: 8 hex of the content digest.
+///
+/// Content, not call order, is what makes the name deterministic *and* stable:
+/// re-reading the same file at the same detail rewrites the same path with the
+/// same bytes (so the row shows one thumbnail, not four), while two different
+/// sources that share a stem — or one source read at two details — get
+/// different names instead of overwriting each other. A truncated digest is
+/// fine here: this is a filename, not an integrity claim, and a 32-bit
+/// collision inside one session directory is not a threat model.
+fn content_tag(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    digest[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Persist one image artifact and describe it as a [`ProducedFile`].
 ///
-/// The file name is derived from the tool call that produced it, not from the
-/// image's own metadata: the runtime is the one writing, so it can be
-/// deterministic about it instead of parsing whatever a server called the
-/// picture. `created` is `true` by construction — the directory is ours and the
-/// name carries a per-call index.
+/// The name is `<stem>-<content tag>.<ext>`: the stem says what the picture
+/// *is* (the file the tool was pointed at, or the tool itself), the tag says
+/// which bytes. Both halves are computed by the runtime from facts it already
+/// holds, so the same input always produces the same file — and a human can
+/// read the result without a transcript. `created` is `true` by construction:
+/// the directory is ours.
 pub fn write_image_artifact(
     dir: &Path,
-    tool_call_id: &str,
-    index: usize,
+    tool_name: &str,
+    source_path: Option<&str>,
     mime: &str,
     bytes: &[u8],
 ) -> std::io::Result<ProducedFile> {
@@ -297,13 +454,12 @@ pub fn write_image_artifact(
         "image/webp" => "webp",
         _ => "bin",
     };
-    // Tool call ids come from the model; keep only characters that cannot
-    // escape the directory or upset a filesystem.
-    let safe_id: String = tool_call_id
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    let name = format!("{safe_id}-{index}.{extension}");
+    let name = format!(
+        "{}-{}.{}",
+        artifact_stem(source_path, tool_name),
+        content_tag(bytes),
+        extension
+    );
 
     std::fs::create_dir_all(dir)?;
     let path = dir.join(name);
@@ -347,21 +503,33 @@ impl AgentLoop {
     /// Bytes never travel over the message channel. The desktop re-fetches them
     /// through the ordinary workspace file route, which is why only
     /// `(workspace_id, rel_path)` is stored.
+    ///
+    /// `source_path` is the file the call was *about* when the tool knew one
+    /// (the `path` argument of `image_read`, a browser screenshot's save path);
+    /// it names the artifact so the row is readable. `None` falls back to the
+    /// tool name.
+    ///
+    /// Returns the artifacts written, so the caller can stamp them on THIS tool
+    /// call's `tool_result` metadata. Persisting the bytes is the runtime's job
+    /// (the frontend cannot write node-local files); deciding to show them is
+    /// the frontend's.
     pub(crate) fn absorb_image_parts(
         &self,
         tool_call: &acowork_core::providers::traits::ToolCall,
         parts: &[acowork_core::providers::traits::ContentPart],
-    ) {
+        source_path: Option<&str>,
+    ) -> Vec<ProducedFile> {
         use acowork_core::providers::traits::ContentPart;
 
+        let mut produced = Vec::new();
         if parts.is_empty() {
-            return;
+            return produced;
         }
         let Some(session_id) = self.session_core.session_id.as_ref() else {
-            return;
+            return produced;
         };
         let Some(resolver) = self.core.workspace_resolver() else {
-            return;
+            return produced;
         };
         let agent_home = {
             let guard = match resolver.read() {
@@ -372,7 +540,7 @@ impl AgentLoop {
         };
         let dir = artifacts_dir(&agent_home, session_id);
 
-        for (index, part) in parts.iter().enumerate() {
+        for part in parts {
             let ContentPart::ImageUrl { image_url } = part else {
                 continue;
             };
@@ -393,8 +561,14 @@ impl AgentLoop {
                     continue;
                 }
             };
-            match write_image_artifact(&dir, &tool_call.id, index, mime, &decoded) {
-                Ok(file) => self.record_produced_file(file),
+            match write_image_artifact(
+                &dir,
+                &tool_call.function.name,
+                source_path,
+                mime,
+                &decoded,
+            ) {
+                Ok(file) => produced.push(file),
                 Err(e) => tracing::warn!(
                     tool = %tool_call.function.name,
                     dir = %dir.display(),
@@ -403,80 +577,8 @@ impl AgentLoop {
                 ),
             }
         }
+        produced
     }
-
-    /// Append one already-written file to this turn's list.
-    fn record_produced_file(&self, file: ProducedFile) {
-        match self.produced_files.lock() {
-            Ok(mut sink) => sink.push(file),
-            Err(poisoned) => poisoned.into_inner().push(file),
-        }
-    }
-}
-
-/// Write this turn's deliverables row, then forget the turn's list.
-///
-/// Called once per turn from the one funnel every terminal path passes through
-/// (`AgentLoop::close_turn_round`), which is what makes "one row per turn, no
-/// matter how the turn ended" a property of the code: the four `ChunkEvent::Done`
-/// exits, a cancel, and an error all arrive here.
-///
-/// Three conditions each end the turn with no row, all of them ordinary:
-/// no tool declared a file, no declared file survived the rules in [`collect`],
-/// or the session has no transcript writer (unit-test loops).
-///
-/// The list is **drained** even when no row is written: leaving last turn's
-/// files in the sink would have the next turn inherit them.
-pub(crate) fn write_turn_row(agent_loop: &AgentLoop) {
-    let produced: Vec<ProducedFile> = {
-        let mut sink = match agent_loop.produced_files.lock() {
-            Ok(sink) => sink,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        std::mem::take(&mut *sink)
-    };
-    if produced.is_empty() {
-        return;
-    }
-    let Some(conversation) = agent_loop.session.conversation.as_ref() else {
-        return;
-    };
-    // No resolver bound (a loop built without startup wiring) means no
-    // workspace ids, hence no addressable deliverable. Dropping the row is the
-    // honest outcome; inventing `__agent_home__` ids for files that may live
-    // elsewhere would produce links that 404.
-    let Some(resolver) = agent_loop.core.workspace_resolver() else {
-        tracing::debug!(
-            files = produced.len(),
-            "deliverables: no workspace resolver bound, skipping row"
-        );
-        return;
-    };
-    let roots = {
-        let guard = match resolver.read() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        roots_from_resolver(&guard)
-    };
-    let deliverables = collect(&produced, &roots);
-    if deliverables.is_empty() {
-        return;
-    }
-    conversation.append_message_with_id(
-        "system",
-        "",
-        Some(meta_json(&deliverables)),
-        None,
-    );
-    // The row is not a message for the model: it is a projection of what the
-    // turn already did, so it never enters `history`. Persisting it (rather
-    // than only emitting an event) is what keeps the thumbnails in a replayed
-    // session — the requirement that made this a transcript row at all.
-    tracing::debug!(
-        files = deliverables.len(),
-        "deliverables: wrote turn row"
-    );
 }
 
 /// The row payload for the transcript metadata.
@@ -511,6 +613,47 @@ mod tests {
     fn only_created_files_are_deliverables() {
         let files = vec![produced("/home/agent/project/a.ts", false)];
         assert!(collect(&files, &roots()).is_empty(), "a rewrite is process, not output");
+    }
+
+    #[test]
+    fn to_coordinates_keeps_rewrites_and_the_created_flag() {
+        // The fact-provider path applies no display policy: a rewrite is still a
+        // fact (created=false), and the frontend decides whether to show it.
+        let files = vec![
+            produced("/home/agent/project/a.md", false),
+            produced("/home/agent/project/b.md", true),
+        ];
+        let out = to_coordinates(&files, &roots());
+        assert_eq!(out.len(), 2, "no created-only filter on the fact path");
+        assert!(!out[0].created);
+        assert!(out[1].created);
+        assert_eq!(out[0].rel_path, "a.md");
+    }
+
+    #[test]
+    fn to_coordinates_does_not_dedupe_or_cap() {
+        // Dedupe and caps are display policy (frontend). The fact path reports
+        // every addressable declaration, duplicates included.
+        let files = vec![
+            produced("/home/agent/project/a.png", true),
+            produced("/home/agent/project/a.png", true),
+        ];
+        let out = to_coordinates(&files, &roots());
+        assert_eq!(out.len(), 2, "duplicates survive on the fact path");
+    }
+
+    #[test]
+    fn to_coordinates_still_drops_unaddressable_and_noise() {
+        // Addressability is a fact, not policy: a path under no root cannot be
+        // opened, and process noise is never a deliverable.
+        let files = vec![
+            produced("/elsewhere/a.png", true),
+            produced("/home/agent/project/node_modules/a.png", true),
+            produced("/home/agent/project/ok.png", true),
+        ];
+        let out = to_coordinates(&files, &roots());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].rel_path, "ok.png");
     }
 
     #[test]
@@ -625,26 +768,92 @@ mod tests {
     }
 
     #[test]
-    fn an_artifact_write_names_the_file_after_its_tool_call() {
+    fn an_artifact_name_reads_as_the_picture_it_holds() {
         let dir = tempfile::tempdir().unwrap();
-        let file = write_image_artifact(
-            &dir.path().join("s-1"),
-            "call:1/../x",
-            0,
-            "image/png",
-            &[0x89u8, b'P', b'N', b'G'],
-        )
-        .unwrap();
-        assert!(file.created);
-        assert_eq!(file.bytes, 4);
-        let name = Path::new(&file.abs_path).file_name().unwrap().to_string_lossy().to_string();
-        // Every character that is not alphanumeric / `-` / `_` becomes `_`, so
-        // a `..` segment cannot survive in the name even as a substring.
-        assert_eq!(
-            name, "call_1____x-0.png",
-            "unsafe characters are replaced, not honoured"
+        let write = |src: Option<&str>, bytes: &[u8]| {
+            write_image_artifact(&dir.path().join("s-1"), "image_read", src, "image/png", bytes)
+                .unwrap()
+        };
+        let name = |file: &ProducedFile| {
+            Path::new(&file.abs_path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        };
+
+        let a = write(Some("/proj/assets/logo.png"), &[0x89u8, b'P', b'N', b'G']);
+        let b = write(Some("/other/dir/logo.png"), &[0x89u8, b'P', b'N', b'G']);
+        let c = write(Some("/proj/assets/logo.png"), &[0u8, 1, 2, 3]);
+
+        assert!(a.created);
+        assert_eq!(a.bytes, 4);
+        // Same stem, same bytes ⇒ the very same path. Two reads of one file at
+        // one detail must not become two deliverables.
+        assert_eq!(a.abs_path, b.abs_path);
+        // Same stem, different bytes ⇒ different names. A re-encode at another
+        // detail overwrites nothing.
+        assert_ne!(a.abs_path, c.abs_path);
+        assert!(Path::new(&a.abs_path).exists());
+
+        let stem = name(&a).split('-').next().unwrap().to_string();
+        assert_eq!(stem, "logo", "the stem is the source file, not the call");
+        assert!(
+            name(&a).ends_with(".png"),
+            "the extension comes from the MIME: {}",
+            name(&a)
         );
-        assert!(Path::new(&file.abs_path).exists());
+    }
+
+    #[test]
+    fn a_source_path_cannot_smuggle_structure_into_the_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = write_image_artifact(
+            dir.path(),
+            "image_read",
+            Some("../../etc/passwd"),
+            "image/png",
+            b"png-bytes",
+        )
+        .unwrap()
+        .abs_path;
+        let base = Path::new(&name).file_name().unwrap().to_string_lossy().to_string();
+        assert!(base.starts_with("passwd-"), "only the last segment: {base}");
+        assert!(!base.contains('/') && !base.contains('\\'));
+        assert_eq!(Path::new(&name).parent().unwrap(), dir.path());
+    }
+
+    #[test]
+    fn a_friendly_source_name_stays_friendly() {
+        // The point of the stem is that a human can read it: non-ASCII and
+        // spaces survive as a readable name, not as a wall of underscores.
+        assert_eq!(artifact_stem(Some("素材/首页 icon v2.png"), "image_read"), "首页 icon v2");
+        // Windows refuses these even with an extension.
+        assert_eq!(artifact_stem(Some("nul.png"), "image_read"), "_nul");
+        assert_eq!(artifact_stem(Some("C:/a/b/CON.txt"), "image_read"), "_CON");
+        // Nothing readable in the path ⇒ the tool name, then a last resort.
+        assert_eq!(artifact_stem(Some("///"), "browser_screenshot"), "browser_screenshot");
+        assert_eq!(artifact_stem(None, "..."), "image");
+        // Long names are capped so the chip still fits.
+        let long = artifact_stem(Some(&"x".repeat(300)), "image_read");
+        assert_eq!(long.chars().count(), MAX_STEM_CHARS);
+    }
+
+    #[test]
+    fn an_unnamed_tool_result_is_named_after_the_tool() {
+        // An MCP server that answers with a screenshot it never wrote to disk
+        // has no source path; the call id told the user nothing, the tool name
+        // at least says where the picture came from.
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_image_artifact(dir.path(), "take_screenshot", None, "image/jpeg", b"j")
+            .unwrap();
+        let name = Path::new(&file.abs_path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(name.starts_with("take_screenshot-"), "{name}");
+        assert!(name.ends_with(".jpg"), "{name}");
     }
 
     #[test]
@@ -674,8 +883,8 @@ mod tests {
         std::fs::create_dir_all(home.join("artifacts").join("s-1")).unwrap();
         let file = write_image_artifact(
             &artifacts_dir(home, "s-1"),
-            "call_1",
-            0,
+            "image_read",
+            Some("assets/logo.png"),
             "image/png",
             &[0x89u8, b'P', b'N', b'G'],
         )
@@ -686,7 +895,12 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].workspace_id, AGENT_HOME_WORKSPACE);
-        assert_eq!(out[0].rel_path, "artifacts/s-1/call_1-0.png");
+        assert!(
+            out[0].rel_path.starts_with("artifacts/s-1/logo-")
+                && out[0].rel_path.ends_with(".png"),
+            "readable name, still inside the artifact dir: {}",
+            out[0].rel_path
+        );
         assert_eq!(out[0].mime, "image/png");
     }
 

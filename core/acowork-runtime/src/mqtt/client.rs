@@ -2468,7 +2468,7 @@ impl MqttChunkPublisher {
     /// lines before publishing. The full content stays in JSONL for LLM
     /// context. No exception — the frontend never receives full tool_result.
     //
-    // The 8 arguments (self + 7 fields) are intentional: the struct
+    // The 9 arguments (self + 8 fields) are intentional: the struct
     // form (`RecordCompletePayload`) is the protobuf DTO and we want
     // this publisher wrapper to look the same. A dedicated builder
     // would just shuffle the same fields around without reducing the
@@ -2484,6 +2484,7 @@ impl MqttChunkPublisher {
         tool_call_id: &str,
         is_error: bool,
         seq: u64,
+        metadata: Option<serde_json::Value>,
     ) {
         // ADR-035 D9.2: truncate tool_result to first 5 lines for display.
         // Full content stays in JSONL for LLM context. No exception.
@@ -2498,6 +2499,10 @@ impl MqttChunkPublisher {
         let mid = message_id.to_string();
         let tool_name = tool_name.to_string();
         let tool_call_id = tool_call_id.to_string();
+        // Mirror the JSONL row metadata onto the live event so the frontend's
+        // live projection equals the restored one (e.g. tool_result `produced`
+        // facts drive the deliverables banner without an extra HTTP fetch).
+        let metadata_json = metadata.map(|m| m.to_string());
         let event = SessionMessage {
             agent_id,
             session_id: sid.clone(),
@@ -2511,6 +2516,7 @@ impl MqttChunkPublisher {
                     tool_call_id,
                     is_error,
                     seq: Some(seq),
+                    metadata_json,
                 },
             )),
         };

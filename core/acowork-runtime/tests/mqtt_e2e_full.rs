@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use acowork_core::mqtt_proto::{
     AvailableMcps, AvailableProviders, ControlCommand, DataEnvelope, Intent, LlmProtocol, McpRef,
-    McpTransport as ProtoMcpTransport, ProviderRef, control_command::Command, data_envelope::Payload,
+    McpTransport as ProtoMcpTransport, ProviderRef, RecordCompletePayload, SessionMessage,
+    control_command::Command, data_envelope::Payload, session_message,
 };
 use acowork_gateway::mqtt::{GatewayMqttClient, start_broker};
 use acowork_runtime::mqtt::{MqttConnectConfig, RuntimeMqttClient, new_shared_cache};
@@ -1087,4 +1088,166 @@ fn integration_mcp_template_instance_id_substituted_at_runtime() {
         std::fs::remove_dir_all(&work_dir).ok();
     });
     drop(broker);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// record_complete `metadata_json` wire round-trip (ADR-119 mechanism rework).
+//
+// The deliverables banner is derived from facts the Runtime stamps on each
+// tool_result row. For the LIVE projection to equal the JSONL-restored one,
+// the record_complete event must carry that row's metadata over the wire.
+// This pins the additive `metadata_json` proto field end-to-end through a real
+// broker: publish → subscribe → decode, with and without the field (backward
+// compatibility — an old payload without it must decode to `None`).
+// ═══════════════════════════════════════════════════════════════════════
+#[test]
+fn record_complete_metadata_json_round_trips() {
+    let port = fresh_broker_port();
+    let broker = start_broker("127.0.0.1", port).unwrap();
+    let sid = "s-meta";
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let cache = new_shared_cache();
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.agent",
+            instance_id: TEST_INSTANCE_ID,
+            agent_name: "Test Agent",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            mcp_notifier: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            http_advertise_endpoint: None,
+            http_port: None,
+            work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
+            username: None,
+            password: None,
+        })
+        .await
+        .expect("runtime connect");
+
+        // Subscriber on the session messages topic. Subscribe before publishing
+        // (record_complete here is QoS 0, non-retained — a late subscriber misses it).
+        let mut opts = rumqttc::MqttOptions::new("e2e:meta:sub", "127.0.0.1", port);
+        opts.set_keep_alive(Duration::from_secs(5));
+        let (client, mut events) = rumqttc::AsyncClient::new(opts, 10);
+        let topic = format!(
+            "acowork/agents/{}/sessions/{}/messages/record_complete",
+            TEST_INSTANCE_ID, sid
+        );
+        client
+            .subscribe(&topic, rumqttc::QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        // rumqttc queues CONNECT/SUBSCRIBE behind the eventloop: drive `poll()`
+        // until the SUBACK lands, or the subscription never reaches the broker
+        // and the QoS 0 publish below is missed.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(rumqttc::Event::Incoming(rumqttc::Incoming::SubAck(_))) = events.poll().await {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("subscription should be acknowledged");
+
+        let produced = r#"[{"workspace_id":"w1","rel_path":"out/a.png","mime":"image/png","bytes":10,"created":true}]"#;
+        let doc = r#"{"doc_id":"doc-abc","path":"研发/x.md","name":"x.md","version":1}"#;
+        let metadata_json = format!(r#"{{"tool_name":"file_write","tool_call_id":"c1","produced":{},"doc":{}}}"#, produced, doc);
+
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(Payload::SessionMessage(SessionMessage {
+                agent_id: "com.test.agent".into(),
+                session_id: sid.into(),
+                event: Some(session_message::Event::RecordComplete(RecordCompletePayload {
+                    session_id: sid.into(),
+                    role: "tool_result".into(),
+                    message_id: "tr-1".into(),
+                    content: "Written".into(),
+                    tool_name: "file_write".into(),
+                    tool_call_id: "c1".into(),
+                    is_error: false,
+                    seq: Some(7),
+                    metadata_json: Some(metadata_json.clone()),
+                })),
+            })),
+        };
+        runtime
+            .publish_session_event(sid, "record_complete", &envelope)
+            .await
+            .expect("publish record_complete");
+
+        let payload = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match events.poll().await {
+                    Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p))) => {
+                        if p.topic == topic {
+                            return p.payload.to_vec();
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("should receive record_complete");
+
+        let env: DataEnvelope = prost::Message::decode(payload.as_slice()).unwrap();
+        let rc = match env.payload {
+            Some(Payload::SessionMessage(sm)) => match sm.event {
+                Some(session_message::Event::RecordComplete(rc)) => rc,
+                _ => panic!("expected RecordComplete event"),
+            },
+            _ => panic!("expected SessionMessage payload"),
+        };
+        assert_eq!(rc.message_id, "tr-1");
+        assert_eq!(rc.seq, Some(7));
+        // The additive field survives the wire and parses back to the facts.
+        let meta: serde_json::Value =
+            serde_json::from_str(rc.metadata_json.as_deref().expect("metadata_json present")).unwrap();
+        assert_eq!(meta["tool_call_id"], "c1");
+        assert_eq!(meta["produced"][0]["rel_path"], "out/a.png");
+        assert_eq!(meta["produced"][0]["created"], true);
+        // The doc-service fact rides the same non-truncated metadata channel.
+        assert_eq!(meta["doc"]["doc_id"], "doc-abc");
+        assert_eq!(meta["doc"]["path"], "研发/x.md");
+        assert_eq!(meta["doc"]["version"], 1);
+
+        drop(client);
+        drop(runtime);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    });
+    drop(broker);
+}
+
+#[test]
+fn record_complete_without_metadata_json_decodes_none() {
+    // Backward compatibility: a payload built without the additive field (an
+    // older Runtime) must decode with metadata_json == None, never an error.
+    let payload = RecordCompletePayload {
+        session_id: "s".into(),
+        role: "tool_result".into(),
+        message_id: "m".into(),
+        content: "x".into(),
+        tool_name: "t".into(),
+        tool_call_id: "c".into(),
+        is_error: false,
+        seq: Some(1),
+        metadata_json: None,
+    };
+    let bytes = prost::Message::encode_to_vec(&payload);
+    let decoded: RecordCompletePayload = prost::Message::decode(bytes.as_slice()).unwrap();
+    assert!(decoded.metadata_json.is_none());
+    assert_eq!(decoded.message_id, "m");
 }

@@ -492,6 +492,7 @@ async fn relay_chunk_event_mqtt(
             tool_call_id,
             is_error,
             seq,
+            metadata,
         } => {
             publisher
                 .publish_record_complete(
@@ -503,6 +504,7 @@ async fn relay_chunk_event_mqtt(
                     &tool_call_id,
                     is_error,
                     seq,
+                    metadata,
                 )
                 .await;
         }
