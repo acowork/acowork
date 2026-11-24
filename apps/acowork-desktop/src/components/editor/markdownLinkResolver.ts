@@ -35,6 +35,7 @@ import { getCachedWorkspaceRoot } from "../../stores/fileTree";
 import { getGatewayUrl } from "../../lib/config";
 import { log } from "../../lib/logger";
 import { showToast } from "../common/ToastProvider";
+import { pickOpenActionForPath } from "./filePreview";
 import i18n from "../../i18n";
 
 /** URL schemes that should be passed through to the webview as-is. */
@@ -42,47 +43,6 @@ export const PASSTHROUGH_SCHEMES = /^(https?:|data:|asset:|blob:|mailto:|tel:)/i
 
 /** Absolute path prefixes (POSIX `/...` or Windows `C:\...` / `C:/...`). */
 export const ABSOLUTE_PATH = /^([/\\]|[A-Za-z]:[/\\])/;
-
-/**
- * File extensions that should open in preview mode (read-only image render)
- * rather than in the Monaco source editor. Every other supported text format
- * — including JSON, HTML, Markdown, and all source code — opens in Monaco,
- * which can stream multi-MB files without freezing the UI.
- *
- * Mirrors the rule the workspace tree already uses inline (`WorkspaceExplorer`
- * keeps its own copy by design — the helper exists to make the chat side
- * match it, not to refactor the tree).
- *
- * Case-insensitive. Extension is matched at the end of the path so it works
- * for both bare filenames and full absolute paths.
- */
-const PREVIEWABLE_IMAGE_EXT = /\.(?:jpg|jpeg|png|gif|webp|svg)$/i;
-
-/**
- * Decide whether a chat-area file click should open in preview mode
- * (`openPreview`) or edit mode (`openFile`).
- *
- * Unifies the chat side with the workspace-panel convention:
- *   - Image extensions → `openPreview` (image viewer).
- *   - Everything else  → `openFile` (Monaco source editor).
- *
- * Used only by chat-side entry points (the workspace tree keeps its own
- * inline regex and is intentionally not refactored here):
- *   - `openWorkspaceRef.openAttachedRef` — chip in chat input / message
- *     bubble (the bug-fix path: previously always previewed JSON, which
- *     fell through to `MarkdownPreviewView` and froze on large files).
- *   - `MessageBubble` `<a>` interceptor — markdown link clicks in chat
- *     messages (same bug pattern, fixed in the same change).
- *
- * NB: `MarkdownPreviewView`'s internal `pickOpenAction` uses a *different*
- * rule (`.md → preview, else → edit`) because users opening a rendered
- * markdown file expect `.md` links to keep rendering. That helper is
- * intentionally local to that component — this one is the rule for
- * "click anywhere outside a rendered markdown file".
- */
-export function pickOpenActionForPath(absPath: string): "openFile" | "openPreview" {
-    return PREVIEWABLE_IMAGE_EXT.test(absPath) ? "openPreview" : "openFile";
-}
 
 /**
  * Resolve a markdown image/link `src` (relative or rooted) against one

@@ -6,6 +6,7 @@ import { invalidateWorkspaceFileBlob } from "../lib/workspaceFileBlob";
 import { getCachedFileVersion } from "./fileTree";
 import { HOSTED_PREVIEW_EXT_RE } from "../components/editor/filePreview";
 import { log } from "../lib/logger";
+import { getDoc } from "../lib/doc-api";
 import type { GitCommitDto } from "./gitStore";
 
 /**
@@ -158,8 +159,18 @@ export interface OpenFile {
      *  (ADR-078 decision 7) — never saved, never dirty, no fs-watch;
      *  "attachment" = read-only virtual preview of an inbox chat attachment
      *  (ADR-076 blob owned by the Gateway, not a workspace file) — also
-     *  never saved, never dirty, no fs-watch. */
-    kind: "file" | "url" | "diff" | "log" | "attachment";
+     *  never saved, never dirty, no fs-watch;
+     *  "doc" = read-only virtual preview of a doc-service online document,
+     *  fetched by `doc_id` through the Gateway doc proxy (not a workspace
+     *  file) — rendered as Markdown, never saved, never dirty, no fs-watch. */
+    kind: "file" | "url" | "diff" | "log" | "attachment" | "doc";
+    /** The doc-service document id (only for kind === "doc"). Stable across
+     *  rename/move, so it — not the path — keys the tab. */
+    docId?: string;
+    /** Library-relative path of the document (only for kind === "doc"). */
+    docPath?: string;
+    /** Document version last loaded (only for kind === "doc"). */
+    docVersion?: number;
     /** The URL to load (only for kind === "url") */
     url?: string;
     /** ADR-078: git diff classification for kind === "diff" virtual
@@ -270,6 +281,12 @@ interface FileEditorState {
         content: string;
         language: string;
     }) => void;
+    /** Open a read-only virtual tab previewing a doc-service online document.
+     *  Content is fetched by `doc_id` through the Gateway doc proxy, so the
+     *  tab works regardless of which node holds the agent. Addressed as
+     *  `doc:${docId}` (stable across rename/move); reopening activates the
+     *  existing tab. Never saved, never dirty, no fs-watch. */
+    openDocPreview: (opts: { docId: string; path: string; title?: string }) => void;
     /** Open a URL in a new tab (rendered in an iframe). Does nothing if the URL is invalid. */
     openUrl: (agentId: string, url: string) => void;
     /** ADR-078: open a read-only virtual diff/log tab (Monaco DiffEditor
@@ -769,6 +786,71 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             openFiles: [...state.openFiles, newFile],
             activeFileId: fileId,
         }));
+    },
+
+    openDocPreview: ({ docId, path, title }) => {
+        const fileId = `doc:${docId}`;
+        if (get().openFiles.some((f) => f.id === fileId)) {
+            set({ activeFileId: fileId });
+            return;
+        }
+        const fileName = path.split("/").pop() || title || docId;
+        const newFile: OpenFile = {
+            id: fileId,
+            // A doc-service document is Gateway-owned, not a workspace file:
+            // no agent, no workspace root, nothing to write back to. Empty ids
+            // keep the shape happy and every `kind === "file"` gate in
+            // FileEditorPanel (save, refresh, LSP, fs-watch, locate) skips it.
+            agentId: "",
+            workspaceId: "",
+            // Prefix the library path so it can never collide with a workspace
+            // file's Monaco model; `sourceRelPath` strips the prefix for display.
+            relPath: `doc:${path}`,
+            fileName,
+            content: "",
+            originalContent: "",
+            loading: true,
+            saving: false,
+            language: "markdown",
+            dirty: false,
+            mode: "preview",
+            kind: "doc",
+            docId,
+            docPath: path,
+        };
+        set((state) => ({ openFiles: [...state.openFiles, newFile], activeFileId: fileId }));
+
+        // Fetch the body through the doc proxy. The tab already exists (with a
+        // spinner) so a slow fetch never blocks the click; failure leaves an
+        // actionable error in the tab rather than a blank pane.
+        void getDoc(docId)
+            .then((read) => {
+                set((state) => ({
+                    openFiles: state.openFiles.map((f) =>
+                        f.id === fileId
+                            ? {
+                                  ...f,
+                                  content: read.content,
+                                  originalContent: read.content,
+                                  loading: false,
+                                  docPath: read.path,
+                                  docVersion: read.meta.version,
+                                  relPath: `doc:${read.path}`,
+                                  fileName: read.path.split("/").pop() || f.fileName,
+                              }
+                            : f,
+                    ),
+                }));
+            })
+            .catch((e: unknown) => {
+                log.warn(`[fileEditor] openDocPreview ${docId} failed:`, e);
+                const message = e instanceof Error ? e.message : String(e);
+                set((state) => ({
+                    openFiles: state.openFiles.map((f) =>
+                        f.id === fileId ? { ...f, loading: false, saveError: message } : f,
+                    ),
+                }));
+            });
     },
 
     openVirtualFile: ({ agentId, workspaceId, kind, relPath, content, original, gitDiffKind, language, loadedCommits, displayedLimit, reachedEnd, diffBaseRef, diffHeadRef }) => {

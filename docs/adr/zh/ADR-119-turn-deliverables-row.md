@@ -1,9 +1,26 @@
 # ADR-119 轮次交付物行：工具产出的文件与图片按轮次汇总为一条转录行
 
-- **状态**：Accepted（运行时 + 桌面端已实现，Windows 已验证）
+- **状态**：Accepted（运行时 + 桌面端已实现，Windows 已验证；2026-11 修订决策 4 与决策 7，见各节；**2026-11 机制重构：回合末系统行退役，产出事实改盖 tool_result，展示策略归前端**——见下方修订节）
 - **日期**：2026-11-05
 - **决策人**：大鱼
 - **相关**：ADR-046（附件作为用户轮次的组成部分）、ADR-107（消息引用 part）、ADR-118（桌面子 webview 内嵌浏览器）、ADR-024（会话合并元数据进索引）
+
+## 修订（2026-11）：产出事实改盖 tool_result，展示策略归前端
+
+回合末的 `deliverables` 系统行**退役**。本修订取代决策 1/2/3/5/6 中"独立系统行 + 运行时裁决"的机制；决策 4（图片落盘、通道只走坐标）与决策 7（点击复用查看器）不变。
+
+**新机制**：
+
+- **后端只供事实。** 工具结果持久化时（`persist_and_emit_tool_results`），把该 tool_call 声明的产出按坐标映射后，盖到**这条 `tool_result` 自己的 `metadata.produced`** 上：`[{workspace_id, rel_path, mime, bytes, created}]`。`turn_deliverables::to_coordinates` 只做路径→坐标映射与噪声过滤（MIME 可判、大小上限），不再去重/限量。图片字节落盘（决策 4）保留。
+- **事实不进模型上下文。** restorer 重建模型消息只取 `content` / `tool_call_id` / `tool_name`，`metadata.produced` 对 LLM 输入零影响——它是给前端的事实注解，不是推理材料。
+- **实时通道同步携带事实。** `record_complete` 事件新增 `metadata_json`（proto 加性字段），镜像该条 JSONL 行的 metadata；桌面端把它合进 `toolData`，使**实时投影与还原投影一致**——banner 在回合内即可推导，无需额外 HTTP 回源（旧机制靠"只持久化不下发"的系统行制造 count 分歧触发刷新，已随系统行退役）。
+- **前端统一推导。** [deriveDeliverables.ts](../../../apps/acowork-desktop/src/lib/deriveDeliverables.ts) 一个纯函数，输入一个回合的全部 `tool_result`，输出该回合的交付物：文件/图片读 `metadata.produced`（`created` 过滤、去重、每类上限 8、图片在前），doc 读 MCP 结果信封。展示时机/位置/取舍全在前端。
+- **新增交付物类别：doc 服务在线文档。** `doc_write`/`doc_move` 成功（`status=applied`）的结果信封由 [deliverableDocs.ts](../../../apps/acowork-desktop/src/lib/deliverableDocs.ts) 解析为 doc 卡片（按 doc_id 去重保留最后一次），点击在文件 tab 打开**只读** Markdown 预览（`fileEditorStore.openDocPreview`，按 doc_id 走 Gateway doc 代理，复用 `DocMarkdownView`）。doc 识别是独立适配器，不污染文件交付物的工具无关路径。
+- **文件类型图标。** 文件胶囊改用工作区同款 SetiIcon（复用 `fileIcons.getFileIcon`），不再统一 FileText。
+
+**兼容**：旧会话已持久化的 `deliverables` 行仍由 `parseDeliverableFiles` 读取；新会话不再写该行。
+
+**可证伪判据依旧成立**：文件交付物路径（`turn_deliverables.rs` / `deliverableFiles.ts` / `ChatDeliverablesRow.tsx`）不判工具名；doc 识别隔离在 `deliverableDocs.ts` 适配器内。
 
 ## 背景
 
@@ -48,7 +65,9 @@
 
 ### 决策 4：图像的字节落在节点上，消息通道只走路径
 
-工具返回的 `content_parts` 里的 `data:` URI 图片，由运行时解码后写入 `<agent_home>/artifacts/<session_id>/<tool_call_id>-<index>.<ext>`，并作为一条 `ProducedFile` 入账。
+工具返回的 `content_parts` 里的 `data:` URI 图片，由运行时解码后写入 `<agent_home>/artifacts/<session_id>/<stem>-<content tag>.<ext>`，并作为一条 `ProducedFile` 入账。
+
+> **修订（2026-11）**：初版是 `<tool_call_id>-<index>.<ext>`。它确定，但对人毫无意义——胶囊、编辑器标签页、系统文件管理器里都写着 `call_01a2095c7dba7734ae7a-0.png`；同一张图被读两次还会变成两条交付物。现在名字的两半都由运行时从**已经掌握的事实**算出：`<stem>` 是这次调用针对的文件（`image_read` 的 `path`；不针对文件的工具退化为工具名，再退化为 `image`），`<content tag>` 是字节的摘要前缀。确定性反而更强：同文件同 detail ⇒ 同路径同字节 ⇒ 行里只有一条；同 stem 不同字节（不同源文件，或不同 detail）⇒ 不同名字，互不覆盖。`<stem>` 必经净化（只取最后一段、非字母数字归一为单个空格、Windows 保留名加前缀、48 字符截断、保留非 ASCII），因为那个路径来自模型。
 
 桌面端**不接收字节**：它拿着 `(workspace_id, rel_path)` 走既有的工作区文件路由（`GET /workspace-files/{agentId}/{workspaceId}/{path}`，ADR-055 L2-7）取回，字节缓存复用 [workspaceFileBlob.ts](../../../apps/acowork-desktop/src/lib/workspaceFileBlob.ts) 的 LRU。这与桌面右侧工作区预览文件是**同一个流程**，不是第二套。
 
@@ -75,11 +94,15 @@
 
 桌面端渲染时的额外收益：`system` 在 `avatarAnchor` 的 `SKIP_TYPES` 里，行本身不会长出多余的头像，也不会打断后续 agent 块的既有规则。
 
-### 决策 7：点击复用工作区预览，不新增查看器
+### 决策 7：点击复用既有查看器，且走聊天侧那一条开文件规则
 
-缩略图点击调用 `useFileEditorStore.openFile(agentId, workspaceId, relPath)`——与在右侧工作区树里点同一张图片**完全同一个动作**：打开编辑器图片查看器标签页（缩放、平移、区域回投）。
+缩略图/胶囊的点击与聊天里**其他一切可点的文件引用**（引用胶囊 `openWorkspaceRef`、消息里的 `<a>`）共用同一个判定 `pickOpenActionForPath`：图片 ⇒ `openPreview`，其余 ⇒ `openFile`。落到同一个编辑器标签页（缩放、平移、区域回投），零新增查看器组件。
 
-零新增查看器组件。这是"同一条路由、同一份缓存、同一组坐标"带来的直接结果，而不是额外做的适配。
+> **修订（2026-11）**：初版写的是"点击调 `openFile`，与工作区树里点同一张图片完全同一个动作"。这句话当时就不成立：`openFile` 建的是 **edit 模式**的标签页，而编辑器 `FileEditorPanel` 的图像分支要求 `mode === "preview"`（工作区树对可预览文件走的是 `openPreview`）。于是交付物行里的图片点开是 Monaco 里的一串 base64——图片在 `BINARY_EXTENSIONS` 内，JSON 读接口返回的就是 base64 文本。修法不是再发明一条规则，而是接入既有的那条：聊天侧统一用 `pickOpenActionForPath`。
+>
+> 之所以不与工作区树的 `isWorkspacePreviewable` 合并：那条规则把 `.md` 也判为预览，而聊天侧点开 `.md` 期望的是源码（大 JSON / Markdown 走预览渲染曾经直接冻结页面）。两套规则的分工见 [filePreview.ts](../../../apps/acowork-desktop/src/components/editor/filePreview.ts) 头注释。
+
+同一份缓存、同一条路由、同一组坐标还带来一个附带要求：缩略图的取字节必须复用编辑器预览的 **`useWorkspaceFileBlob`**，而不是在组件里手写一次 `fetch`。初版手写的 effect 把"是否还活着"的标记放在了组件实例上而不是单次运行上，StrictMode 双挂载（以及虚拟列表回收行）时第一次运行的 `AbortError` 在第二次运行重新置位之后才到达，被当成下载失败并锁死成胶囊——图片全部退化成文件banner。
 
 ## 未纳入 v1 的部分（已知洞，明确记录）
 

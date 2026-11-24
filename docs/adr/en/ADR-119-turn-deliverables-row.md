@@ -1,9 +1,26 @@
 # ADR-119 Turn Deliverables Row: Files and Images a Turn Produced, Summarised as One Transcript Row
 
-- **Status**: Accepted (Runtime + Desktop implemented, verified on Windows)
+- **Status**: Accepted (Runtime + Desktop implemented, verified on Windows; Decisions 4 and 7 amended 2026-11 — see those sections; **2026-11 mechanism rework: the turn-end system row is retired, produced facts ride on each tool_result, display policy moves to the frontend** — see the revision section below)
 - **Date**: 2026-11-05
 - **Decider**: 大鱼
 - **Related**: ADR-046 (attachments as parts of the user turn), ADR-107 (message-ref parts), ADR-118 (desktop child-webview in-app browser), ADR-024 (merge metadata into the session index)
+
+## Revision (2026-11): produced facts ride on each tool_result, display policy moves to the frontend
+
+The turn-end `deliverables` system row is **retired**. This revision supersedes the "standalone system row + runtime adjudication" mechanism in Decisions 1/2/3/5/6; Decision 4 (image bytes land on the node, the channel carries coordinates only) and Decision 7 (clicks reuse the existing viewer) are unchanged.
+
+**New mechanism**:
+
+- **The backend supplies facts only.** When a tool result is persisted (`persist_and_emit_tool_results`), the produced declarations of that tool_call are mapped to coordinates and stamped onto **that `tool_result`'s own `metadata.produced`**: `[{workspace_id, rel_path, mime, bytes, created}]`. `turn_deliverables::to_coordinates` only maps paths to coordinates and filters noise (MIME-decidable, size ceiling); it no longer dedups or caps. Image byte landing (Decision 4) is kept.
+- **The facts never enter the model context.** The restorer rebuilds model messages from `content` / `tool_call_id` / `tool_name` only; `metadata.produced` has zero effect on the LLM input — it is a fact annotation for the frontend, not reasoning material.
+- **The live channel carries the same facts.** The `record_complete` event gains `metadata_json` (an additive proto field) mirroring that JSONL row's metadata; the desktop merges it into `toolData`, so **the live projection equals the restored one** — the banner is derivable within the turn with no extra HTTP fetch. (The old mechanism relied on a persist-only system row creating a count divergence that drove a refresh; that retired with the row.)
+- **The frontend derives uniformly.** [deriveDeliverables.ts](../../../apps/acowork-desktop/src/lib/deriveDeliverables.ts) is one pure function: given all `tool_result`s of a turn, it yields that turn's deliverables — files/images read `metadata.produced` (`created` filter, dedup, per-kind cap of 8, images first), docs read the MCP result envelope. When/where/what to display is entirely frontend logic.
+- **New deliverable category: doc-service online documents.** A successful (`status=applied`) `doc_write`/`doc_move` result envelope is parsed by [deliverableDocs.ts](../../../apps/acowork-desktop/src/lib/deliverableDocs.ts) into a doc card (deduped by doc_id, last write wins); clicking opens a **read-only** Markdown preview in a file tab (`fileEditorStore.openDocPreview`, fetched by doc_id through the Gateway doc proxy, reusing `DocMarkdownView`). Doc recognition is a separate adapter and does not pollute the tool-agnostic file-deliverable path.
+- **File-type icons.** File chips now use the workspace's SetiIcon (reusing `fileIcons.getFileIcon`) instead of a uniform FileText.
+
+**Compatibility**: `deliverables` rows already persisted in old sessions are still read by `parseDeliverableFiles`; new sessions no longer write the row.
+
+**The falsifiability criterion still holds**: the file-deliverable path (`turn_deliverables.rs` / `deliverableFiles.ts` / `ChatDeliverablesRow.tsx`) does not branch on tool names; doc recognition is isolated inside the `deliverableDocs.ts` adapter.
 
 ## Background
 
@@ -48,7 +65,9 @@ Adjudication lives in the Runtime and declaration in the tool so that adding a f
 
 ### Decision 4: image bytes stay on the node; only a path crosses the message channel
 
-A `data:` URI image in a tool result's `content_parts` is decoded by the Runtime, written to `<agent_home>/artifacts/<session_id>/<tool_call_id>-<index>.<ext>`, and recorded as a `ProducedFile`.
+A `data:` URI image in a tool result's `content_parts` is decoded by the Runtime, written to `<agent_home>/artifacts/<session_id>/<stem>-<content tag>.<ext>`, and recorded as a `ProducedFile`.
+
+> **Amended (2026-11)**: the first edition used `<tool_call_id>-<index>.<ext>`. That was deterministic and meaningless to a human — `call_01a2095c7dba7734ae7a-0.png` in the chip, in the editor tab and in the OS file manager — and reading the same picture twice produced two deliverables. Both halves of the name are now computed by the Runtime from facts it already holds: `<stem>` is the file the call was *about* (the `path` argument of `image_read`; a tool that points at no file falls back to its own name, then to `image`), `<content tag>` is a digest prefix of the bytes. Determinism improved rather than weakened: same file at the same detail ⇒ same path, same bytes ⇒ one entry in the row; same stem with different bytes (a different source, or a different detail) ⇒ different names, no overwrite. The stem is always sanitised — last segment only, non-alphanumerics collapsed into one space, Windows reserved names prefixed, 48 characters — because that path comes from the model.
 
 The desktop **never receives the bytes**: it takes `(workspace_id, rel_path)` through the existing workspace file route (`GET /workspace-files/{agentId}/{workspaceId}/{path}`, ADR-055 L2-7), and the byte cache is the LRU in [workspaceFileBlob.ts](../../../apps/acowork-desktop/src/lib/workspaceFileBlob.ts). This is the **same flow** as previewing a file in the right-hand workspace panel, not a second one.
 
@@ -75,11 +94,15 @@ So the registry splits into two sets: `isTurnPartMeta` (keep the metadata) cover
 
 A rendering bonus follows for free: `system` is in `avatarAnchor`'s `SKIP_TYPES`, so the row grows no stray avatar and does not disturb the existing rule for later agent blocks.
 
-### Decision 7: the click reuses the workspace viewer; no new viewer
+### Decision 7: the click reuses the existing viewer, through the chat-side open rule
 
-Clicking a thumbnail calls `useFileEditorStore.openFile(agentId, workspaceId, relPath)` — literally the same action as clicking the same image in the right-hand workspace tree: open the editor's image viewer tab (zoom, pan, region-to-chat).
+Clicking a thumbnail or a chip goes through the **same decision every other clickable file reference in chat already uses** (`pickOpenActionForPath`, shared with `openWorkspaceRef` chips and `<a>` links in messages): an image opens with `openPreview`, everything else with `openFile`. One editor tab (zoom, pan, region-to-chat), zero new viewer components.
 
-Zero new viewer components. That is a result of one route, one cache and one set of coordinates, not an adaptation layer built on top.
+> **Amended (2026-11)**: the first edition said "clicking calls `openFile`, literally the same action as clicking the same image in the workspace tree". That was never true: `openFile` opens a tab in **edit** mode, while the editor's image branch in `FileEditorPanel` requires `mode === "preview"` (the workspace tree itself calls `openPreview` for previewable files). So clicking an image in a deliverables row showed a wall of base64 in Monaco — images are in `BINARY_EXTENSIONS`, and the JSON content read returns base64. The fix is not a new rule but the existing one: chat-side entry points share `pickOpenActionForPath`.
+>
+> It is deliberately **not** the workspace tree's `isWorkspacePreviewable`, which also previews `.md`: a chat click on a Markdown or JSON file expects source (rendering a multi-MB file in the preview used to freeze the page). The division between the two rules is documented in the header of [filePreview.ts](../../../apps/acowork-desktop/src/components/editor/filePreview.ts).
+
+One route, one cache and one set of coordinates also impose a requirement on the thumbnail itself: it must fetch through the editor preview's **`useWorkspaceFileBlob`**, not a hand-written `fetch` in the component. The first edition's effect kept its liveness flag on the component instance instead of per effect run, so under the StrictMode double-mount (and whenever the virtual list recycled the row) the first run's `AbortError` arrived after the second run had re-raised the flag, was read as a failed download, and latched the row into chips — every image degraded to a file banner.
 
 ## Out of scope for v1 (known holes, recorded deliberately)
 

@@ -1,6 +1,6 @@
 /**
- * ADR-119: the turn's deliverables row — one line of thumbnails and file chips
- * under the last assistant bubble.
+ * The turn's deliverables row — one line of thumbnails, file chips and online
+ * document cards under the last assistant bubble.
  *
  * ## Why it sits here and not on the tool block
  *
@@ -11,22 +11,32 @@
  * that does not scale with the step count: the user reviews the turn's result,
  * not the hundred steps that produced it.
  *
- * The row is a persisted `system` entry, so it survives replay: reopening the
- * session shows the same thumbnails, because they describe files that are
- * still on the node.
+ * The row is derived from the transcript's tool calls ([deriveDeliverables.ts]),
+ * so it survives replay: reopening the session shows the same deliverables,
+ * because they describe files / documents that still exist.
  *
  * ## Why a click opens the editor's viewer
  *
- * A deliverable is `(workspace_id, rel_path)` — the same coordinates the
- * workspace panel uses. Clicking one calls `openFile`, exactly as clicking the
- * file in the tree does, so the image lands in the *existing* editor preview
- * tab (zoom / pan / region-to-chat) and there is no second viewer to maintain.
+ * A workspace deliverable is `(workspace_id, rel_path)` — the same coordinates
+ * the workspace panel uses. Clicking one goes through the **same chat-side
+ * rule every other clickable reference in chat uses**
+ * (`pickOpenActionForPath`: a format with an in-app viewer — image, PDF,
+ * Office, craft document — opens there, source and data files open in Monaco),
+ * so it lands in the *existing* editor tab and there is no second viewer to
+ * maintain. Binary formats in particular must not take the text path: the read
+ * interface returns them base64-encoded, which is what used to render as a wall
+ * of characters.
  *
- * Bytes are re-fetched through the ordinary workspace file route and cached by
- * the same LRU; nothing about a deliverable travels over the message channel.
+ * An online document is addressable by `doc_id` through the Gateway doc proxy;
+ * clicking it opens a read-only Markdown preview tab (`openDocPreview`), reusing
+ * the same doc viewer the doc navigation uses.
+ *
+ * Bytes are re-fetched through the ordinary workspace file route by the same
+ * hook the editor preview uses, and cached by the same LRU; nothing about a
+ * deliverable travels over the message channel.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FileText, Loader2, PackageOpen } from "lucide-react";
+import { useCallback, useMemo } from "react";
+import { Loader2, PackageOpen } from "lucide-react";
 import type { ChatMessage } from "../../lib/types";
 import {
   deliverableFileName,
@@ -35,62 +45,114 @@ import {
   parseDeliverableFiles,
   type DeliverableFile,
 } from "../../lib/deliverableFiles";
-import { fetchWorkspaceFileBlobUrl } from "../../lib/workspaceFileBlob";
+import {
+  deliverableDocFileName,
+  type DeliverableDoc,
+} from "../../lib/deliverableDocs";
+import { useWorkspaceFileBlob } from "../../hooks/useWorkspaceFileBlob";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
+// Open-mode rule lives in the leaf module (filePreview), not in the markdown
+// renderer that also uses it for `<a>` interception.
+import { pickOpenActionForPath } from "../editor/filePreview";
+import { getFileIcon } from "../workspace/FileTree/fileIcons";
+import { SetiIcon } from "../common/SetiIcon";
 import { useTranslation } from "../../i18n/useTranslation";
-import { log } from "../../lib/logger";
 import { cn } from "../../lib/utils";
 
 export interface ChatDeliverablesRowProps {
-  /** The row as loaded from the transcript (`metadata.type === "deliverables"`). */
+  /** The row as loaded / derived (`metadata.type === "deliverables"`). */
   message: ChatMessage;
-  /** Agent whose node holds the bytes. Without it nothing is fetchable. */
+  /** Agent whose node holds the workspace bytes. Without it workspace files are
+   *  not fetchable; online documents still open through the Gateway doc proxy. */
   agentId?: string;
+}
+
+/** Parse the derived / legacy document cards off the row metadata. */
+function parseDocs(metadata: Record<string, unknown> | undefined): DeliverableDoc[] {
+  const raw = metadata?.docs;
+  if (!Array.isArray(raw)) return [];
+  const out: DeliverableDoc[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const r = entry as Record<string, unknown>;
+    const docId = typeof r.docId === "string" ? r.docId : "";
+    const path = typeof r.path === "string" ? r.path : "";
+    if (!docId || !path || seen.has(docId)) continue;
+    seen.add(docId);
+    const name = typeof r.name === "string" && r.name ? r.name : path;
+    const version = typeof r.version === "number" && Number.isFinite(r.version) ? r.version : 0;
+    out.push({ docId, path, name, version });
+  }
+  return out;
 }
 
 export function ChatDeliverablesRow({ message, agentId }: ChatDeliverablesRowProps) {
   const { t } = useTranslation();
   const files = useMemo(() => parseDeliverableFiles(message.metadata), [message.metadata]);
+  const docs = useMemo(() => parseDocs(message.metadata), [message.metadata]);
 
-  const openFile = useCallback(
+  /** Open one workspace deliverable the way every other chat-side file
+   *  reference opens: viewer for a previewable format, Monaco for the rest. */
+  const openEntry = useCallback(
     (file: DeliverableFile) => {
       if (!agentId) return;
-      void useFileEditorStore
-        .getState()
-        .openFile(agentId, file.workspaceId, file.relPath);
+      const store = useFileEditorStore.getState();
+      if (pickOpenActionForPath(file.relPath) === "openPreview") {
+        void store.openPreview(agentId, file.workspaceId, file.relPath);
+      } else {
+        void store.openFile(agentId, file.workspaceId, file.relPath);
+      }
     },
     [agentId],
   );
 
-  if (files.length === 0 || !agentId) return null;
+  /** Open an online document as a read-only Markdown preview tab. */
+  const openDoc = useCallback((doc: DeliverableDoc) => {
+    useFileEditorStore.getState().openDocPreview({
+      docId: doc.docId,
+      path: doc.path,
+      title: doc.name,
+    });
+  }, []);
+
+  // Workspace files need an agent to fetch bytes; documents do not (the doc
+  // proxy is Gateway-wide). Show the row whenever either kind is present.
+  const showFiles = files.length > 0 && !!agentId;
+  const total = (showFiles ? files.length : 0) + docs.length;
+  if (total === 0) return null;
 
   return (
     <div className="mb-2 ml-12 mt-1" data-deliverables-row="true">
       <div className="flex items-center gap-1.5 text-xs text-text-tertiary">
         <PackageOpen className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
         <span>
-          {files.length === 1
+          {total === 1
             ? t("deliverables.title_one")
-            : t("deliverables.title", { count: files.length })}
+            : t("deliverables.title", { count: total })}
         </span>
       </div>
       <div className="mt-1.5 flex flex-wrap items-center gap-2">
-        {files.map((file) =>
-          isImageDeliverable(file) ? (
-            <DeliverableThumbnail
-              key={`${file.workspaceId}:${file.relPath}`}
-              file={file}
-              agentId={agentId}
-              onOpen={openFile}
-            />
-          ) : (
-            <DeliverableChip
-              key={`${file.workspaceId}:${file.relPath}`}
-              file={file}
-              onOpen={openFile}
-            />
-          ),
-        )}
+        {showFiles &&
+          files.map((file) =>
+            isImageDeliverable(file) ? (
+              <DeliverableThumbnail
+                key={`${file.workspaceId}:${file.relPath}`}
+                file={file}
+                agentId={agentId as string}
+                onOpen={openEntry}
+              />
+            ) : (
+              <DeliverableChip
+                key={`${file.workspaceId}:${file.relPath}`}
+                file={file}
+                onOpen={openEntry}
+              />
+            ),
+          )}
+        {docs.map((doc) => (
+          <DeliverableDocCard key={doc.docId} doc={doc} onOpen={openDoc} />
+        ))}
       </div>
     </div>
   );
@@ -107,38 +169,17 @@ function DeliverableThumbnail({
   onOpen: (file: DeliverableFile) => void;
 }) {
   const { t } = useTranslation();
-  const [url, setUrl] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-  /** Set once the fetch resolves: the URL belongs to the blob LRU, which
-   *  revokes it on eviction, so this component must NOT revoke it itself. */
-  const aliveRef = useRef(true);
-
-  useEffect(() => {
-    aliveRef.current = true;
-    const ctrl = new AbortController();
-    void fetchWorkspaceFileBlobUrl(agentId, file.workspaceId, file.relPath, {
-      signal: ctrl.signal,
-    })
-      .then((result) => {
-        if (!aliveRef.current) return;
-        setUrl(result.blobUrl);
-      })
-      .catch((err) => {
-        if (!aliveRef.current) return;
-        log.warn("[ChatDeliverablesRow] thumbnail fetch failed:", err);
-        setFailed(true);
-      });
-    return () => {
-      aliveRef.current = false;
-      ctrl.abort();
-    };
-  }, [agentId, file.workspaceId, file.relPath]);
-
   const name = deliverableFileName(file);
+  // The editor preview's own hook, so the thumbnail and the full-size tab share
+  // one LRU entry and one download.
+  const { blobUrl, error } = useWorkspaceFileBlob(
+    { agentId, workspaceId: file.workspaceId, relPath: file.relPath },
+    { mode: "url" },
+  );
 
   // A thumbnail we cannot load is still a file the user can open: fall back to
   // the chip rather than leaving a broken-image hole.
-  if (failed) {
+  if (error) {
     return (
       <DeliverableChip
         file={file}
@@ -159,8 +200,8 @@ function DeliverableThumbnail({
         "border border-border-outer bg-surface",
       )}
     >
-      {url ? (
-        <img src={url} alt={name} className="h-full w-full object-cover" />
+      {blobUrl ? (
+        <img src={blobUrl} alt={name} className="h-full w-full object-cover" />
       ) : (
         <span className="flex h-full w-full items-center justify-center">
           <Loader2 className="h-4 w-4 animate-spin text-text-tertiary" aria-hidden="true" />
@@ -170,7 +211,9 @@ function DeliverableThumbnail({
   );
 }
 
-/** A capsule for a non-image deliverable (a PDF, a report, a data file). */
+/** A capsule for a non-image workspace deliverable (a PDF, a report, a data
+ *  file). Uses the same Seti file-type icon as the right-hand workspace tree,
+ *  so a `.pdf`, a `.csv` and a `.md` are distinguishable at a glance. */
 function DeliverableChip({
   file,
   onOpen,
@@ -181,6 +224,7 @@ function DeliverableChip({
   title?: string;
 }) {
   const name = deliverableFileName(file);
+  const icon = getFileIcon(name);
   return (
     <button
       type="button"
@@ -192,11 +236,41 @@ function DeliverableChip({
         "hover:border-[var(--color-accent)]/40 hover:bg-surface-hover",
       )}
     >
-      <FileText className="h-3.5 w-3.5 shrink-0 text-text-tertiary" aria-hidden="true" />
+      <SetiIcon name={icon.name} size={14} className="shrink-0" />
       <span className="truncate">{name}</span>
       <span className="shrink-0 text-text-tertiary">
         {formatDeliverableSize(file.bytes)}
       </span>
+    </button>
+  );
+}
+
+/** A card for an online doc-service document. Clicking opens a read-only
+ *  Markdown preview tab; the markdown Seti icon matches the workspace tree. */
+function DeliverableDocCard({
+  doc,
+  onOpen,
+}: {
+  doc: DeliverableDoc;
+  onOpen: (doc: DeliverableDoc) => void;
+}) {
+  const name = deliverableDocFileName(doc);
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(doc)}
+      title={doc.path}
+      className={cn(
+        "flex max-w-[16rem] items-center gap-1.5 rounded-md border border-border-outer",
+        "bg-surface px-2 py-1.5 text-xs text-text-secondary",
+        "hover:border-[var(--color-accent)]/40 hover:bg-surface-hover",
+      )}
+    >
+      <SetiIcon name={getFileIcon(name).name} size={14} className="shrink-0" />
+      <span className="truncate">{name}</span>
+      {doc.version > 0 && (
+        <span className="shrink-0 text-text-tertiary">v{doc.version}</span>
+      )}
     </button>
   );
 }

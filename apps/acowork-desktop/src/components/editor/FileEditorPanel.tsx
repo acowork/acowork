@@ -32,6 +32,7 @@ import {
   type ContextMenuItem,
 } from "../common/ContextMenu";
 import { MarkdownPreviewView } from "./MarkdownPreviewView";
+import { DocMarkdownView } from "../../views/doc/DocMarkdownView";
 import { UrlPreviewView } from "./UrlPreviewView";
 import { usePreviewBridge } from "../../hooks/usePreviewBridge";
 import { closeAllPreviews, closePreview } from "../../lib/previewHost";
@@ -2142,6 +2143,24 @@ export function FileEditorPanel({ width }: { width: number }) {
                             padding: { top: 8 },
                         }}
                     />
+                ) : activeFile.kind === "doc" ? (
+                    // Online doc-service document — fetched by `doc_id` through
+                    // the Gateway doc proxy (openDocPreview). Read-only Markdown:
+                    // there is no workspace to write back to, and the doc panel
+                    // owns editing. Reuses the same viewer the doc navigation uses.
+                    activeFile.loading ? (
+                        <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            {t("fileEditor.previewLoading")}
+                        </div>
+                    ) : activeFile.saveError ? (
+                        <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-xs text-text-tertiary">
+                            <AlertCircle className="h-4 w-4" />
+                            <span className="break-all">{activeFile.saveError}</span>
+                        </div>
+                    ) : (
+                        <DocMarkdownView content={activeFile.content} />
+                    )
                 ) : waitForVisualApp ? (
                     <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
                         <Loader2 className="h-4 w-4 animate-spin" />

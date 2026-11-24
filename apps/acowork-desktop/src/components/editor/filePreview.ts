@@ -28,10 +28,12 @@
 //     built-in viewer, so a craft app is their only in-app renderer.
 //   - Everything else (JSON, source code, configs) → Monaco source editor.
 //
-// NB: this is the **workspace-panel** rule. The chat-side rule lives in
-// `markdownLinkResolver.pickOpenActionForPath` and is intentionally
-// different — images only — because a chat link to a `.md` file is expected
-// to keep rendering as Markdown. Don't unify them.
+// NB: two rules live here, and they are intentionally different. The table
+// below is the **workspace-panel** rule; `pickOpenActionForPath` at the foot of
+// this file is the **chat-side** rule (images only), because a chat click on a
+// `.md` file expects source, not a re-render. Don't unify them — and don't move
+// either one into a consumer: deciding how a file opens must not require the
+// markdown renderer, the toast system or any store.
 
 /** Native craft documents: the app iframe renders them, no built-in viewer. */
 export const NATIVE_CRAFT_EXTS: readonly string[] = [
@@ -152,4 +154,46 @@ export const WORKSPACE_PREVIEW_EXT_RE = previewExtRe([
  */
 export function isWorkspacePreviewable(name: string): boolean {
     return WORKSPACE_PREVIEW_EXT_RE.test(name);
+}
+
+/**
+ * Chat-side companion rule: a file opens in the preview viewer when the
+ * workspace panel would preview it — images, PDF/Office documents, and the
+ * craft-app files — **except** for the text formats where a chat click means
+ * "show me the source".
+ *
+ * `*.md` / `*.mdx` are the exception on purpose: a Markdown link inside a
+ * message sits in already-rendered prose, so re-rendering it is a dead end and
+ * editing it is the useful action. The workspace tree has the opposite
+ * default because its whole job is browsing documents.
+ *
+ * Everything else — JSON, HTML, CSV, source code — goes to Monaco on both
+ * surfaces: it streams multi-MB files, whereas routing them through
+ * `MarkdownPreviewView` used to freeze the page. Binary formats are NOT in
+ * that set: reading one through the text path returns base64 (the read
+ * interface has no binary channel), which is exactly why a click must never
+ * fall back to `openFile` for them.
+ *
+ * This is the single rule for "the user clicked a file reference in chat",
+ * shared by:
+ *   - `lib/openWorkspaceRef.openAttachedRef` — the ref chip in the input bar
+ *     and in a message bubble;
+ *   - the `<a>` interceptor in `markdownLinkResolver` — a markdown link in a
+ *     message;
+ *   - the turn deliverables row (ADR-119) — a thumbnail or file chip.
+ *
+ * NB: `MarkdownPreviewView`'s internal `pickOpenAction` is a *third* rule
+ * (`.md → preview`, else edit) and stays local to that component: inside a
+ * rendered markdown document, a `.md` link should keep rendering.
+ *
+ * Case-insensitive; matched at the end so a bare name, a workspace-relative
+ * path and an absolute path all answer the same way.
+ */
+const CHAT_SOURCE_PREFERRED_EXT = /\.(?:md|mdx)$/i;
+
+/** Which editor action opens a chat-side file reference. */
+export function pickOpenActionForPath(path: string): "openFile" | "openPreview" {
+    return isWorkspacePreviewable(path) && !CHAT_SOURCE_PREFERRED_EXT.test(path)
+        ? "openPreview"
+        : "openFile";
 }

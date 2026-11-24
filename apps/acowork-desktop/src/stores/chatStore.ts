@@ -3848,7 +3848,18 @@ function convertRecordCompleteToChatMessage(
   if (role === "tool_call" || role === "tool_result") {
     msg.toolName = toolName;
     msg.toolCallId = toolCallId;
+    // Prefer the row metadata mirrored from the JSONL entry: it carries the
+    // `produced` deliverable facts, so the live projection equals the restored
+    // one (`convertConversationEntry` sets `toolData = metadata`). The flat
+    // pairing keys / is_error are overlaid to preserve the live semantics; when
+    // the event carries no metadata (older Runtime) this degrades to the prior
+    // flat-only shape.
+    const meta =
+      data.metadata && typeof data.metadata === "object"
+        ? (data.metadata as Record<string, unknown>)
+        : {};
     msg.toolData = {
+      ...meta,
       tool_name: toolName,
       tool_call_id: toolCallId,
       is_error: isError,

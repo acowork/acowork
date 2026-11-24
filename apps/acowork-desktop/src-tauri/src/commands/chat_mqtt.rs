@@ -1655,6 +1655,15 @@ fn session_message_to_flat(
             if let Some(seq) = p.seq {
                 m.insert("seq".into(), serde_json::json!(seq));
             }
+            // Row metadata mirrored from the JSONL entry (e.g. a tool_result's
+            // `produced` deliverable facts). Forwarded so the frontend's live
+            // projection equals the restored one. A malformed payload is dropped
+            // rather than failing the whole event — the record still renders.
+            if let Some(ref mj) = p.metadata_json
+                && let Ok(meta) = serde_json::from_str::<serde_json::Value>(mj)
+            {
+                m.insert("metadata".into(), meta);
+            }
             Some(serde_json::Value::Object(m))
         }
         session_message::Event::ToolProgress(p) => {

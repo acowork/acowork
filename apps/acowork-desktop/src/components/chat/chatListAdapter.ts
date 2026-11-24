@@ -43,6 +43,7 @@ import {
   releaseAdapterSession,
 } from "./chatAdapterStore";
 import { foldMessages, type MessageBlock } from "./messageFolder";
+import { DeliverablesMemo } from "../../lib/deriveDeliverables";
 import type { ChatMessage } from "../../lib/types";
 import { isAtTail } from "../../lib/paginationUtils";
 
@@ -176,6 +177,11 @@ class AdapterStore {
   private listeners = new Set<LocalListener>();
   /** Event subscribers (for the `subscribe(cb)` API on ChatListAdapter). */
   private eventListeners = new Set<(event: AdapterEvent) => void>();
+
+  /** Per-session deliverables derivation memo: keeps unchanged banners' object
+   *  identity across the snapshot recomputes that every stream delta triggers.
+   *  Lives and dies with this adapter (one per session). */
+  private deliverablesMemo = new DeliverablesMemo();
 
   /** Unsubscribers for the two upstream store subscriptions. */
   private unsubHistory: (() => void) | null = null;
@@ -425,12 +431,12 @@ class AdapterStore {
     // blocks
     let blocks: readonly MessageBlock[];
     if (dedupedLive.length === 0) {
-      blocks = foldMessages(historyMessages);
+      blocks = foldMessages(this.deliverablesMemo.resolve(historyMessages));
     } else {
       const merged = [...historyMessages, ...dedupedLive].sort(
         (a, b) => a.timestamp - b.timestamp,
       );
-      const folded = foldMessages(merged);
+      const folded = foldMessages(this.deliverablesMemo.resolve(merged));
       // Mark isLive: any block whose items include at least one liveBuffer id.
       const liveIds = new Set(dedupedLive.map((m) => m.id));
       blocks = folded.map((b) => {

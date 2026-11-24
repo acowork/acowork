@@ -37,6 +37,11 @@ export interface DeliverableFile {
   mime: string;
   /** Size in bytes at turn end. */
   bytes: number;
+  /** Whether the write created the file (did not exist before). Present on the
+   *  per-tool_result `metadata.produced` facts; absent on a legacy turn row
+   *  (which already applied the created-only policy). The frontend decides
+   *  whether a rewrite counts as a deliverable. */
+  created?: boolean;
 }
 
 /** The file name a person reads: the path's last segment. */
@@ -108,4 +113,39 @@ export function isDeliverablesRow(message: {
   metadata?: Record<string, unknown>;
 }): boolean {
   return message.type === "system" && message.metadata?.type === DELIVERABLES_META_TYPE;
+}
+
+/**
+ * Parse the `produced` facts a tool stamped on its own `tool_result` metadata.
+ *
+ * The Runtime maps each produced file onto addressable `(workspace_id, rel_path)`
+ * coordinates and keeps the writer's `created` flag (see `to_coordinates` in
+ * `acowork-runtime`); it applies no display policy. This reads those facts into
+ * the same {@link DeliverableFile} shape the legacy turn row uses, so one renderer
+ * draws both. Tolerant by construction: a malformed entry is dropped, never
+ * thrown. Deduped by coordinates keeping the first occurrence.
+ */
+export function parseProducedFiles(
+  toolData: Record<string, unknown> | undefined | null,
+): DeliverableFile[] {
+  const raw = toolData?.produced;
+  if (!Array.isArray(raw)) return [];
+  const out: DeliverableFile[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const workspaceId = typeof record.workspace_id === "string" ? record.workspace_id : "";
+    const relPath = typeof record.rel_path === "string" ? record.rel_path : "";
+    const mime = typeof record.mime === "string" ? record.mime : "";
+    if (!workspaceId || !relPath || !mime) continue;
+    const key = `${workspaceId}:${relPath}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const bytes =
+      typeof record.bytes === "number" && Number.isFinite(record.bytes) ? record.bytes : 0;
+    const created = typeof record.created === "boolean" ? record.created : undefined;
+    out.push({ workspaceId, relPath, mime, bytes, created });
+  }
+  return out;
 }

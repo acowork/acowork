@@ -38,9 +38,12 @@
 import {
     notifyLinkNotFound,
     openFirstResolved,
-    pickOpenActionForPath,
     resolveAssetAcrossWorkspaces,
 } from "../components/editor/markdownLinkResolver";
+// The open-mode rule is a leaf decision (path → which editor action), so it
+// comes from the rule module, not from the markdown renderer that happens to
+// use the same rule for `<a>` interception.
+import { pickOpenActionForPath } from "../components/editor/filePreview";
 import { log } from "./logger";
 import type { AttachedItem } from "./types";
 

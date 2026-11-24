@@ -726,6 +726,54 @@ describe("thought timing: startTime/endTime", () => {
     expect(thought!.endTime!).toBeGreaterThanOrEqual(expectedStartTime!);
   });
 
+  it("record_complete tool_result carries metadata.produced into toolData (live deliverables)", () => {
+    // Regression: the live projection must equal the JSONL-restored one. The
+    // Runtime mirrors the row metadata onto record_complete so the frontend can
+    // derive the deliverables banner without an extra HTTP fetch. Before this,
+    // toolData was rebuilt from the flat fields only and `produced` was lost,
+    // so the file/image banner never appeared until the session was reopened.
+    seedSessionState([{ id: "u1", type: "user", content: "hi", timestamp: 1000 }], { total: 1 });
+    // The real DEFAULT_SESSION_STATE always carries toolProgress; the minimal
+    // seed helper omits it, and the tool_result record_complete path cleans it up.
+    useChatStore.setState((s) => ({
+      ...s,
+      agentStates: {
+        ...s.agentStates,
+        [AGENT]: {
+          ...s.agentStates[AGENT]!,
+          sessionStates: {
+            ...s.agentStates[AGENT]!.sessionStates,
+            [SESSION]: { ...s.agentStates[AGENT]!.sessionStates[SESSION]!, toolProgress: {} },
+          },
+        },
+      },
+    }));
+    const produced = [
+      { workspace_id: "w1", rel_path: "out/report.pdf", mime: "application/pdf", bytes: 42, created: true },
+    ];
+    handleMessageEvent(
+      {
+        type: "record_complete",
+        session_id: SESSION,
+        message_id: "tr-1",
+        role: "tool_result",
+        content: "Written",
+        tool_name: "file_write",
+        tool_call_id: "call-1",
+        is_error: false,
+        metadata: { tool_name: "file_write", tool_call_id: "call-1", produced },
+      },
+      useChatStore.setState,
+      useChatStore.getState,
+      AGENT,
+    );
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    const row = ss.messages.find((m) => m.id === "tr-1");
+    expect(row).toBeDefined();
+    expect(row!.toolCallId).toBe("call-1");
+    expect(row!.toolData?.produced).toEqual(produced);
+  });
+
   it("record_complete resets thinkingStartTime so it cannot leak to the next thought", () => {
     seedSessionState([{ id: "u1", type: "user", content: "hi", timestamp: 1000 }], { total: 1 });
 
