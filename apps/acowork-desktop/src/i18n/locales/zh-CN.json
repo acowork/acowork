@@ -2668,6 +2668,9 @@
     "deleteConfirm": "删除「{{name}}」及其全部聊天记录？此操作不可撤销。",
     "deleteSaved": "群聊已删除"
   },
+  "groupTasks": {
+    "title": "任务"
+  },
   "groupChatPrompt": {
     "title": "群聊提示词 (chat.md)",
     "isDefault": "默认",

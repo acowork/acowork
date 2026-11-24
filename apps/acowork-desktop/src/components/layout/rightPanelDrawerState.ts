@@ -30,13 +30,18 @@ import type { PanelTab } from "../../stores/layoutStore";
  * What a peek can show.
  *
  * The agent chat rail has one tile per panel tab, so those keys are the tabs
- * themselves. The other right rails (group members, pm, docs) each have a
- * single tile meaning "this view's side panel"; they are not panel tabs and
- * get their own keys. `visiblePanelTab` in `rightPanelGate.ts` only reads the
+ * themselves. The other right rails (group members / tasks, pm, docs) each have
+ * a tile meaning "this view's side panel"; they are not panel tabs and get
+ * their own keys. `visiblePanelTab` in `rightPanelGate.ts` only reads the
  * tab-shaped keys, which is what keeps the drawer from leaking a pm peek into
  * the agent panel's visibility rules.
  */
-export type DrawerKey = PanelTab | "group_members" | "view_pm" | "view_docs";
+export type DrawerKey =
+  | PanelTab
+  | "group_members"
+  | "group_tasks"
+  | "view_pm"
+  | "view_docs";
 
 export interface DrawerState {
   /** What the overlay is showing (or sliding out). Null = no overlay. */

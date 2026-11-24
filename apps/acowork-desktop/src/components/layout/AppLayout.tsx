@@ -5,11 +5,12 @@ import { NavBar } from "./NavBar";
 import { TitleBar } from "./TitleBar";
 import { AgentList } from "../agent-list/AgentList";
 import { GroupMembersPanel } from "../chat/GroupMembersPanel";
+import { GroupTasksPanel } from "../chat/GroupTasksPanel";
 import { MiddleChatPane } from "./MiddleChatPane";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { RightPanel } from "../right-panel/RightPanel";
 import { RightNavBar } from "./RightNavBar";
-import { GroupRightNavBar } from "./GroupRightNavBar";
+import { GroupRightNavBar, type GroupPanelTab } from "./GroupRightNavBar";
 import { ViewSettingsRail } from "./ViewSettingsRail";
 import { RightPanelDrawer } from "./RightPanelDrawer";
 import { useRightPanelDrawer } from "./useRightPanelDrawer";
@@ -151,6 +152,10 @@ export function AppLayout() {
   const setActiveTab = useLayoutStore((s) => s.setActivePanelTab);
   const rightPanelCollapsed = useLayoutStore((s) => s.rightPanelCollapsed);
   const setRightPanelCollapsed = useLayoutStore((s) => s.setRightPanelCollapsed);
+  // Which surface the group chat's one right slot holds (members by default,
+  // i.e. exactly what the single tile used to show). Not persisted: it is a
+  // question about the panel, not about the window's geometry.
+  const [groupPanelTab, setGroupPanelTab] = useState<GroupPanelTab>("members");
   const pmPanelOpen = useLayoutStore((s) => s.pmPanelOpen);
   const setPmPanelOpen = useLayoutStore((s) => s.setPmPanelOpen);
   const docPanelOpen = useLayoutStore((s) => s.docPanelOpen);
@@ -538,6 +543,16 @@ export function AppLayout() {
     `${currentView}:${selectedAgentId ?? activeGroupId ?? ""}`,
   );
 
+  /** The group tile whose panel the peek is showing (`group_members` /
+   *  `group_tasks` are the only group keys a drawer can carry). */
+  const groupDrawerTab: GroupPanelTab | null = !rightDrawer.open
+    ? null
+    : rightDrawer.key === "group_tasks"
+      ? "tasks"
+      : rightDrawer.key === "group_members"
+        ? "members"
+        : null;
+
   /** The panel a peek shows. `key` is what the rail hovered; the switch is
    *  the single place that maps rail → surface, so a new right rail adds one
    *  case here and one `onHoverStart` on its tile. */
@@ -545,6 +560,8 @@ export function AppLayout() {
     switch (key) {
       case "group_members":
         return <GroupMembersPanel key={key} width={rightWidth} overlay />;
+      case "group_tasks":
+        return <GroupTasksPanel key={key} width={rightWidth} overlay />;
       case "view_pm":
         return <PmSettingsPanel key={key} width={rightWidth} overlay onClose={() => setPmPanelOpen(true)} />;
       case "view_docs":
@@ -1495,12 +1512,18 @@ export function AppLayout() {
               <RightPanel width={rightWidth} onCollapse={toggleRightPanel} isDebugMode={isDebugMode} onResizeStart={handleMouseDownRight} activeTab={activeTab} onTabChange={setActiveTab} />
             )}
 
-            {/* Group-chat right panel — the project group's members surface
-                (WeChat-style grid + add). Mirrors the agent RightPanel slot:
-                same width / resize handle / collapse state, only shown when
-                a group is open and no agent session takes the pane. */}
+            {/* Group-chat right panel — one slot, two surfaces: the members
+                panel (WeChat-style grid + add) and the project task panel
+                (four status cards). `groupPanelTab` says which one the 40px
+                rail has pinned. Mirrors the agent RightPanel slot: same
+                width / resize handle / collapse state, only shown when a
+                group is open and no agent session takes the pane. */}
             {!rightPanelCollapsed && !selectedAgentId && activeGroupId && !activeIsDm && (
-              <GroupMembersPanel width={rightWidth} onResizeStart={handleMouseDownRight} />
+              groupPanelTab === "tasks" ? (
+                <GroupTasksPanel width={rightWidth} onResizeStart={handleMouseDownRight} />
+              ) : (
+                <GroupMembersPanel width={rightWidth} onResizeStart={handleMouseDownRight} />
+              )
             )}
           </div>
         )}
@@ -1540,16 +1563,22 @@ export function AppLayout() {
               onHoverEnd={rightDrawer.railLeave}
             />
           ) : activeGroupId && !activeIsDm ? (
-            // Group chat: a single settings tile toggles the members panel.
-            // Shares the agent panel's collapse state + width so the 40px
-            // rail reads identically across the two right-panel surfaces. A
+            // Group chat: two tiles (members / tasks) sharing the one right
+            // slot, so the rail reads identically to the agent panel's. A
             // DM (`user_user`) is excluded — two people have no members to
             // manage, so it falls through to the empty placeholder below.
             <GroupRightNavBar
-              expanded={!rightPanelCollapsed}
-              onToggle={toggleRightPanel}
-              drawerOpen={rightDrawer.open && rightDrawer.key === "group_members"}
-              onHoverStart={() => rightDrawer.enter("group_members")}
+              activeTab={rightPanelCollapsed ? null : groupPanelTab}
+              onSelect={(tab) => {
+                if (!rightPanelCollapsed && tab === groupPanelTab) {
+                  setRightPanelCollapsed(true);
+                } else {
+                  setRightPanelCollapsed(false);
+                  setGroupPanelTab(tab);
+                }
+              }}
+              drawerTab={groupDrawerTab}
+              onHoverStart={(tab) => rightDrawer.enter(tab === "tasks" ? "group_tasks" : "group_members")}
               onHoverEnd={rightDrawer.railLeave}
             />
           ) : (

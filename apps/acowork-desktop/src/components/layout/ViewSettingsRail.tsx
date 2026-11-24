@@ -13,6 +13,7 @@
  * from the user's side the panel is on screen either way.
  */
 
+import type { ReactNode } from "react";
 import { NavButton } from "../common/NavButton";
 import { OutlineSettingsIcon, FilledSettingsIcon } from "../common/SettingsIcon";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -32,9 +33,11 @@ interface ViewSettingsRailProps {
   onHoverStart?: () => void;
   /** Pointer left the rail as a whole. */
   onHoverEnd?: () => void;
+  /** Extra tiles under the gear (the group rail's task tile). */
+  children?: ReactNode;
 }
 
-export function ViewSettingsRail({ expanded, onToggle, tooltipKey, drawerOpen = false, onHoverStart, onHoverEnd }: ViewSettingsRailProps) {
+export function ViewSettingsRail({ expanded, onToggle, tooltipKey, drawerOpen = false, onHoverStart, onHoverEnd, children }: ViewSettingsRailProps) {
   const { t } = useTranslation();
   return (
     <nav className="flex w-10 shrink-0 flex-col items-center gap-2 py-2 dark:border-zinc-800" onMouseLeave={onHoverEnd}>
@@ -56,6 +59,7 @@ export function ViewSettingsRail({ expanded, onToggle, tooltipKey, drawerOpen = 
           <OutlineSettingsIcon className="h-5 w-5" />
         )}
       </NavButton>
+      {children}
     </nav>
   );
 }

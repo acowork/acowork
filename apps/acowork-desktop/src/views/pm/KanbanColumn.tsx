@@ -10,6 +10,11 @@
  *   单页数量来自项目 metadata；列底区间 + 上下页仅在有下一页时出现
  * - 拖拽进行中回退全量渲染：保证所有 draggable/droppable 节点挂载，dnd-kit 正常命中
  * - 空状态：pm.board.empty
+ * - 可折叠（`onToggleCollapsed`）：窄容器里（群聊右侧任务面板）4 列纵向排列，
+ *   默认只留列头，点列头展开。不传这两个 props 时渲染与看板完全一致。
+ * - `variant="card"`：列本身画成"设置卡片"（`ListBox` box 那一套）——标题条
+ *   `panel-block` + 正文 `panel-inset`，圆角 md，而不是整列一片 `right-panel`。
+ *   看板的列是铺满列宽的面板，只有一个底色；侧栏里列要和面板撞色时才用 card。
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -21,7 +26,11 @@ import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
 import { TaskCard } from "./TaskCard";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
-import { CAPSULE_PANE_CN, SURFACE_PANEL_CN } from "../../components/common/capsule";
+import {
+  CAPSULE_PANE_CN,
+  SURFACE_CONTENT_CN,
+  SURFACE_PANEL_CN,
+} from "../../components/common/capsule";
 import { cn } from "../../lib/utils";
 import { boardPageBounds, boardPageSlice } from "../../lib/pm-board-settings";
 import { COUNT_BADGE_BASE_CN } from "../../components/common/sidebarCountBadge";
@@ -39,7 +48,26 @@ interface KanbanColumnProps {
   onPageChange: (page: number) => void;
   /** 拖拽进行中且目标列为空时展示空态提示 */
   isOver?: boolean;
+  /** 折叠（只渲染列头）。默认 `false` = 看板的常开列。 */
+  collapsed?: boolean;
+  /**
+   * `pane`（默认）= 看板的列：整列一片 `bg-right-panel`。
+   * `card` = 设置卡片语法：`rounded-md` 外壳 + 标题条 `panel-block` +
+   * 正文 `panel-inset`，落在 `bg-right-panel` 的面板上才有层次。
+   */
+  variant?: "pane" | "card";
+  /** 给了就变可折叠列：列头成为展开/收起按钮。 */
+  onToggleCollapsed?: () => void;
 }
+
+/**
+ * 可折叠列（侧栏里的状态卡片）展开后的高度上限：内容少就按内容高度长，
+ * 超过就卡内滚动。看板列不受影响（它们由看板均分列宽列高）。
+ *
+ * 用 vh 而不是父容器百分比：这一档的父链高度是按内容算的（卡片要"贴着内容"），
+ * 百分比 max-height 在不定高包含块上会被当成 none —— 等于没上限。
+ */
+const FOLDED_COLUMN_BODY_MAX_HEIGHT = "60vh";
 
 /** 扁平化行：任务 + 其在列内树中的深度 */
 interface FlatRow {
@@ -56,8 +84,15 @@ export function KanbanColumn({
   page,
   onPageChange,
   isOver,
+  collapsed = false,
+  onToggleCollapsed,
+  variant = "pane",
 }: KanbanColumnProps) {
   const { t } = useTranslation();
+  // 设置卡片语法：标题条 = 外壳那一层（`panel-block`），正文下沉一档
+  // （`panel-inset`）+ 顶沿发丝线。与 `ListBox` box / `ExpandableRow` 一致。
+  const card = variant === "card";
+  const bodySurface = card ? SURFACE_CONTENT_CN : "";
   const healthy = usePmHealthStore((s) => s.healthy);
   const childrenOf = usePmBoardStore((s) => s.childrenOf);
   const { setNodeRef, isOver: dropOver } = useDroppable({
@@ -120,36 +155,80 @@ export function KanbanColumn({
     <section
       ref={setNodeRef}
       className={cn(
-        // 列 = 面板（不是卡片），直接复用设置面板同一个 pane 外壳：
+        // pane（看板）：列 = 面板（不是卡片），复用设置面板同一个 pane 外壳
         // CAPSULE_PANE_CN（rounded-xl + 外发丝线 + overflow-hidden）+ right-panel
         // 底色；里面的任务才是 ListBox 卡片（panel-block + panel-inset 正文）。
-        CAPSULE_PANE_CN,
-        "min-w-0 flex-1",
-        SURFACE_PANEL_CN,
+        // card（窄侧栏）：列自己就是那张设置卡片，标题条那一层当外壳。
+        card
+          ? "flex min-h-0 flex-col overflow-hidden rounded-md border border-border-outer bg-panel-block"
+          : cn(CAPSULE_PANE_CN, SURFACE_PANEL_CN),
+        // 可折叠列在纵向容器里都按内容高度排（`flex-none`）：折叠 = 只剩列头，
+        // 展开 = 列头 + 内容，超过上限的那部分由正文自己的滚动区吃掉 ——
+        // 不能写 `flex-1`，那会把列撑成均分的高度，内容少时留下一大片空白。
+        onToggleCollapsed ? "flex-none" : "min-w-0 flex-1",
         active && "border-[var(--color-accent)] bg-[var(--color-accent)]/5",
       )}
       aria-label={t(i18nKey)}
     >
-      {/* 列头 —— 与设置面板头部同一关系：一行标题 + 下沿发丝线 */}
-      <header className="flex shrink-0 items-center gap-1.5 border-b border-border-divider px-2.5 py-2">
-        <h3 className="min-w-0 flex-1 truncate text-11 font-medium text-text-secondary ">
-          {t(i18nKey)}
-        </h3>
-        <span
-          className={cn(
-            COUNT_BADGE_BASE_CN,
-            status === "submitted"
-              ? "bg-warning-surface-hover text-warning-quiet"
-              : "bg-surface-hover text-text-secondary ",
-          )}
-        >
-          {tasks.length}
-        </span>
+      {/* 列头 —— 与设置面板头部同一关系：一行标题 + 下沿发丝线。可折叠时整行
+          是按钮（chevron 指示状态，命中区就是标题栏）；折叠时不画那条发丝线，
+          卡片外框本来就在同一行上，两条紧贴会看起来像一根加粗的线。 */}
+      <header
+        className={cn(
+          "flex shrink-0 items-center gap-1.5 px-2.5 py-2",
+          !collapsed && "border-b border-border-divider",
+        )}
+      >
+        {onToggleCollapsed ? (
+          <button
+            type="button"
+            onClick={onToggleCollapsed}
+            aria-expanded={!collapsed}
+            className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+          >
+            <ChevronRight
+              className={cn(
+                "h-3 w-3 shrink-0 text-text-tertiary transition-transform",
+                !collapsed && "rotate-90",
+              )}
+              aria-hidden
+            />
+            <h3 className="min-w-0 flex-1 truncate text-11 font-medium text-text-secondary ">
+              {t(i18nKey)}
+            </h3>
+            <span
+              className={cn(
+                COUNT_BADGE_BASE_CN,
+                status === "submitted"
+                  ? "bg-warning-surface-hover text-warning-quiet"
+                  : "bg-surface-hover text-text-secondary ",
+              )}
+            >
+              {tasks.length}
+            </span>
+          </button>
+        ) : (
+          <>
+            <h3 className="min-w-0 flex-1 truncate text-11 font-medium text-text-secondary ">
+              {t(i18nKey)}
+            </h3>
+            <span
+              className={cn(
+                COUNT_BADGE_BASE_CN,
+                status === "submitted"
+                  ? "bg-warning-surface-hover text-warning-quiet"
+                  : "bg-surface-hover text-text-secondary ",
+              )}
+            >
+              {tasks.length}
+            </span>
+          </>
+        )}
       </header>
 
       {/* 任务列表 */}
-      {flatRows.length === 0 ? (
-        <div className="min-h-0 flex-1 p-2">
+      {collapsed ? null : flatRows.length === 0 ? (
+        <div className={cn("min-h-0 flex-1 p-2", bodySurface)}>
           <div
             className={cn(
               "flex h-16 items-center justify-center rounded-md border border-dashed border-border-outer text-10 text-text-tertiary ",
@@ -161,7 +240,11 @@ export function KanbanColumn({
         </div>
       ) : isDragging ? (
         // 拖拽中：全量渲染
-        <OverlayScrollbar fill="flex" className="p-2">
+        <OverlayScrollbar
+          fill="flex"
+          maxHeight={onToggleCollapsed ? FOLDED_COLUMN_BODY_MAX_HEIGHT : undefined}
+          className={cn("p-2", bodySurface)}
+        >
           <div className="space-y-1.5">
             {flatRows.map((row) => (
               <TaskCard
@@ -175,7 +258,12 @@ export function KanbanColumn({
         </OverlayScrollbar>
       ) : (
         // 虚拟化渲染
-        <OverlayScrollbar fill="flex" viewportRef={scrollRef} className="p-2">
+        <OverlayScrollbar
+          fill="flex"
+          viewportRef={scrollRef}
+          maxHeight={onToggleCollapsed ? FOLDED_COLUMN_BODY_MAX_HEIGHT : undefined}
+          className={cn("p-2", bodySurface)}
+        >
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualizer.getVirtualItems().map((vi) => {
               const row = flatRows[vi.index];
@@ -202,8 +290,13 @@ export function KanbanColumn({
       )}
 
       {/* 分页条：只有真的超过一页才出现，避免给短列增加噪音 */}
-      {bounds.totalPages > 1 && (
-        <footer className="flex shrink-0 items-center justify-between gap-2 border-t border-border-divider px-2 py-1 text-10 text-text-tertiary">
+      {!collapsed && bounds.totalPages > 1 && (
+        <footer
+          className={cn(
+            "flex shrink-0 items-center justify-between gap-2 border-t border-border-divider px-2 py-1 text-10 text-text-tertiary",
+            bodySurface,
+          )}
+        >
           <span className="truncate tabular-nums" aria-live="polite">
             {t("pm.board.pageRange", {
               start: bounds.start,

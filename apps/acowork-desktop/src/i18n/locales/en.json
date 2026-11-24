@@ -2657,6 +2657,9 @@
     "deleteConfirm": "Delete \"{{name}}\" and its entire message history? This cannot be undone.",
     "deleteSaved": "Group chat deleted"
   },
+  "groupTasks": {
+    "title": "Tasks"
+  },
   "groupChatPrompt": {
     "title": "Group chat prompt (chat.md)",
     "isDefault": "Default",
