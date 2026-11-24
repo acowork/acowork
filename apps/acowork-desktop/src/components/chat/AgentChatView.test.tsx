@@ -1004,6 +1004,8 @@ describe("AgentChatView reasoning-effort toggle", () => {
 // "Enter to send, Shift+Enter for a new line" — mechanics every IM user already
 // knows — while the one thing this surface actually offers (name the task the
 // message continues) was reachable only through an unlabeled toolbar glyph.
+// That glyph is gone: typing `@` is the gesture, and the composer hint is
+// where it is advertised.
 describe("AgentChatView `@` composer gesture", () => {
   beforeEach(() => {
     windows = {};
@@ -1059,27 +1061,14 @@ describe("AgentChatView `@` composer gesture", () => {
     expect(screen.queryByTestId("address-picker")).toBeNull();
   });
 
-  it("the toolbar `@` still toggles the same list", () => {
+  it("no longer offers a toolbar button for it", () => {
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-    const btn = screen.getByLabelText("chatView.address.pick");
-    fireEvent.click(btn);
-    expect(screen.getByTestId("address-picker")).toBeTruthy();
-    fireEvent.click(btn);
-    expect(screen.queryByTestId("address-picker")).toBeNull();
+    // One gesture only: typing `@`. The button was removed with its label.
+    expect(screen.queryByLabelText("chatView.address.pick")).toBeNull();
   });
 
-  it("anchors the list to whichever gesture opened it", () => {
+  it("anchors the list to the composer, not the toolbar", () => {
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-    const btn = screen.getByLabelText("chatView.address.pick");
-    // Clicked: the popup hangs off the toolbar button it came from.
-    fireEvent.click(btn);
-    expect(
-      screen
-        .getByTestId("address-picker")
-        .closest('[data-toolbar-cluster="right"]'),
-    ).not.toBeNull();
-    fireEvent.click(btn);
-    // Typed: it belongs above the composer, not under the toolbar.
     fireEvent.keyDown(screen.getByRole("textbox"), {
       key: "@",
       target: { selectionStart: 0 },

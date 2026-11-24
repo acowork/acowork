@@ -58,7 +58,6 @@ import {
   Loader2,
   ChevronDown,
   ChevronsDown,
-  AtSign,
   Quote,
 } from "lucide-react";
 import { formatBubbleTime } from "../../lib/formatTime";
@@ -561,11 +560,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   // The second level of the `@` (ADR-106 D7). On this surface the first level is
   // degenerate — one agent — so the human names only the task. `addressStage` is
-  // where the open list hangs from (`null` = closed), `address` is "what was
-  // chosen for this draft".
-  const [addressStage, setAddressStage] = useState<"button" | "typed" | null>(
-    null,
-  );
+  // whether the list is open (`null` = closed); the one gesture that opens it is
+  // typing `@`. `address` is "what was chosen for this draft".
+  const [addressStage, setAddressStage] = useState<"typed" | null>(null);
   const [address, setAddress] = useState<AddressPick | null>(null);
   // ADR-106 revision 2026-11-04: the run whose block the `@` picker's "去续投"
   // just located — that block reveals + focuses its in-place reply box. Cleared
@@ -591,9 +588,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const pendingRefs = useChatSessionStore((s) => s.attachedContext[sessionId] ?? EMPTY_REFS);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // The `@` toggle, exempt from the address picker's outside-click close so
-  // clicking it again collapses the list instead of close-then-reopen.
-  const addressBtnRef = useRef<HTMLButtonElement>(null);
   const lastCompositionEndRef = useRef(0);
   // The scroll viewport, captured alongside `useStickToBottom`'s callback ref
   // so the locate effect can query `[data-seq]` rows within it.
@@ -1280,16 +1274,15 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     }
   };
 
-  // One picker, two anchor points: the toolbar button opens it under its own
-  // icon, the typed `@` opens it above the composer. `anchorRef` is the button
-  // in both cases, so a click on the toggle still closes what it opened.
+  // The task list the typed `@` opens above the composer. One gesture, one
+  // anchor: nothing else can reach it, so there is no toggle to exempt from the
+  // picker's outside-click close.
   const addressPicker = (
     <ChatAddressPicker
       instanceId={agentId}
       /** The pair's own chat: the listing is narrowed to what this conversation
        *  may address, so the id is part of the request, not a label. */
       chatSessionId={sessionId}
-      anchorRef={addressBtnRef}
       onPick={(pick) => {
         setAddress(pick.refs?.length || pick.forceNew ? pick : null);
         setAddressStage(null);
@@ -1560,10 +1553,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         )}
         {/* Second level of the `@` — the agent's own routable tasks, opened by
             typing `@` in the composer: it belongs above the text it was typed
-            into. The button's own popup anchors under that button instead. No
-            `mousedown` preventDefault on this shell: the picker holds a search
-            box, and cancelling a mousedown is precisely what cancels the focus
-            it would hand the input. Every pick path refocuses the composer. */}
+            into. No `mousedown` preventDefault on this shell: the picker holds a
+            search box, and cancelling a mousedown is precisely what cancels the
+            focus it would hand the input. Every pick path refocuses the
+            composer. */}
         {addressStage === "typed" && (
           <div className="absolute bottom-full left-3 z-20 mb-2">
             {addressPicker}
@@ -1599,12 +1592,13 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             )}
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
             onKeyDown={(e) => {
-              /** Typing `@` at the start of a word opens the same task list the
-               *  toolbar button opens (ADR-106 D7) — one gesture on both chats.
-               *  The character is NOT inserted: here the address rides the chip
-               *  above the composer, not the message text, so a leftover `@`
-               *  would be noise the model has to read. A mid-word `@` (an email)
-               *  stays literal, the rule the group's `detectMention` uses. */
+              /** Typing `@` at the start of a word opens the task list (ADR-106
+               *  D7) — one gesture on both chats, and the only one: the toolbar
+               *  has no `@` button any more. The character is NOT inserted: here
+               *  the address rides the chip above the composer, not the message
+               *  text, so a leftover `@` would be noise the model has to read. A
+               *  mid-word `@` (an email) stays literal, the rule the group's
+               *  `detectMention` uses. */
               if (
                 e.key === "@" &&
                 !e.ctrlKey &&
@@ -1691,30 +1685,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             data-toolbar-cluster="right"
             className="flex shrink-0 items-center gap-1"
           >
-            {/* The button opens the list above itself, right-aligned to its own
-                icon — a popup that appeared across the composer from the click
-                would not read as belonging to it. */}
-            <div className="relative">
-              <Tooltip content={t("chatView.address.pick")} variant="plain">
-                <button
-                  ref={addressBtnRef}
-                  className={cn(
-                    toolbarIconButton,
-                    addressStage && "bg-nav-item-hover",
-                  )}
-                  onClick={() => setAddressStage((v) => (v ? null : "button"))}
-                  aria-label={t("chatView.address.pick")}
-                  aria-expanded={addressStage !== null}
-                >
-                  <AtSign size={16} />
-                </button>
-              </Tooltip>
-              {addressStage === "button" && (
-                <div className="absolute bottom-full right-0 z-20 mb-2">
-                  {addressPicker}
-                </div>
-              )}
-            </div>
             {/* Per-chat ledger read (plan §4.6 phase two): the pair's
                 router spend lives on this one agent. */}
             <ChatUsageIcon

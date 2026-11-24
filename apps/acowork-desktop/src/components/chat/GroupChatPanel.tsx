@@ -47,7 +47,6 @@ import {
   ChevronDown,
   ChevronsDown,
   ArrowRight,
-  AtSign,
   Quote,
 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -889,8 +888,6 @@ export function GroupChatPanel() {
     start: number;
   } | null>(null);
   const [mentionActive, setMentionActive] = useState(0);
-  /** Which gesture opened the popup, so it can hang off the right thing. */
-  const [mentionAnchor, setMentionAnchor] = useState<"button" | "typed">("typed");
   const pickerRef = useRef<HTMLDivElement>(null);
   // Second level of the `@` (ADR-106 D7): the agent whose task list is open.
   // It is a stage, not a choice — choosing is `addresses`.
@@ -1169,51 +1166,9 @@ export function GroupChatPanel() {
 
   // Typing: the popup follows the text and the caret, hanging off the composer.
   const syncMention = useCallback((value: string, caret: number) => {
-    setMentionAnchor("typed");
     setMention(detectMention(value, caret));
     setMentionActive(0);
   }, []);
-
-  // A caret move. React dispatches `onSelect` on focus, so this also runs when
-  // the button's own popup takes the focus: a caret still sitting where the
-  // button opened the picker is that dispatch, not a human gesture, and
-  // re-deriving the popup there would move it off the button and out from under
-  // the click that was about to land on it.
-  const syncCaret = useCallback(
-    (value: string, caret: number) => {
-      if (mentionAnchor === "button" && mention && caret === mention.start) {
-        return;
-      }
-      syncMention(value, caret);
-    },
-    [mentionAnchor, mention, syncMention],
-  );
-
-  // The toolbar's `@` — the same picker typing `@` opens, reachable without
-  // knowing the shortcut (ADR-106 D7's ladder is one gesture, not two grammars).
-  // The draft is untouched either way: the button opens the picker, and picking
-  // a name is what writes `@name ` into the text.
-  const openMentionPicker = useCallback(() => {
-    // A second click on the button closes what it opened: it advertises its own
-    // state through `aria-expanded`, so it must be able to take it back.
-    if (mention && mentionAnchor === "button") {
-      setMention(null);
-      return;
-    }
-    setMentionAnchor("button");
-    const ta = textareaRef.current;
-    const caret = ta?.selectionStart ?? draft.length;
-    // Nothing is typed: the button is a door, not a keystroke. The popup opens
-    // over the caret, and picking a name is the one gesture that writes one —
-    // an `@` dropped into the draft would be a character the human never typed
-    // (and one they then have to delete).
-    setMention(detectMention(draft, caret) ?? { query: "", start: caret });
-    setMentionActive(0);
-    // Focus only, no `setSelectionRange`: a caret move here fires `select`,
-    // which re-syncs the popup against the text and re-anchors it to the
-    // composer — the button's popup would leap away from the button.
-    ta?.focus();
-  }, [draft, mention, mentionAnchor]);
 
   const pickMention = useCallback(
     (candidate: { id: string; name: string; isAgent: boolean }) => {
@@ -1773,8 +1728,8 @@ export function GroupChatPanel() {
       : activeGroupId.slice(0, 8)
     : group?.title || activeGroupId.slice(0, 8);
 
-  // One popup, two anchors: the toolbar button opens it under its own icon,
-  // a typed `@` opens it above the composer, where the character was typed.
+  // The group address popup, opened only by typing `@` above the composer —
+  // where the character was typed.
   const mentionPopup = mention && mentionCandidates.length > 0 && (
             <div
               onMouseDown={(e) => e.preventDefault()}
@@ -2133,11 +2088,9 @@ export function GroupChatPanel() {
                 ))}
               </div>
             )}
-            {mentionAnchor !== "button" && (
-              <div className="absolute bottom-full left-3 z-20 mb-2">
-                {mentionPopup}
-              </div>
-            )}
+            <div className="absolute bottom-full left-3 z-20 mb-2">
+              {mentionPopup}
+            </div>
             {/* Second level of the `@` (ADR-106 D7) — the agent's task list,
                 opened by picking the agent. Same anchor as the first level, so
                 the two read as one interaction. Unlike the first level, this
@@ -2173,7 +2126,7 @@ export function GroupChatPanel() {
                   }}
                   onSelect={(e) => {
                     const ta = e.currentTarget;
-                    syncCaret(ta.value, ta.selectionStart ?? ta.value.length);
+                    syncMention(ta.value, ta.selectionStart ?? ta.value.length);
                   }}
                   onKeyDown={(e) => {
                     // A second level left open is a question on the screen: Enter
@@ -2252,35 +2205,6 @@ export function GroupChatPanel() {
                 data-toolbar-cluster="right"
                 className="flex shrink-0 items-center gap-1"
               >
-                {/* `@` — the first level of the group address (agents and
-                    people, design 27 §5.3.1). Hidden where there is nobody to
-                    mention: a human-only DM has no picker to open. */}
-                {mentionParticipants.length > 0 && (
-                  <div className="relative">
-                  <Tooltip
-                    content={t("groupChat.mentionLabel")}
-                    variant="plain"
-                  >
-                    <button
-                      className={cn(
-                        toolbarIconButton,
-                        mention && "bg-nav-item-hover",
-                      )}
-                      onClick={openMentionPicker}
-                      disabled={sending}
-                      aria-label={t("groupChat.mentionLabel")}
-                      aria-expanded={!!mention}
-                    >
-                      <AtSign size={16} />
-                    </button>
-                  </Tooltip>
-                    {mentionAnchor === "button" && (
-                      <div className="absolute bottom-full right-0 z-20 mb-2">
-                        {mentionPopup}
-                      </div>
-                    )}
-                  </div>
-                )}
                 {/* Per-chat ledger read (plan §4.6 phase two): one row per
                     agent participant, merged client-side. A human-only DM
                     has no agent roster and the button hides itself. */}

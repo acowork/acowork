@@ -238,27 +238,22 @@ describe("GroupChatPanel @-mention right-click menu", () => {
   });
 
   /**
-   * The toolbar's `@` is a door, not a keystroke: opening the picker must leave
-   * the composer byte-for-byte as the human left it, and picking a name there
-   * must be the whole gesture — the popup the button opened cannot jump back to
-   * the composer anchored on the caret and ask the same question twice.
+   * Typing `@` is the only door to the picker (the toolbar glyph was removed):
+   * the popup the token opens is the whole gesture — picking a name from it must
+   * not ask the same question twice.
    */
-  it("the toolbar @ button opens the picker without typing an @", async () => {
+  it("typing `@` opens the mention picker", async () => {
     render(<GroupChatPanel />);
-    fireEvent.change(composer(), { target: { value: "hi " } });
-    composer().setSelectionRange(3, 3);
-
-    fireEvent.click(screen.getByLabelText("groupChat.mentionLabel"));
+    fireEvent.change(composer(), { target: { value: "@" } });
 
     const picker = await screen.findByRole("listbox");
     expect(within(picker).getByText("Agent A")).toBeTruthy();
-    expect(composer().value).toBe("hi ");
   });
 
-  it("picks a name straight from the button's picker, in one gesture", async () => {
+  it("picks a name straight from the typed picker, in one gesture", async () => {
     render(<GroupChatPanel />);
 
-    fireEvent.click(screen.getByLabelText("groupChat.mentionLabel"));
+    fireEvent.change(composer(), { target: { value: "@" } });
     fireEvent.click(within(await screen.findByRole("listbox")).getByText("Agent A"));
 
     // The token lands at the caret without a second click, and the caret ends up
