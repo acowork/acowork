@@ -323,13 +323,18 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
       void loadCatalog(false);
       return;
     }
-    // The paint came off the disk seed — validate it against the Hub once
-    // per mount. `force: false` keeps the PRD §7 session-cache semantics:
-    // a memory cache already fetched this session answers without a request.
-    if (catalog !== null && needsRevalidate.current && !loadingCatalog) {
+    // The paint came off the disk seed — validate it against the Hub, but
+    // only once the user is actually looking at the tab. The strip above
+    // the cards is the ONLY signal of that refresh, and a revalidation
+    // fired on dialog open is answered (session cache, or a fast LAN
+    // round-trip) before the tab is ever switched to — invisible by
+    // construction. Cold machines keep the REQ-022 warm-on-open: that
+    // branch is above and does not depend on the tab.
+    // `force: false` keeps the PRD §7 session-cache semantics.
+    if (tab === "library" && catalog !== null && needsRevalidate.current && !loadingCatalog) {
       void loadCatalog(false);
     }
-  }, [open, catalog, catalogError, loadingCatalog, loadCatalog]);
+  }, [open, tab, catalog, catalogError, loadingCatalog, loadCatalog]);
 
   const visibleAgents = useMemo(
     () => searchHubAgents(catalog ?? [], query),

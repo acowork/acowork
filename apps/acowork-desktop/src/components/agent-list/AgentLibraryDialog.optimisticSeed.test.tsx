@@ -134,6 +134,22 @@ describe("Agent 库 optimistic first paint", () => {
     expect(screen.getByRole("status").textContent).toContain("common.loading");
   });
 
+  it("defers the seeded revalidation to the tab visit, not the dialog open", async () => {
+    // The strip is only ever visible while the user is ON the tab, so the
+    // revalidation must fire when the tab becomes visible — firing it on
+    // open (as it first did) meant the answer landed before the switch and
+    // the strip was invisible by construction.
+    writeCatalog("hubIndex", INDEX);
+    localOnly(new Promise(() => {}));
+    render(<AgentLibraryDialog open onClose={() => {}} />);
+    expect(h.invoke).not.toHaveBeenCalledWith("fetch_hub_index");
+    fireEvent.click(screen.getByRole("tab", { name: "agentHub.tabLibrary" }));
+    await waitFor(() =>
+      expect(h.invoke).toHaveBeenCalledWith("fetch_hub_index"),
+    );
+    expect(screen.getByRole("status").textContent).toContain("common.loading");
+  });
+
   it("drops the strip when the Hub answers with the same catalog", async () => {
     writeCatalog("hubIndex", INDEX);
     let resolveHub: (v: unknown) => void = () => {};
