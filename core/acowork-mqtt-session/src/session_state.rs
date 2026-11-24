@@ -15,12 +15,10 @@
 //!
 //! ```mermaid
 //! graph LR
-//!     Idle --> Connecting
 //!     Connecting --> Connected
 //!     Connecting --> Retrying
 //!     Connected --> Retrying
 //!     Retrying --> Connecting
-//!     Retrying --> Failed
 //!     Connecting --> Closed
 //!     Connected --> Closed
 //!     Retrying --> Closed
@@ -28,13 +26,12 @@
 //!
 //! | state | event exit | time exit | bound |
 //! |---|---|---|---|
-//! | `Idle` | connect call | — | entered only before the first attempt |
 //! | `Connecting` | ConnAck / error | poll watchdog | `POLL_WATCHDOG_TIMEOUT` |
 //! | `Connected` | error / DISCONNECT | poll watchdog + keepalive | `POLL_WATCHDOG_TIMEOUT` |
 //! | `Retrying` | force-restart | backoff elapses | `ReconnectPolicy.max` / `FATAL_BACKOFF` |
-//! | `Disabled` / `Failed` / `Closed` | terminal — always emitted | — | — |
+//! | `Closed` | terminal — always emitted | — | — |
 //!
-//! Two consequences a consumer can rely on:
+//! Three consequences a consumer can rely on:
 //!
 //! 1. **The state value changes within a bounded time even during a
 //!    total outage.** `Retrying` carries `attempt` and `retry_in`, so
@@ -44,6 +41,30 @@
 //! 2. **A terminal state is always published before the sender goes
 //!    away.** A closed watch channel is an implementation bug, not a
 //!    normal branch (see [`StateWait::SourceGone`]).
+//! 3. **The declared state set equals the reachable state set.** Every
+//!    variant here has a production producer in `client.rs`. A variant
+//!    nothing can enter is not documentation — it is a trap that makes
+//!    consumers write branches that never run while the verdict they
+//!    actually need is never produced.
+//!
+//! # Why there is no `Failed` / `Disabled` / `Idle`
+//!
+//! Removed deliberately (they were declared, consumed by two renderers,
+//! and produced by nothing):
+//!
+//! - **No `Failed`.** A session is a supervised resource: every failure
+//!   it can observe is retryable given time or fresh credentials, so it
+//!   never gives up and has no "abandoned" state. Even `AuthRefused` is
+//!   transient — the remote CONNECT verifier refuses every login until
+//!   the user service finishes loading. A bounded fatal budget would
+//!   therefore kill sessions that were about to recover. The *permanent*
+//!   verdict belongs one layer up: the readiness projection marks the
+//!   subsystem `Failed` when the session cannot be constructed at all.
+//! - **No `Disabled`.** A disabled connection is never constructed, so
+//!   no session exists to report it. "Switched off" is owned by the
+//!   readiness layer (`Skipped`), which knows the configuration.
+//! - **No `Idle`.** The channel is created with `Connecting` because a
+//!   session is only ever created in order to connect.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,15 +78,6 @@ use tokio::sync::watch;
 /// intermediate state it does not know about.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SessionState {
-    /// The connection is switched off by configuration. Terminal, and
-    /// deliberately distinct from a failure: nothing is wrong and
-    /// nothing will ever connect, so a readiness projection maps this
-    /// to "skipped" rather than "booting".
-    Disabled,
-
-    /// No connection attempt has been made yet.
-    Idle,
-
     /// `AsyncClient` created, waiting for `ConnAck`. Bounded by the
     /// poll watchdog: a black-holed TCP connect cannot park here
     /// forever.
@@ -92,13 +104,6 @@ pub enum SessionState {
         retry_in: Duration,
     },
 
-    /// Stopped for a reason that retrying cannot fix (bad
-    /// configuration, rejected credentials). Terminal.
-    Failed {
-        /// Human-readable, actionable reason.
-        reason: String,
-    },
-
     /// Stopped because the owner asked for it (shutdown, client
     /// dropped, gateway URL switched). Terminal.
     Closed {
@@ -118,22 +123,16 @@ impl SessionState {
     /// state that may progress to `Connected`.
     pub fn is_transient(&self) -> bool {
         match self {
-            SessionState::Idle | SessionState::Connecting | SessionState::Retrying { .. } => true,
-            SessionState::Connected
-            | SessionState::Disabled
-            | SessionState::Failed { .. }
-            | SessionState::Closed { .. } => false,
+            SessionState::Connecting | SessionState::Retrying { .. } => true,
+            SessionState::Connected | SessionState::Closed { .. } => false,
         }
     }
 
     /// Returns `true` if the session has stopped for good.
     pub fn is_terminal(&self) -> bool {
         match self {
-            SessionState::Disabled | SessionState::Failed { .. } | SessionState::Closed { .. } => {
-                true
-            }
-            SessionState::Idle
-            | SessionState::Connecting
+            SessionState::Closed { .. } => true,
+            SessionState::Connecting
             | SessionState::Connected
             | SessionState::Retrying { .. } => false,
         }
@@ -143,11 +142,8 @@ impl SessionState {
     pub fn attempt(&self) -> Option<u32> {
         match self {
             SessionState::Retrying { attempt, .. } => Some(*attempt),
-            SessionState::Disabled
-            | SessionState::Idle
-            | SessionState::Connecting
+            SessionState::Connecting
             | SessionState::Connected
-            | SessionState::Failed { .. }
             | SessionState::Closed { .. } => None,
         }
     }
@@ -155,13 +151,8 @@ impl SessionState {
     /// The cause carried by this state, if any.
     pub fn reason(&self) -> Option<&str> {
         match self {
-            SessionState::Retrying { reason, .. }
-            | SessionState::Failed { reason }
-            | SessionState::Closed { reason } => Some(reason),
-            SessionState::Disabled
-            | SessionState::Idle
-            | SessionState::Connecting
-            | SessionState::Connected => None,
+            SessionState::Retrying { reason, .. } | SessionState::Closed { reason } => Some(reason),
+            SessionState::Connecting | SessionState::Connected => None,
         }
     }
 }
@@ -169,8 +160,6 @@ impl SessionState {
 impl std::fmt::Display for SessionState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SessionState::Disabled => write!(f, "disabled"),
-            SessionState::Idle => write!(f, "idle"),
             SessionState::Connecting => write!(f, "connecting"),
             SessionState::Connected => write!(f, "connected"),
             SessionState::Retrying {
@@ -182,7 +171,6 @@ impl std::fmt::Display for SessionState {
                 "retrying #{attempt} in {}ms ({reason})",
                 retry_in.as_millis()
             ),
-            SessionState::Failed { reason } => write!(f, "failed ({reason})"),
             SessionState::Closed { reason } => write!(f, "closed ({reason})"),
         }
     }
@@ -289,6 +277,14 @@ impl SessionStateRx {
         // call would observe the same already-consumed change and
         // return immediately — a busy loop for any consumer driving
         // itself off `changed()`.
+        //
+        // Cancellation needs no special handling: `watch::Receiver::changed`
+        // advances the seen version only when it *returns* (tokio's
+        // `maybe_changed`), and there is no await point between that
+        // return and the write-back below. A cancelled wait therefore
+        // drops an unadvanced clone — identical to the stored one — so
+        // the cursor can never rewind. Pinned by
+        // `cancelled_wait_does_not_rewind_the_cursor`.
         let mut rx = self.rx.lock().unwrap().clone();
         let result = rx.changed().await;
         let state = rx.borrow().clone();
@@ -353,8 +349,8 @@ mod tests {
 
     #[test]
     fn state_transitions() {
-        assert!(SessionState::Idle.is_transient());
-        assert!(!SessionState::Idle.is_connected());
+        assert!(SessionState::Connecting.is_transient());
+        assert!(!SessionState::Connecting.is_connected());
 
         assert!(SessionState::Connected.is_connected());
         assert!(!SessionState::Connected.is_transient());
@@ -362,41 +358,39 @@ mod tests {
         assert!(retrying("test").is_transient());
         assert!(!retrying("test").is_connected());
 
-        for terminal in [
-            SessionState::Disabled,
-            SessionState::Failed {
-                reason: "test".into(),
-            },
+        let terminal = SessionState::Closed {
+            reason: "test".into(),
+        };
+        assert!(terminal.is_terminal(), "{terminal} must be terminal");
+        assert!(!terminal.is_connected());
+        assert!(!terminal.is_transient());
+    }
+
+    /// Every declared variant must be classified by every predicate.
+    /// With `Closed` the only terminal, a future variant that is neither
+    /// transient nor terminal would slip through `is_transient` /
+    /// `is_terminal` unnoticed — this pins the partition.
+    #[test]
+    fn every_state_is_either_transient_connected_or_terminal() {
+        for state in [
+            SessionState::Connecting,
+            SessionState::Connected,
+            retrying("test"),
             SessionState::Closed {
                 reason: "test".into(),
             },
         ] {
-            assert!(terminal.is_terminal(), "{terminal} must be terminal");
-            assert!(!terminal.is_connected());
-            assert!(!terminal.is_transient());
+            let classified = state.is_transient() as u8
+                + state.is_connected() as u8
+                + state.is_terminal() as u8;
+            assert_eq!(classified, 1, "{state} must belong to exactly one class");
         }
-    }
-
-    /// `Disabled` is a terminal state, not a failure: a readiness
-    /// projection must be able to tell "switched off" from "broken".
-    #[test]
-    fn disabled_is_terminal_and_carries_no_reason() {
-        assert!(SessionState::Disabled.is_terminal());
-        assert_eq!(SessionState::Disabled.reason(), None);
-        assert_eq!(SessionState::Disabled.to_string(), "disabled");
     }
 
     #[test]
     fn display_formats() {
-        assert_eq!(SessionState::Idle.to_string(), "idle");
+        assert_eq!(SessionState::Connecting.to_string(), "connecting");
         assert_eq!(SessionState::Connected.to_string(), "connected");
-        assert_eq!(
-            SessionState::Failed {
-                reason: "boom".into()
-            }
-            .to_string(),
-            "failed (boom)"
-        );
         assert_eq!(
             SessionState::Closed {
                 reason: "bye".into()
@@ -451,8 +445,8 @@ mod tests {
 
     #[tokio::test]
     async fn watch_channel_delivers_changes() {
-        let (tx, rx) = SessionStateTx::new(SessionState::Idle);
-        assert_eq!(rx.current(), SessionState::Idle);
+        let (tx, rx) = SessionStateTx::new(SessionState::Connecting);
+        assert_eq!(rx.current(), SessionState::Connecting);
 
         tx.set(SessionState::Connecting);
         tokio::task::yield_now().await;
@@ -472,7 +466,7 @@ mod tests {
     /// consumer.
     #[tokio::test]
     async fn changed_does_not_replay_an_already_consumed_change() {
-        let (tx, rx) = SessionStateTx::new(SessionState::Idle);
+        let (tx, rx) = SessionStateTx::new(SessionState::Connecting);
         tx.set(SessionState::Connecting);
         assert_eq!(rx.changed().await.unwrap(), SessionState::Connecting);
 
@@ -513,7 +507,7 @@ mod tests {
 
     #[test]
     fn clone_shares_state() {
-        let (tx, rx) = SessionStateTx::new(SessionState::Idle);
+        let (tx, rx) = SessionStateTx::new(SessionState::Connecting);
         let tx_clone = tx.clone();
         drop(rx);
 
@@ -577,4 +571,17 @@ mod tests {
             .await;
         assert_eq!(outcome, StateWait::SourceGone);
     }
+
+    #[tokio::test]
+    async fn cancelled_wait_does_not_rewind_the_cursor() {
+        let (tx, rx) = SessionStateTx::new(SessionState::Connecting);
+        tx.set(retrying("a"));
+        let out = rx
+            .wait_for(|s| matches!(s, SessionState::Connected), Duration::from_millis(5))
+            .await;
+        assert!(matches!(out, StateWait::Elapsed(_)));
+        let blocked = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+        assert!(blocked.is_err(), "cursor rewound: replayed a consumed change");
+    }
+
 }

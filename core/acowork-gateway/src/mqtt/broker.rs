@@ -625,6 +625,13 @@ fn spawn_listen_probe(
         .spawn(move || {
             let started = std::time::Instant::now();
             let mut warned = false;
+            // Each attempt is a full CONNECT, so the interval backs off:
+            // a fixed 50 ms would drive 20 CONNECT/s against our own
+            // broker for as long as it stays unreachable. Fast at first
+            // (the normal case is a listener that is already up), then
+            // settling at 1 s — the probe is a liveness check, not a
+            // readiness race.
+            let mut interval = std::time::Duration::from_millis(50);
             while !flag.load(std::sync::atomic::Ordering::SeqCst) {
                 if mqtt_connack_probe(&probe_addr, password.as_deref().unwrap_or("")) {
                     tracing::info!(addr = %listen_addr, "MQTT broker confirmed serving (CONNECT accepted)");
@@ -638,7 +645,14 @@ fn spawn_listen_probe(
                         "MQTT broker still not accepting connections after 5s"
                     );
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                // Slice the sleep so `stop()` stays responsive.
+                let until = std::time::Instant::now() + interval;
+                while std::time::Instant::now() < until
+                    && !flag.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                interval = (interval * 2).min(std::time::Duration::from_secs(1));
             }
         })
         .ok();

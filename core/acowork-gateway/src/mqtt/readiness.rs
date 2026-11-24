@@ -51,18 +51,14 @@ pub type Projection = (SubsystemState, String);
 ///
 /// Transient states map to `Booting`, never to `Failed`: a connection
 /// that is being retried is still on its way to `Ready`, and demoting
-/// the whole Gateway to `FAILED` for a blip would be a lie. Only states
-/// the session itself declares non-recoverable map to `Failed`.
+/// the whole Gateway to `FAILED` for a blip would be a lie. Only
+/// `Closed` — the owner stopped the session for good — maps to `Failed`.
+///
+/// `Skipped` is deliberately absent: a disabled connection is never
+/// constructed, so no session exists to project. The configuration path
+/// in `gateway/mod.rs` marks the record `Skipped` itself.
 pub fn project(state: &SessionState) -> Projection {
     match state {
-        SessionState::Disabled => (
-            SubsystemState::Skipped,
-            "mqtt disabled by configuration".to_string(),
-        ),
-        SessionState::Idle => (
-            SubsystemState::Booting,
-            "mqtt session idle".to_string(),
-        ),
         SessionState::Connecting => (
             SubsystemState::Booting,
             "mqtt connecting to broker".to_string(),
@@ -79,10 +75,6 @@ pub fn project(state: &SessionState) -> Projection {
                 retry_in.as_millis()
             ),
         ),
-        SessionState::Failed { reason } => (
-            SubsystemState::Failed,
-            format!("mqtt session failed: {reason}"),
-        ),
         SessionState::Closed { reason } => (
             SubsystemState::Failed,
             format!("mqtt session closed: {reason}"),
@@ -97,9 +89,9 @@ pub fn project(state: &SessionState) -> Projection {
 /// happened), then forwards every subsequent change.
 ///
 /// The task ends only when the state source is gone. That is a bug
-/// path, not a shutdown path — a correct owner publishes `Closed` /
-/// `Failed` before dropping the sender — and it is recorded as a
-/// failure rather than left as a stale `Booting`.
+/// path, not a shutdown path — a correct owner publishes `Closed`
+/// before dropping the sender — and it is recorded as a failure rather
+/// than left as a stale `Booting`.
 pub fn spawn_projection(state_rx: SessionStateRx, handle: SubsystemHandle) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let (state, detail) = project(&state_rx.current());
@@ -121,6 +113,9 @@ pub fn spawn_projection(state_rx: SessionStateRx, handle: SubsystemHandle) -> to
     })
 }
 
+/// Total over the registry's vocabulary. `Skipped` is not produced by
+/// [`project`] (see its docs) but is a real registry state, so the
+/// forwarder stays exhaustive rather than growing a wildcard arm.
 fn apply(handle: &SubsystemHandle, state: SubsystemState, detail: String) {
     match state {
         SubsystemState::Ready => handle.mark_ready(Some(detail)),
@@ -147,17 +142,12 @@ mod tests {
     #[test]
     fn projection_is_total_and_only_connected_is_ready() {
         let cases = vec![
-            SessionState::Disabled,
-            SessionState::Idle,
             SessionState::Connecting,
             SessionState::Connected,
             SessionState::Retrying {
                 reason: "connection refused".into(),
                 attempt: 3,
                 retry_in: Duration::from_secs(4),
-            },
-            SessionState::Failed {
-                reason: "bad credentials".into(),
             },
             SessionState::Closed {
                 reason: "client dropped".into(),
@@ -168,11 +158,8 @@ mod tests {
             assert!(!detail.is_empty(), "{state:?} must explain itself");
             match state {
                 SessionState::Connected => assert_eq!(verdict, SubsystemState::Ready),
-                SessionState::Disabled => assert_eq!(verdict, SubsystemState::Skipped),
-                SessionState::Failed { .. } | SessionState::Closed { .. } => {
-                    assert_eq!(verdict, SubsystemState::Failed)
-                }
-                SessionState::Idle | SessionState::Connecting | SessionState::Retrying { .. } => {
+                SessionState::Closed { .. } => assert_eq!(verdict, SubsystemState::Failed),
+                SessionState::Connecting | SessionState::Retrying { .. } => {
                     assert_eq!(verdict, SubsystemState::Booting)
                 }
             }

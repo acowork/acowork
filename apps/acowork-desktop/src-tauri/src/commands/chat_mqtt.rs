@@ -2050,11 +2050,6 @@ mod tests {
 fn mqtt_status_to_payload(state: &acowork_mqtt_session::SessionState) -> serde_json::Value {
     use acowork_mqtt_session::SessionState;
     match state {
-        SessionState::Idle => serde_json::json!({
-            "known": false,
-            "connected": false,
-            "reason": null,
-        }),
         // `Connecting` means the client exists and is actively trying to
         // connect (initial connect or after force_reconnect).  We return
         // `known: true` so the frontend updates its store and starts the
@@ -2066,8 +2061,9 @@ fn mqtt_status_to_payload(state: &acowork_mqtt_session::SessionState) -> serde_j
             "reason": null,
         }),
         // An attempt failed and the next one is scheduled. `attempt` and
-        // `retry_in_ms` are what let the UI show progress during a total
-        // outage instead of a frozen "reconnecting" label.
+        // `retry_in_ms` are emitted for diagnostics consumers; the chat
+        // store's `MqttStatusSnapshot` does not transport them today, so
+        // the UI still renders a plain "reconnecting" label.
         SessionState::Retrying {
             reason,
             attempt,
@@ -2083,21 +2079,6 @@ fn mqtt_status_to_payload(state: &acowork_mqtt_session::SessionState) -> serde_j
         SessionState::Connected => serde_json::json!({
             "known": true,
             "connected": true,
-        }),
-        // Switched off by configuration — not a failure, and nothing will
-        // ever connect.
-        SessionState::Disabled => serde_json::json!({
-            "known": true,
-            "connected": false,
-            "disabled": true,
-            "reason": null,
-        }),
-        // Terminal: retrying cannot fix it.
-        SessionState::Failed { reason } => serde_json::json!({
-            "known": true,
-            "connected": false,
-            "failed": true,
-            "reason": reason,
         }),
         // Terminal: the owner closed it (shutdown, gateway URL switch).
         SessionState::Closed { reason } => serde_json::json!({

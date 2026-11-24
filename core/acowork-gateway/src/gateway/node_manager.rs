@@ -620,6 +620,82 @@ fn spawn_node_child(
     cmd.spawn()
 }
 
+/// Detects the end of a retained-message burst.
+///
+/// MQTT 3.1.1 has no end-of-retained marker, so completion cannot be
+/// read off the protocol. It is observed as **quiescence**: the consumer
+/// waits for arrival events and treats a short silence as "the burst is
+/// over". That is an event-driven wait with an inactivity timeout, not a
+/// guess about how long the broker needs.
+///
+/// It replaces a fixed `sleep(1500ms)`, which was wrong in both
+/// directions at once: always 1.5 s even when the data landed in 20 ms,
+/// and silently truncating any burst that took longer.
+///
+/// Two phases, because the first arrival and the gaps between arrivals
+/// have different causes:
+///
+/// - **First arrival** gets the longer budget — it covers ConnAck →
+///   SUBACK → broker queueing the retained set, which is not bounded by
+///   anything this process controls.
+/// - **Subsequent silence** gets the short quiet window — once the burst
+///   is flowing, loopback inter-message gaps are milliseconds.
+struct RetainedDrain {
+    arrivals: tokio::sync::watch::Sender<u64>,
+}
+
+impl RetainedDrain {
+    fn new() -> Self {
+        Self {
+            arrivals: tokio::sync::watch::channel(0).0,
+        }
+    }
+
+    /// Record that one retained message has been *fully applied*. Call
+    /// after the state update, not before, so quiescence means "everything
+    /// received has been written".
+    fn applied(&self) {
+        self.arrivals.send_modify(|n| *n += 1);
+    }
+
+    /// Wait for the burst to finish. Returns when no message has been
+    /// applied for `quiet`, or when `cap` elapses, or when no first
+    /// message arrives within `first_arrival`.
+    async fn wait(&self, first_arrival: Duration, quiet: Duration, cap: Duration) {
+        let mut rx = self.arrivals.subscribe();
+        let deadline = tokio::time::Instant::now() + cap;
+        // Phase 1: nothing received yet.
+        if *rx.borrow_and_update() == 0
+            && tokio::time::timeout(first_arrival, rx.changed())
+                .await
+                .is_err()
+        {
+            return;
+        }
+        // Phase 2: drain until the arrivals go quiet.
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            if tokio::time::timeout(quiet.min(remaining), rx.changed())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+/// Budgets for the CLI retained drain. The first-arrival budget keeps
+/// the previous worst case (1.5 s) so a slow SUBACK cannot make the
+/// command report an empty fleet; the quiet window is what makes the
+/// common case fast.
+const RETAINED_FIRST_ARRIVAL: Duration = Duration::from_millis(1500);
+const RETAINED_QUIET: Duration = Duration::from_millis(200);
+const RETAINED_CAP: Duration = Duration::from_secs(5);
+
 /// Connect to the running Gateway's broker as the publisher client and
 /// collect the retained node status/info topics into a NodeRegistry.
 ///
@@ -639,6 +715,8 @@ async fn collect_node_registry_via_mqtt(
     // The client subscribes node topics automatically on ConnAck (they
     // are in PERSISTENT_SUBSCRIPTIONS). The callback feeds the registry.
     let reg_for_cb = node_registry.clone();
+    let drain = Arc::new(RetainedDrain::new());
+    let drain_for_cb = drain.clone();
     let callback: MqttMessageCallback = Arc::new(move |topic, payload| {
         // Only node topics feed the node registry (the publisher client
         // also receives agent status/ready/http_endpoint messages).
@@ -646,13 +724,17 @@ async fn collect_node_registry_via_mqtt(
             return;
         }
         let reg = reg_for_cb.clone();
+        let drain = drain_for_cb.clone();
         tokio::spawn(async move {
-            let mut registry = reg.write().await;
-            if topic.ends_with("/status") {
-                registry.update_status_from_mqtt(&topic, &payload);
-            } else if topic.ends_with("/info") {
-                registry.update_info_from_mqtt(&topic, &payload);
+            {
+                let mut registry = reg.write().await;
+                if topic.ends_with("/status") {
+                    registry.update_status_from_mqtt(&topic, &payload);
+                } else if topic.ends_with("/info") {
+                    registry.update_info_from_mqtt(&topic, &payload);
+                }
             }
+            drain.applied();
         });
     });
 
@@ -665,8 +747,10 @@ async fn collect_node_registry_via_mqtt(
             ))
         })?;
 
-    // Let retained status/info messages drain in.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Wait for the retained status/info burst to finish (event-driven).
+    drain
+        .wait(RETAINED_FIRST_ARRIVAL, RETAINED_QUIET, RETAINED_CAP)
+        .await;
 
     drop(client);
     Ok(node_registry)
@@ -749,10 +833,13 @@ pub async fn drain_node_via_mqtt(
     let cb_installed = installed.clone();
     let cb_control = control_slot.clone();
     let cb_node_id = node_id.to_string();
+    let drain = Arc::new(RetainedDrain::new());
+    let drain_for_cb = drain.clone();
     let callback: MqttMessageCallback = Arc::new(move |topic, payload| {
         let node_id = cb_node_id.clone();
         let installed = cb_installed.clone();
         let control = cb_control.clone();
+        let drain = drain_for_cb.clone();
         let topic = topic.to_string();
         let payload = payload.to_vec();
         tokio::spawn(async move {
@@ -760,6 +847,9 @@ pub async fn drain_node_via_mqtt(
                 if !payload.is_empty() {
                     installed.lock().await.insert(agent_id);
                 }
+                // Only `installed` constitutes the retained drain; live
+                // command replies must not extend the quiet window.
+                drain.applied();
             } else if let Some(_agent_id) = extract_node_agent_id(&topic, &node_id, "events") {
                 // Correlate NodeEvent replies with in-flight commands.
                 if let Some(control) = control.get()
@@ -782,8 +872,10 @@ pub async fn drain_node_via_mqtt(
     let client = Arc::new(client);
     let _ = control_slot.set(Arc::new(NodeControlClient::new(client.clone())));
 
-    // Let retained `installed` messages drain in.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Wait for the retained `installed` burst to finish (event-driven).
+    drain
+        .wait(RETAINED_FIRST_ARRIVAL, RETAINED_QUIET, RETAINED_CAP)
+        .await;
 
     let agents: Vec<String> = installed.lock().await.iter().cloned().collect();
     let control = control_slot
@@ -854,11 +946,14 @@ pub async fn package_agent_via_mqtt(
     let inventory: Arc<Mutex<Vec<(String, InstalledAgentInfo)>>> = Arc::new(Mutex::new(Vec::new()));
     let control_slot: Arc<OnceLock<Arc<NodeControlClient>>> = Arc::new(OnceLock::new());
 
+    let drain = Arc::new(RetainedDrain::new());
+    let drain_for_cb = drain.clone();
     let cb_inventory = inventory.clone();
     let cb_control = control_slot.clone();
     let callback: MqttMessageCallback = Arc::new(move |topic, payload| {
         let inventory = cb_inventory.clone();
         let control = cb_control.clone();
+        let drain = drain_for_cb.clone();
         let topic = topic.to_string();
         let payload = payload.to_vec();
         tokio::spawn(async move {
@@ -868,6 +963,8 @@ pub async fn package_agent_via_mqtt(
                 && let Some(data_envelope::Payload::InstalledAgentInfo(info)) = envelope.payload
             {
                 inventory.lock().await.push((node_id, info));
+                // Only `installed` constitutes the retained drain.
+                drain.applied();
             } else if topic.ends_with("/events")
                 && let Some(control) = control.get()
                 && let Ok(envelope) = DataEnvelope::decode(payload.as_slice())
@@ -888,8 +985,10 @@ pub async fn package_agent_via_mqtt(
     let client = Arc::new(client);
     let _ = control_slot.set(Arc::new(NodeControlClient::new(client.clone())));
 
-    // Let retained `installed` messages drain in (same window as drain).
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Wait for the retained `installed` burst to finish (event-driven).
+    drain
+        .wait(RETAINED_FIRST_ARRIVAL, RETAINED_QUIET, RETAINED_CAP)
+        .await;
 
     // Resolve the CLI argument: instance UUID first (exact, ADR-073),
     // then package-id match. Multiple package-id matches are ambiguous
@@ -1292,4 +1391,91 @@ mod tests {
         assert_eq!(extract_node_agent_id("acowork/nodes/gpu-1", "gpu-1", "installed"), None);
         assert_eq!(extract_node_agent_id("", "gpu-1", "installed"), None);
     }
+
+    /// A burst that outlives the old fixed 1.5 s sleep must NOT be
+    /// truncated: the drain waits while messages keep arriving.
+    #[tokio::test]
+    async fn drain_waits_for_a_burst_longer_than_the_quiet_window() {
+        let drain = Arc::new(RetainedDrain::new());
+        let feeder = drain.clone();
+        tokio::spawn(async move {
+            for _ in 0..6 {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                feeder.applied();
+            }
+        });
+        // Quiet window 60 ms < the 180 ms burst: a fixed sleep of 60 ms
+        // would have returned after the first message.
+        drain
+            .wait(
+                Duration::from_millis(500),
+                Duration::from_millis(60),
+                Duration::from_secs(5),
+            )
+            .await;
+        assert_eq!(*drain.arrivals.borrow(), 6, "all arrivals must be applied");
+    }
+
+    /// The common case must be fast: once the burst ends the wait ends
+    /// with it, instead of always burning the first-arrival budget.
+    #[tokio::test]
+    async fn drain_returns_promptly_after_the_burst_ends() {
+        let drain = RetainedDrain::new();
+        drain.applied();
+        let started = tokio::time::Instant::now();
+        drain
+            .wait(
+                Duration::from_secs(30),
+                Duration::from_millis(40),
+                Duration::from_secs(60),
+            )
+            .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a finished burst must not wait out the first-arrival budget"
+        );
+    }
+
+    /// No retained data at all: bounded by the first-arrival budget,
+    /// never by the (much longer) overall cap.
+    #[tokio::test]
+    async fn drain_with_no_arrivals_is_bounded_by_first_arrival() {
+        let drain = RetainedDrain::new();
+        let started = tokio::time::Instant::now();
+        drain
+            .wait(
+                Duration::from_millis(80),
+                Duration::from_millis(20),
+                Duration::from_secs(30),
+            )
+            .await;
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(80));
+        assert!(elapsed < Duration::from_secs(1));
+    }
+
+    /// A publisher that never goes quiet must still terminate.
+    #[tokio::test]
+    async fn drain_is_capped_under_a_continuous_flood() {
+        let drain = Arc::new(RetainedDrain::new());
+        let feeder = drain.clone();
+        let (stop, mut stop_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            while !*stop_rx.borrow_and_update() {
+                feeder.applied();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let started = tokio::time::Instant::now();
+        drain
+            .wait(
+                Duration::from_millis(50),
+                Duration::from_millis(50),
+                Duration::from_millis(200),
+            )
+            .await;
+        let _ = stop.send(true);
+        assert!(started.elapsed() < Duration::from_secs(2), "cap must bound the wait");
+    }
+
 }
