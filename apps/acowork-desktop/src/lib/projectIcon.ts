@@ -13,9 +13,10 @@
 
 import { BUILTIN_ICONS } from "./builtinIcons";
 import { getGatewayUrl } from "./config";
-import projectDefaultIconUrl from "../assets/project-default-icon.png";
+import projectDefaultIconUrl from "../assets/nav-icons/projects.png";
 
-/** 默认项目图标（Vite `?url` 解析为哈希化静态资源 URL），未设置图标时兜底。 */
+/** 默认项目图标 = 左侧导航栏 PM 按钮的同一张 artwork（`assets/nav-icons/projects.png`），
+ *  未设置图标时的兜底。Vite `?url` 解析为哈希化静态资源 URL。 */
 export const DEFAULT_PROJECT_ICON = projectDefaultIconUrl;
 
 /** 项目图标引用（存进 `metadata.icon`）。 */
