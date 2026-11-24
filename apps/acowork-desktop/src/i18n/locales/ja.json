@@ -2195,12 +2195,12 @@
     "mentionMenu": "@{{name}}"
   },
   "agentHub": {
-    "dialogTitle": "Agent Library",
-    "tabLibrary": "Agent Library",
+    "dialogTitle": "Agent Hub",
+    "tabLibrary": "Agent Hub",
     "tabLocal": "Local",
-    "searchPlaceholder": "Search the library...",
+    "searchPlaceholder": "Search the hub...",
     "retry": "Retry",
-    "catalogEmpty": "The library is empty",
+    "catalogEmpty": "The hub is empty",
     "noResults": "No matching agents",
     "clearSearch": "Clear search",
     "install": "Install",

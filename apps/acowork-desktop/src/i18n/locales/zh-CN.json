@@ -353,7 +353,6 @@
     "address": {
       "label": "这条消息投给哪个任务？",
       "subject": "{{name}} — 投给哪个任务？",
-      "pick": "投给哪个任务",
       "composerHint": "输入消息...（@ 可选择投给哪个任务）",
       "noPreference": "不指定 — 由 agent 决定",
       "empty": "这里还没有可继续的任务",
@@ -650,12 +649,12 @@
     "nodeDeleted": "已从本网关移除该节点"
   },
   "agentHub": {
-    "dialogTitle": "Agent 库",
-    "tabLibrary": "Agent 库",
+    "dialogTitle": "Agent Hub",
+    "tabLibrary": "Agent Hub",
     "tabLocal": "本地",
     "searchPlaceholder": "搜索 Agent…",
     "retry": "重试",
-    "catalogEmpty": "Agent 库暂无内容",
+    "catalogEmpty": "Agent Hub 暂无内容",
     "noResults": "没有匹配的 Agent",
     "clearSearch": "清除搜索",
     "install": "安装",
