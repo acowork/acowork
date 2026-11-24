@@ -370,8 +370,23 @@ impl AgentLoop {
     pub(crate) async fn handle_stopped(&mut self, content: &str) -> IterationResult {
         self.transition_status(SessionStatus::Idle);
 
-        // Persist assistant message to JSONL conversation
-        if let Some(ref conversation) = self.session.conversation {
+        // Persist the partial reply — but only when the streaming line has NOT
+        // already done it. `streaming_flush_count` is reset at every LLM stream
+        // entry and bumped by every line flush, and every path that reaches a
+        // Stop has flushed first: mid-stream (`loop_llm`'s control arms), at
+        // `Finished` / `Error`, and at a tool boundary (`prepare_tool_calls`).
+        // So a non-zero count means the very text this Stop interrupted is
+        // already in JSONL, and appending `content` on top wrote the same
+        // assistant record twice — two identical bubbles in the transcript
+        // (2026-11-24 incident, transcript 20261124_160815_df5044).
+        let already_persisted = self
+            .session_core
+            .streaming_flush_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0;
+        if !already_persisted
+            && let Some(ref conversation) = self.session.conversation
+        {
             let assistant_text = strip_think_block(content);
             if !assistant_text.is_empty() {
                 conversation.append_message("assistant", &assistant_text, None);

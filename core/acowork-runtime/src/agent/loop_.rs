@@ -2933,6 +2933,85 @@ mod tests {
         assert!(!replayable[0].content.contains("<tool_image"));
     }
 
+    /// A Stop must leave the interrupted reply in the transcript ONCE.
+    ///
+    /// Every path that reaches `handle_stopped` has already flushed the open
+    /// streaming line to JSONL (mid-stream in `loop_llm`'s control arms, at
+    /// `Finished`/`Error`, and at a tool boundary in `prepare_tool_calls`), so
+    /// appending `content` there wrote a second identical assistant record —
+    /// two identical bubbles in the chat (2026-11-24 incident, transcript
+    /// 20261124_160815_df5044 lines 613/614, right before the inserted user
+    /// message).
+    #[tokio::test]
+    async fn handle_stopped_persists_the_interrupted_reply_once() {
+        use std::sync::atomic::AtomicUsize;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let work_dir = dir.path();
+        let session_id = "test-stop-persists-once";
+        let config = crate::conversation::SessionConfig {
+            agent_id: "com.test.loop".to_string(),
+            workspace_id: None,
+            model: None,
+            provider: None,
+        };
+        let (conversation, _config_rx, _state_rx) = ConversationSession::new(
+            work_dir,
+            session_id,
+            config,
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        let conversation = Arc::new(conversation);
+        let (mut agent_loop, _) = AgentLoop::new(
+            RuntimeConfig::default(),
+            test_manifest(),
+            Arc::new(MockProvider::single_text("ok")),
+            entries(vec![]),
+            test_budget(),
+            None,
+            Some(conversation.clone()),
+        );
+
+        // The shape a Stop actually leaves behind: the loop's Stop arm flushed
+        // the open assistant line into JSONL before returning the stopped
+        // response that `handle_stopped` is then handed.
+        agent_loop
+            .session_core
+            .flush_and_new_streaming_line("assistant", Some(&conversation));
+        agent_loop
+            .session_core
+            .append_streaming_delta("assistant", "half a sentence");
+        agent_loop
+            .session_core
+            .flush_streaming_line(Some(&conversation));
+
+        agent_loop.handle_stopped("half a sentence").await;
+        conversation.flush_pending().await.expect("flush should succeed");
+
+        let content = std::fs::read_to_string(
+            work_dir
+                .join("conversations")
+                .join(format!("{session_id}.jsonl")),
+        )
+        .unwrap();
+        let replies: Vec<crate::conversation::ConversationEntry> = content
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<crate::conversation::ConversationEntry>(line).unwrap()
+            })
+            .filter(|entry| entry.role == "assistant")
+            .collect();
+        assert_eq!(
+            replies.len(),
+            1,
+            "the interrupted reply must land once, not twice: {replies:?}"
+        );
+        assert_eq!(replies[0].content, "half a sentence");
+    }
+
     fn test_manifest() -> acowork_core::AgentManifest {
         acowork_core::AgentManifest::from_toml(
             r#"
