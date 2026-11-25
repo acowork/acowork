@@ -29,6 +29,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+#[path = "support/proc.rs"]
+mod proc;
+
 /// How long a *successful* boot may take before we call it a hang. Generous:
 /// the point is to catch "never binds", not to benchmark startup.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -82,7 +85,7 @@ impl Gateway {
             }
             sleep(Duration::from_millis(100));
         }
-        let _ = self.child.kill();
+        proc::terminate_tree(&mut self.child);
         panic!(
             "gateway did not serve on port {} within {BOOT_TIMEOUT:?}; stderr:\n{}",
             self.http_port,
@@ -93,25 +96,10 @@ impl Gateway {
 
 impl Drop for Gateway {
     fn drop(&mut self) {
-        kill_tree(&mut self.child);
+        proc::terminate_tree(&mut self.child);
     }
 }
 
-/// Kill the child **and every process it spawned**.
-///
-/// `Child::kill()` is TerminateProcess on Windows: it reaps only the direct
-/// child, so the services that child hosted (embed / node / doc / pm / user)
-/// survive until their ADR-018 watchdog notices the Gateway is gone (5 min),
-/// holding their ports and — on Windows — a lock on `acowork-*.exe` that
-/// fails the next `cargo build`. `taskkill /T` reaps the tree with it.
-fn kill_tree(child: &mut std::process::Child) {
-    #[cfg(windows)]
-    let _ = std::process::Command::new("taskkill")
-        .args(["/PID", &child.id().to_string(), "/T", "/F"])
-        .output();
-    let _ = child.kill();
-    let _ = child.wait();
-}
 
 fn temp_home(tag: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -161,6 +149,7 @@ fn spawn_on(
         .args(extra)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    proc::group_leader(&mut cmd);
     let mut child = cmd.spawn().expect("spawn acowork-gateway");
     let stderr = Arc::new(Mutex::new(String::new()));
     if let Some(pipe) = child.stderr.take() {

@@ -32,6 +32,11 @@ use std::path::PathBuf;
 
 #[path = "support/binary.rs"]
 mod binary;
+
+#[path = "support/proc.rs"]
+mod proc;
+
+use proc::Grouped;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -78,7 +83,7 @@ impl Gateway {
             }
             sleep(Duration::from_millis(100));
         }
-        let _ = self.child.kill();
+        proc::terminate_tree(&mut self.child);
         panic!("gateway did not serve within {BOOT_TIMEOUT:?}; stderr:\n{}", self.stderr());
     }
 }
@@ -89,7 +94,7 @@ impl Drop for Gateway {
         let _ = std::process::Command::new("taskkill")
             .args(["/PID", &self.child.id().to_string(), "/T", "/F"])
             .output();
-        let _ = self.child.kill();
+        proc::terminate_tree(&mut self.child);
         let _ = self.child.wait();
     }
 }
@@ -171,6 +176,7 @@ display_name = "Root"
         .arg(&config_path)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    proc::group_leader(&mut cmd);
     let mut child = cmd.spawn().expect("spawn acowork-gateway");
     let stderr = Arc::new(Mutex::new(String::new()));
     if let Some(pipe) = child.stderr.take() {
@@ -650,7 +656,7 @@ runtime_version = "0.1.0"
         .env("ACOWORK_GATEWAY_HTTP_PORT", http.to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .grouped().spawn()
         .expect("spawn acowork-runtime"));
 
     let pair = default_pair(http, &token, &instance);

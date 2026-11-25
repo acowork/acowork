@@ -31,6 +31,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+#[path = "support/proc.rs"]
+mod proc;
+
 const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn free_port() -> u16 {
@@ -67,7 +70,7 @@ impl Gateway {
             }
             sleep(Duration::from_millis(100));
         }
-        let _ = self.child.kill();
+        proc::terminate_tree(&mut self.child);
         panic!("gateway did not serve within {BOOT_TIMEOUT:?}; stderr:\n{}", self.stderr());
     }
 }
@@ -78,7 +81,7 @@ impl Drop for Gateway {
         let _ = std::process::Command::new("taskkill")
             .args(["/PID", &self.child.id().to_string(), "/T", "/F"])
             .output();
-        let _ = self.child.kill();
+        proc::terminate_tree(&mut self.child);
         let _ = self.child.wait();
     }
 }
@@ -141,6 +144,7 @@ display_name = "Root"
         .arg(&config_path)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    proc::group_leader(&mut cmd);
     let mut child = cmd.spawn().expect("spawn acowork-gateway");
     let stderr = Arc::new(Mutex::new(String::new()));
     if let Some(pipe) = child.stderr.take() {
@@ -951,6 +955,7 @@ config = "{home}/acowork-user.toml"
         .arg(&config_path)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    proc::group_leader(&mut cmd);
     let mut child = cmd.spawn().expect("spawn acowork-gateway");
     let stderr = Arc::new(Mutex::new(String::new()));
     if let Some(pipe) = child.stderr.take() {

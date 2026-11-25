@@ -41,6 +41,11 @@ use acowork_gateway::mqtt::enrollment::{
 use acowork_gateway::mqtt::node_registry::{local_node_id, new_shared_registry};
 use acowork_gateway::mqtt::{start_broker_with_auth, BrokerAuth};
 
+#[path = "support/proc.rs"]
+mod proc;
+
+use proc::Grouped;
+
 const NODE_ID: &str = "verify-node";
 const TEST_PORT: u16 = 18990;
 /// Phase 5a auth scenarios run on isolated ports so the anonymous
@@ -189,7 +194,7 @@ async fn node_binary_speaks_the_control_plane_contract() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
+        .grouped().spawn()
         .expect("spawn node");
 
     let mut collector = Collector::connect(TEST_PORT, "test:node-e2e", None);
@@ -245,7 +250,7 @@ async fn node_binary_speaks_the_control_plane_contract() {
     assert_eq!(decode_event(&dup_pong).request_id, "req-e2e-1");
 
     // 5) LWT: hard-kill → broker publishes retained "offline".
-    let _ = child.kill();
+    proc::terminate_tree(&mut child);
     let offline = collector
         .wait_for_topic(&format!("/nodes/{node_id}/status"), Duration::from_secs(10))
         .await
@@ -421,7 +426,7 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
+        .grouped().spawn()
         .expect("spawn node");
 
     // ── 2) Enroll request arrives; act as the Gateway ──────────────────
@@ -486,7 +491,7 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
     // must reconnect using the persisted node_token (broker-side
     // `node:{id}` rule). Success is proven by the retained status=online
     // replay, which only happens after a successful ConnAck.
-    let _ = child.kill();
+    proc::terminate_tree(&mut child);
     let _ = child.wait();
     let mut child2 = std::process::Command::new(&bin)
         .args([
@@ -701,29 +706,10 @@ struct ChildGuard(std::process::Child);
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        kill_tree(&mut self.0);
+        proc::terminate_tree(&mut self.0);
     }
 }
 
-/// Kill the child **and every process it spawned**.
-///
-/// `Child::kill()` is TerminateProcess on Windows: it reaps only the direct
-/// child, so the services that child hosted (embed / node / doc / pm / user)
-/// survive until their ADR-018 watchdog notices the Gateway is gone (5 min),
-/// holding their ports and — on Windows — a lock on `acowork-*.exe` that
-/// fails the next `cargo build`. `taskkill /T` reaps the tree with it.
-///
-/// Only ever our own child — never a pattern match on process names. Unix
-/// needs no equivalent here: the watchdog is the designed backstop and a
-/// running binary does not lock its own path there.
-fn kill_tree(child: &mut std::process::Child) {
-    #[cfg(windows)]
-    let _ = std::process::Command::new("taskkill")
-        .args(["/PID", &child.id().to_string(), "/T", "/F"])
-        .output();
-    let _ = child.kill();
-    let _ = child.wait();
-}
 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -754,7 +740,7 @@ async fn node_control_rejects_invalid_instance_id_before_spawn() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
+        .grouped().spawn()
         .expect("spawn node");
     let child_guard = ChildGuard(child);
 
@@ -993,7 +979,7 @@ async fn node_rename_updates_display_name_without_touching_uuid() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
+        .grouped().spawn()
         .expect("spawn node");
 
     let mut collector = Collector::connect(RENAME_TEST_PORT, "test:rename-e2e", None);
@@ -1083,7 +1069,7 @@ async fn node_rename_updates_display_name_without_touching_uuid() {
     );
 
     // Cleanup.
-    let _ = child.kill();
+    proc::terminate_tree(&mut child);
     let _ = child.wait();
     drop(broker_handle);
 }
@@ -1128,7 +1114,7 @@ async fn spawn_marker_does_not_change_node_protocol_behaviour() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
+        .grouped().spawn()
         .expect("spawn node");
 
     let mut collector = Collector::connect(SPAWN_MARKER_TEST_PORT, "test:spawn-marker-e2e", None);
@@ -1188,7 +1174,7 @@ async fn spawn_marker_does_not_change_node_protocol_behaviour() {
     );
 
     // Cleanup.
-    let _ = child.kill();
+    proc::terminate_tree(&mut child);
     let _ = child.wait();
     drop(broker_handle);
 }
