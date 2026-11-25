@@ -300,6 +300,25 @@ impl SessionStateRx {
         self.rx.lock().unwrap().borrow().clone()
     }
 
+    /// Rewind the cursor so the *current* value counts as unread.
+    ///
+    /// `subscribe()` marks the value it starts from as already seen, so a
+    /// consumer that subscribes while the session is `Connected` would
+    /// park in `changed()` and never observe that connection. A consumer
+    /// whose job is "act on the current state, then on every change"
+    /// calls this once, right after subscribing, to make the first
+    /// `changed()` resolve immediately.
+    ///
+    /// This is what lets such a consumer be written as a plain
+    /// `changed()` loop with no "have I primed yet?" flag — and therefore
+    /// with no state to corrupt when the wait is cancelled by a
+    /// `select!`. Call it before the first action, never after: a
+    /// transition that happens during the action must still be pending
+    /// when the consumer comes back.
+    pub fn mark_unseen(&self) {
+        self.rx.lock().unwrap().mark_changed();
+    }
+
     /// Wait until `predicate` holds, for at most `budget`.
     ///
     /// Level-triggered: the current state is tested first, so a

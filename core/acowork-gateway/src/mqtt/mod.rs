@@ -23,6 +23,7 @@ pub mod agent_registry;
 pub mod bootstrap_publisher;
 pub mod broker;
 pub mod client;
+pub mod connection_driver;
 pub mod dispatch;
 pub mod enrollment;
 pub mod global_resources_builders;
@@ -42,6 +43,7 @@ pub use broker::{
     RemoteMqttAuth, RemoteMqttListener,
 };
 pub use client::{GatewayMqttClient, GatewayMqttClientError, MqttMessageCallback, MqttQoS};
+pub use connection_driver::{ConnectionDriver, Drive};
 pub use global_resources_publisher::{MqttGlobalResourcesPublisher, MqttPublisherHandle, MqttPublisherTrigger};
 pub use inventory_notifier::{
     InventoryNotifierHandle, InventoryNotifierTrigger, MqttInventoryNotifier, TOPIC_INVENTORY,

@@ -26,6 +26,7 @@ use acowork_core::mqtt_proto::{
 
 use crate::http::routes::SharedHttpState;
 use crate::mqtt::client::{GatewayMqttClient, MqttQoS};
+use crate::mqtt::connection_driver::{ConnectionDriver, Drive};
 use crate::mqtt::global_resources_builders::{
     build_available_embedding_models, build_available_mcps, build_available_providers,
     build_available_users,
@@ -201,48 +202,51 @@ impl MqttGlobalResourcesPublisher {
             }
             tracing::info!("Publisher: ready signal received, performing initial publish");
 
-            // ── Connection gate ─────────────────────────────────────
-            // The session is constructed before the embedded broker is
-            // accepting connections, so "ready to publish" and
-            // "connected" are two different facts. Publishing into a
-            // disconnected session loses the retained snapshot silently.
-            if !helper.wait_connected().await {
-                tracing::warn!("MQTT publisher: session ended before connecting; loop exiting");
-                return;
-            }
-            helper.publish_all().await;
-
-            // ── Trigger- AND connection-driven republish ────────────
+            // ── Trigger- AND connection-driven publish ──────────────
             // Two wake sources, no polling:
             //  * every resource-mutating HTTP handler calls `trigger()`;
-            //  * every (re)connect. A reconnect must republish because
-            //    the retained snapshot lives in the broker: a broker
-            //    restart wipes it, and subscribers that reconnect would
-            //    otherwise never see providers/models again.
-            let state_rx = helper.client.state_rx();
+            //  * every (re)connect, including the one already in effect.
+            //    rumqttd holds retained messages in memory, so a broker
+            //    restart wipes them; an acknowledged publish is no
+            //    longer pending, so rumqttc will not replay it and
+            //    subscribers would never see providers/models again.
+            //
+            // The driver is built BEFORE the first publish. Building it
+            // afterwards leaves a window where a reconnect that happened
+            // during the publish is already marked seen, so the replay
+            // that reconnect owed is skipped.
+            let driver = ConnectionDriver::new(&helper.client);
+            // A trigger that arrives while disconnected is held rather
+            // than queued into the transport: the next `Connected` edge
+            // publishes freshly built payloads, which is both what the
+            // trigger asked for and immune to a soft-restart dropping
+            // the transport's pending list.
+            let mut pending = true;
             loop {
                 tokio::select! {
                     () = notify_for_loop.notified() => {
                         tracing::debug!("MQTT publisher: triggered republish");
-                        if !helper.wait_connected().await {
-                            tracing::warn!("MQTT publisher: session ended; loop exiting");
-                            return;
-                        }
-                        helper.publish_all().await;
+                        pending = true;
                     }
-                    changed = state_rx.changed() => {
-                        match changed {
-                            Ok(state) if state.is_connected() => {
-                                tracing::info!("MQTT publisher: reconnected, republishing retained snapshot");
-                                helper.publish_all().await;
+                    drive = driver.next_connected() => {
+                        match drive {
+                            Drive::Connected => {
+                                tracing::debug!("MQTT publisher: connected, publishing retained snapshot");
                             }
-                            Ok(_) => {}
-                            Err(_) => {
+                            Drive::Terminal(state) => {
+                                tracing::warn!(%state, "MQTT publisher: session terminal; loop exiting");
+                                return;
+                            }
+                            Drive::SourceGone => {
                                 tracing::warn!("MQTT publisher: state source gone; loop exiting");
                                 return;
                             }
                         }
                     }
+                }
+                if pending && driver.is_connected() {
+                    helper.publish_all().await;
+                    pending = false;
                 }
             }
         });
@@ -268,30 +272,6 @@ struct LoopHelper {
 }
 
 impl LoopHelper {
-    /// Wait until the session is `Connected`.
-    ///
-    /// Event-driven, with no timer of its own: the session state machine
-    /// guarantees a bounded time to the next transition (watchdog /
-    /// backoff), so this loop is woken by facts, never by a clock.
-    /// Returns `false` only when the session can never connect again
-    /// (terminal state, or the state source is gone).
-    async fn wait_connected(&self) -> bool {
-        let rx = self.client.state_rx();
-        loop {
-            let state = rx.current();
-            if state.is_connected() {
-                return true;
-            }
-            if state.is_terminal() {
-                tracing::warn!(%state, "MQTT publisher: session is terminal, cannot publish");
-                return false;
-            }
-            if rx.changed().await.is_err() {
-                return false;
-            }
-        }
-    }
-
     /// Publish all `acowork/global/*` Retained topics.
     ///
     /// Reads the current GatewayState snapshot and publishes:

@@ -21,6 +21,7 @@ use acowork_core::mqtt_proto::{
 
 use crate::bootstrap::{BootstrapOrchestrator, BootstrapSnapshot};
 use crate::mqtt::client::{GatewayMqttClient, MqttQoS};
+use crate::mqtt::connection_driver::{ConnectionDriver, Drive};
 
 /// MQTT topic for the bootstrap snapshot (ADR-059 §5.1).
 ///
@@ -57,20 +58,24 @@ pub struct BootstrapPublisherOptions<'a> {
 /// Construct via [`BootstrapPublisher::start`], which spawns the
 /// background loop. The loop:
 ///
-/// 1. Reads the initial snapshot from the orchestrator and publishes it
-///    immediately. This ensures the retained payload is present BEFORE
-///    any consumer subscribes — important for cold-start scenarios
-///    where the Desktop opens a fresh MQTT connection before the
-///    Gateway has had a chance to publish.
+/// 1. Publishes on the first `Connected` edge, which may be the one
+///    already in effect at startup. rumqttc queues a publish issued
+///    before the ConnAck and replays it, so this is about ordering and
+///    freshness rather than about the seed being dropped.
 ///
-/// 2. Parks on the orchestrator's change signal and republishes on
-///    every change. No periodic polling — `watch` events drive
-///    republishes, and the channel's level-triggered semantics guarantee
+/// 2. Republishes on every orchestrator transition AND on every
+///    subsequent `Connected` edge. No periodic polling — both sources
+///    are `watch`-driven, and their level-triggered semantics guarantee
 ///    a transition that happens while the loop is publishing is never
-///    lost (ADR-059 §7.2 re-delivery consistency).
+///    lost (ADR-059 §7.2 re-delivery consistency). The reconnect edge
+///    is NOT redundant with the transition source: rumqttd keeps
+///    retained messages in memory, so a broker restart wipes the
+///    snapshot while the phase stays exactly where it was — no
+///    transition would ever republish it, and every later subscriber
+///    would find the topic empty.
 ///
 /// 3. Logs every publish (DEBUG) and any error (WARN). A failure to
-///    publish does NOT abort the loop: the next change will retry.
+///    publish does NOT abort the loop: the next wake retries.
 pub struct BootstrapPublisher;
 
 impl BootstrapPublisher {
@@ -102,20 +107,52 @@ impl BootstrapPublisher {
                 "Bootstrap publisher: starting loop"
             );
 
-            // Initial publish.
-            publish_snapshot(&initial_client, &initial_snapshot).await;
+            // Subscribe to the connection BEFORE the first publish, so a
+            // reconnect that happens during that publish is still owed.
+            let driver = ConnectionDriver::new(&initial_client);
 
-            // Change-driven republish loop. No periodic polling — the
-            // orchestrator signals us on every transition. Unlike a
-            // `Notify`, a watch receiver observes the LATEST version
-            // even when several transitions happened while the loop
-            // was publishing, so the retained topic always converges.
+            // Two wake sources, no polling:
+            //  * every `Connected` edge — rumqttd holds retained
+            //    messages in memory, so a broker restart wipes the
+            //    snapshot and a phase that does not change would never
+            //    republish it;
+            //  * every orchestrator transition.
+            //
+            // Both branches read the LATEST snapshot rather than a value
+            // captured when the wake was queued, so a burst of
+            // transitions collapsed into one publish still converges.
             loop {
-                // Park on the orchestrator's change signal.
-                if changes.changed().await.is_err() {
-                    // The orchestrator was dropped — nothing left to
-                    // publish.
-                    break;
+                tokio::select! {
+                    drive = driver.next_connected() => {
+                        match drive {
+                            Drive::Connected => {
+                                tracing::debug!(
+                                    "Bootstrap publisher: connected, publishing retained snapshot"
+                                );
+                            }
+                            Drive::Terminal(state) => {
+                                tracing::warn!(%state, "Bootstrap publisher: session terminal; loop exiting");
+                                break;
+                            }
+                            Drive::SourceGone => {
+                                tracing::warn!("Bootstrap publisher: state source gone; loop exiting");
+                                break;
+                            }
+                        }
+                    }
+                    changed = changes.changed() => {
+                        if changed.is_err() {
+                            // The orchestrator was dropped — nothing left
+                            // to publish.
+                            break;
+                        }
+                        if !driver.is_connected() {
+                            // Hold the transition: the next `Connected`
+                            // edge republishes the latest snapshot, so
+                            // nothing is lost by skipping this one.
+                            continue;
+                        }
+                    }
                 }
                 let snapshot = orchestrator_for_loop.snapshot();
                 publish_snapshot(&initial_client, &snapshot).await;
@@ -222,5 +259,167 @@ mod tests {
             }
             other => panic!("expected BootstrapState payload, got {:?}", other),
         }
+    }
+
+    /// Regression: a reconnect must republish the retained snapshot even
+    /// when the phase never changes.
+    ///
+    /// rumqttd keeps retained messages in memory, so a broker restart
+    /// wipes `acowork/global/bootstrap`. An already-acknowledged publish
+    /// is no longer in rumqttc's pending list, so the transport does not
+    /// replay it either. The previous wiring woke only on orchestrator
+    /// transitions — with the phase settled at READY, nothing ever
+    /// republished, and every later subscriber found the topic empty and
+    /// timed out its boot.
+    ///
+    /// A forced soft-reconnect stands in for the broker restart: it
+    /// produces the same `Connected` edge, and the orchestrator is
+    /// deliberately never touched, so any second publish can only come
+    /// from the reconnect hook.
+    #[tokio::test]
+    async fn reconnect_republishes_without_a_phase_change() {
+        use crate::bootstrap::registry::SubsystemReadinessRegistry;
+        use rumqttc::{AsyncClient, MqttOptions, QoS};
+
+        let port = crate::test_support::free_port();
+        let _broker = crate::mqtt::broker::start_broker("127.0.0.1", port)
+            .expect("broker should start on the free port");
+        let registry = SubsystemReadinessRegistry::new_shared();
+        let orchestrator = BootstrapOrchestrator::new("reconnect-instance".into(), registry);
+
+        let client = GatewayMqttClient::new_publisher("127.0.0.1", port)
+            .await
+            .expect("publisher session should connect");
+        let _handle = BootstrapPublisher::start(BootstrapPublisherOptions {
+            client: &client,
+            orchestrator: orchestrator.clone(),
+        });
+
+        let mut opts = MqttOptions::new("test:bootstrap-reconnect-sub", "127.0.0.1", port);
+        opts.set_keep_alive(std::time::Duration::from_secs(5));
+        let (sub, mut events) = AsyncClient::new(opts, 10);
+        sub.subscribe(TOPIC_BOOTSTRAP, QoS::AtLeastOnce)
+            .await
+            .unwrap();
+
+        // Count bootstrap publishes seen on a live subscription.
+        async fn count_publishes(
+            events: &mut rumqttc::EventLoop,
+            want: usize,
+            budget: std::time::Duration,
+        ) -> usize {
+            let start = std::time::Instant::now();
+            let mut seen = 0;
+            while start.elapsed() < budget && seen < want {
+                let remaining = budget.saturating_sub(start.elapsed());
+                match tokio::time::timeout(
+                    remaining.min(std::time::Duration::from_millis(100)),
+                    events.poll(),
+                )
+                .await
+                {
+                    Ok(Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p)))) => {
+                        if p.topic == TOPIC_BOOTSTRAP && !p.payload.is_empty() {
+                            seen += 1;
+                        }
+                    }
+                    Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                    Err(_) => {}
+                }
+            }
+            seen
+        }
+
+        let first = count_publishes(&mut events, 1, std::time::Duration::from_secs(10)).await;
+        assert_eq!(first, 1, "seed snapshot must reach the subscriber");
+
+        // The phase is untouched from here on.
+        let version_before = orchestrator.snapshot().version;
+        client.force_reconnect();
+
+        let second = count_publishes(&mut events, 1, std::time::Duration::from_secs(15)).await;
+        assert_eq!(
+            orchestrator.snapshot().version,
+            version_before,
+            "precondition: no orchestrator transition may drive the republish"
+        );
+        assert_eq!(
+            second, 1,
+            "a reconnect must republish the retained snapshot with no phase change"
+        );
+    }
+
+    /// Characterization: the seed snapshot reaches a subscriber that
+    /// attaches after the broker comes up.
+    ///
+    /// This passes with and without the reconnect hook — rumqttc queues
+    /// the early publish and replays it — so it is NOT a regression test
+    /// for the hook. It pins the late-broker startup path, which is the
+    /// normal case now that the session is constructed without waiting
+    /// for a ConnAck.
+    #[tokio::test]
+    async fn seed_publish_is_carried_when_the_broker_starts_late() {
+        use crate::bootstrap::registry::SubsystemReadinessRegistry;
+        use rumqttc::{AsyncClient, MqttOptions, QoS};
+
+        let port = crate::test_support::free_port();
+        let registry = SubsystemReadinessRegistry::new_shared();
+        let orchestrator = BootstrapOrchestrator::new("late-broker-instance".into(), registry);
+
+        // No broker on `port` yet: the session can only be Connecting /
+        // Retrying while the publisher starts.
+        let client = GatewayMqttClient::spawn("127.0.0.1", port, "test:bootstrap-late", None, None)
+            .await
+            .expect("session construction must not require a broker");
+        assert!(
+            !client.current_state().is_connected(),
+            "precondition: the session must start disconnected"
+        );
+
+        let _handle = BootstrapPublisher::start(BootstrapPublisherOptions {
+            client: &client,
+            orchestrator: orchestrator.clone(),
+        });
+
+        // Give the loop a chance to run its (previously fatal) seed
+        // publish into the dead session before the broker exists.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let _broker = crate::mqtt::broker::start_broker("127.0.0.1", port)
+            .expect("broker should start on the free port");
+
+        // A fresh subscriber: whatever it receives on the bootstrap topic
+        // must have been (re)published after the broker came up.
+        let mut opts = MqttOptions::new("test:bootstrap-sub", "127.0.0.1", port);
+        opts.set_keep_alive(std::time::Duration::from_secs(5));
+        let (sub, mut events) = AsyncClient::new(opts, 10);
+        sub.subscribe(TOPIC_BOOTSTRAP, QoS::AtLeastOnce)
+            .await
+            .unwrap();
+
+        let budget = std::time::Duration::from_secs(15);
+        let start = std::time::Instant::now();
+        let mut got = false;
+        while start.elapsed() < budget && !got {
+            let remaining = budget.saturating_sub(start.elapsed());
+            match tokio::time::timeout(
+                remaining.min(std::time::Duration::from_millis(100)),
+                events.poll(),
+            )
+            .await
+            {
+                Ok(Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p)))) => {
+                    if p.topic == TOPIC_BOOTSTRAP && !p.payload.is_empty() {
+                        got = true;
+                    }
+                }
+                Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                Err(_) => {}
+            }
+        }
+        assert!(
+            got,
+            "retained bootstrap snapshot must be published once the session connects, \
+             with no orchestrator change to drive it"
+        );
     }
 }

@@ -53,6 +53,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::mqtt::client::{GatewayMqttClient, MqttQoS};
+use crate::mqtt::connection_driver::{ConnectionDriver, Drive};
 
 /// Build the signal payload: current wall-clock time in milliseconds,
 /// as ASCII. Non-empty by construction (see the module doc — a
@@ -85,20 +86,60 @@ impl MqttInventoryNotifier {
 
     /// Start the background publish loop.
     ///
-    /// The loop parks on `notified()` and publishes the signal payload
-    /// on [`TOPIC_INVENTORY`] on every trigger.
-    /// Errors are logged but never abort the loop — the next trigger
-    /// retries, and the subscriber's fetch-on-(re)connect covers a
-    /// missed signal.
+    /// The loop wakes on a trigger or on a session `Connected` edge and
+    /// publishes the signal payload on [`TOPIC_INVENTORY`] when a change
+    /// is pending and the session can carry it.
+    ///
+    /// A trigger raised while disconnected is held until the next edge
+    /// rather than dropped: the subscriber's fetch-on-(re)connect covers
+    /// its own reconnect, not the Gateway's. Publish errors keep the
+    /// change pending so the next wake retries.
     pub fn start(&self) -> InventoryNotifierHandle {
         let notify = self.notify.clone();
         let client = self.client.clone();
         let task: JoinHandle<()> = tokio::spawn(async move {
             tracing::info!("MQTT Inventory Notifier loop started");
+            let driver = ConnectionDriver::new(&client);
+            // A change that lands while the session cannot carry it is
+            // held here rather than left to the transport's pending
+            // list, which a soft-restart discards. The Desktop's own
+            // fetch-on-reconnect only covers *its* reconnect — the
+            // Gateway session can drop and recover while the Desktop
+            // stays connected, and then nothing else would signal the
+            // change at all.
+            //
+            // Coalescing is correct here and not an optimisation: the
+            // payload carries no inventory data, so N pending changes
+            // and one pending change ask the subscriber for the same
+            // thing — refetch the authoritative list.
+            let mut pending = false;
             loop {
-                notify.notified().await;
-                tracing::debug!("MQTT inventory notifier: triggered publish");
-                if let Err(e) = client
+                tokio::select! {
+                    () = notify.notified() => {
+                        tracing::debug!("MQTT inventory notifier: triggered publish");
+                        pending = true;
+                    }
+                    drive = driver.next_connected() => {
+                        match drive {
+                            // Re-evaluate `pending`; do NOT signal
+                            // unconditionally. A reconnect with no
+                            // pending change is not an inventory change.
+                            Drive::Connected => {}
+                            Drive::Terminal(state) => {
+                                tracing::warn!(%state, "MQTT inventory notifier: session terminal; loop exiting");
+                                return;
+                            }
+                            Drive::SourceGone => {
+                                tracing::warn!("MQTT inventory notifier: state source gone; loop exiting");
+                                return;
+                            }
+                        }
+                    }
+                }
+                if !pending || !driver.is_connected() {
+                    continue;
+                }
+                match client
                     .publish_raw(
                         TOPIC_INVENTORY,
                         inventory_signal_payload(),
@@ -107,11 +148,15 @@ impl MqttInventoryNotifier {
                     )
                     .await
                 {
-                    tracing::warn!(
-                        error = %e,
-                        topic = TOPIC_INVENTORY,
-                        "MQTT inventory notifier: publish failed; will retry on next trigger"
-                    );
+                    Ok(()) => pending = false,
+                    Err(e) => {
+                        // Keep `pending`: the next edge or trigger retries.
+                        tracing::warn!(
+                            error = %e,
+                            topic = TOPIC_INVENTORY,
+                            "MQTT inventory notifier: publish failed; holding signal for next wake"
+                        );
+                    }
                 }
             }
         });

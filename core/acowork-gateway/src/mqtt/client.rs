@@ -323,6 +323,17 @@ impl GatewayMqttClient {
         self.inner.current_state()
     }
 
+    /// Request a soft-restart of the event loop (wake recovery,
+    /// diagnostics).
+    ///
+    /// The session drops and rebuilds its connection, so consumers see
+    /// `Connecting` followed by a fresh `Connected` edge. Passthrough to
+    /// the session's own recovery entry — the Gateway does not implement
+    /// a second reconnect mechanism.
+    pub fn force_reconnect(&self) {
+        self.inner.force_reconnect();
+    }
+
     pub async fn new_publisher(
         host: &str,
         port: u16,
