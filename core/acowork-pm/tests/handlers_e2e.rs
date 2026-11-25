@@ -465,6 +465,87 @@ async fn claim_submit_review_full_lifecycle() {
     assert_eq!(body["review_status"], "approved");
 }
 
+/// `POST /tasks/:tid/dispatch/retry` — the human door back into the dispatch
+/// candidate set after the scanner gave up (5 failed attempts). It only ends
+/// the generation; the row stays `pending` for the scanner, which is exactly
+/// why "change the status and change it back" was the wrong workaround.
+#[tokio::test]
+async fn dispatch_retry_rearms_a_pending_task_and_refuses_others() {
+    let app = TestApp::new().await;
+    let router = app.router();
+    let pid = create_project(&app, "P").await;
+    let agent = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+    let add = TestApp::json_request(
+        Method::POST,
+        &format!("/projects/{pid}/members"),
+        serde_json::json!({ "instance_id": agent }),
+    );
+    let (status, _) = body_json(router.clone().oneshot(add).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let create = TestApp::json_request(
+        Method::POST,
+        &format!("/projects/{pid}/tasks"),
+        serde_json::json!({"title": "T", "assignee": agent}),
+    );
+    let (_, body) = body_json(router.clone().oneshot(create).await.unwrap()).await;
+    let tid = body["id"].as_str().unwrap().to_string();
+
+    // No actor = a caller wired wrong, not "an unidentified human": same
+    // contract as claim / review.
+    let retry = TestApp::json_request(
+        Method::POST,
+        &format!("/tasks/{tid}/dispatch/retry"),
+        serde_json::json!({}),
+    );
+    let (status, _) = body_json(router.clone().oneshot(retry).await.unwrap()).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    let retry = TestApp::request_with_actor(
+        Method::POST,
+        &format!("/tasks/{tid}/dispatch/retry"),
+        serde_json::json!({}),
+    );
+    let (status, body) = body_json(router.clone().oneshot(retry).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "pending");
+    assert_eq!(body["dispatch_attempts"], 0);
+
+    // The retry is an audited human action, not an invisible flip.
+    let activity = TestApp::json_request(
+        Method::GET,
+        &format!("/tasks/{tid}/activity"),
+        serde_json::json!({}),
+    );
+    let (status, body) = body_json(router.clone().oneshot(activity).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let trail = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["text"].as_str().is_some_and(|t| t.contains("dispatch retried")))
+        .unwrap_or_else(|| panic!("retry leaves a trace: {body}"));
+    assert_eq!(trail["actor"], "human-alice", "the trail names who re-armed it");
+
+    // A row the scanner no longer owns has no dispatch to re-arm.
+    let claim = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/tasks/{tid}/claim"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-actor", agent)
+        .body(Body::from("{}"))
+        .unwrap();
+    let (status, _) = body_json(router.clone().oneshot(claim).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let retry = TestApp::request_with_actor(
+        Method::POST,
+        &format!("/tasks/{tid}/dispatch/retry"),
+        serde_json::json!({}),
+    );
+    let (status, body) = body_json(router.clone().oneshot(retry).await.unwrap()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+}
+
 // ── activity（提交历史 / 人类回复）────────────────────────────────────
 
 /// `GET|POST /tasks/:tid/activity` + `POST /tasks/:tid/review` 的 `_comment`：

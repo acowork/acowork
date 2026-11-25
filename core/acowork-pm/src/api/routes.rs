@@ -93,6 +93,7 @@ pub fn pm_router(
         )
         .route("/tasks/{tid}/parent", patch(tasks::reparent))
         .route("/tasks/{tid}/claim", post(tasks::claim))
+        .route("/tasks/{tid}/dispatch/retry", post(tasks::retry_dispatch))
         .route("/tasks/{tid}/submit", post(tasks::submit))
         .route("/tasks/{tid}/review", post(tasks::review))
         .route(

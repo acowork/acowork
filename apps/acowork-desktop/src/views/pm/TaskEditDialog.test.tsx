@@ -53,6 +53,7 @@ const mocks = vi.hoisted(() => ({
   moveTask: vi.fn(async () => true),
   reviewTask: vi.fn(async () => true),
   deleteTask: vi.fn(async () => ({})),
+  retryTaskDispatch: vi.fn(async () => ({})),
   save: vi.fn(async () => ({ ok: true, taskId: "t-new" })),
   reset: vi.fn(),
   setStartAt: vi.fn(),
@@ -152,6 +153,7 @@ vi.mock("./SubtaskTree", () => ({
 vi.mock("../../lib/pm-api", () => ({
   attachmentUrl: (id: string) => `/api/pm/attachments/${id}`,
   deleteTask: (...args: unknown[]) => mocks.deleteTask(...args),
+  retryTaskDispatch: (...args: unknown[]) => mocks.retryTaskDispatch(...args),
 }));
 
 // 提交历史区有自己的测试（TaskActivity.test.tsx）；在对话框测试里它是一个
@@ -880,6 +882,22 @@ describe("audit line", () => {
     mocks.detail = row({ status: "pending", dispatch_error: "no runtime", dispatch_attempts: 5 });
     render(<TaskEditDialog onClose={() => {}} />);
     expect(screen.getByText(/pm.task.dispatchAbandoned/)).toBeTruthy();
+  });
+
+  it("offers one explicit retry once dispatch was given up on", async () => {
+    mocks.detail = row({ status: "pending", dispatch_error: "no runtime", dispatch_attempts: 5 });
+    render(<TaskEditDialog onClose={() => {}} />);
+    // The scanner stops looking at an abandoned row, so this button is the
+    // human's only way back into the candidate set without moving the status.
+    fireEvent.click(screen.getByText("pm.task.dispatchRetry"));
+    await waitFor(() => expect(mocks.retryTaskDispatch).toHaveBeenCalledWith("t-1"));
+    await waitFor(() => expect(mocks.refresh).toHaveBeenCalled());
+  });
+
+  it("offers no retry while the scanner is still retrying on its own", () => {
+    mocks.detail = row({ status: "pending", dispatch_error: "no runtime", dispatch_attempts: 2 });
+    render(<TaskEditDialog onClose={() => {}} />);
+    expect(screen.queryByText("pm.task.dispatchRetry")).toBeNull();
   });
 
   it("stays silent after a successful dispatch", () => {

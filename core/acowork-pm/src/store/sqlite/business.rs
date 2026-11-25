@@ -100,7 +100,9 @@ impl SqlitePmStore {
     /// The tree's `commit_task_activity` writes history first and rolls it
     /// back manually if the record write fails. SQLite gets the same atomicity
     /// from one transaction: either both land or neither does.
-    fn commit_task_activity(
+    /// `pub(super)`: the dispatch-generation maintenance impl lives in
+    /// `sqlite/mod.rs` and must record its re-arm trail in the same write.
+    pub(super) fn commit_task_activity(
         &self,
         id: &TaskId,
         record: &Task,
@@ -920,19 +922,38 @@ impl PmStore for SqlitePmStore {
         } else {
             Some(TaskStatus::Rejected)
         };
+        // Set only by the creation-approval branch below: a repeat approval
+        // that actually re-armed the dispatch is a write, everything else keeps
+        // the historical no-op idempotency of a second review call.
+        let mut rearmed = false;
         if let Some(to) = to {
             validate_transition(task.status, to, id)?;
             if to != task.status {
                 task.clear_dispatch_generation();
             }
             task.status = to;
+        } else if approved && task.dispatched_at.is_none() {
+            // Creation approval is the green light for the *dispatch*, and it
+            // changes no status (the task stays `pending` for the scanner), so
+            // nothing else would end the generation — and the scanner skips a
+            // task whose review is pending, so approval is the only moment it
+            // could ever be dispatched. Clearing the generation here is what
+            // makes approval a real recovery action instead of a no-op: a task
+            // that already burned its attempts (a failure since fixed, e.g. the
+            // self-dispatch 422) is back in the candidate set on the next tick.
+            // `dispatched_at` guard: a task the scanner already delivered keeps
+            // its generation, or a repeat approval would dispatch it twice.
+            rearmed = before.dispatch_message_id.is_some()
+                || before.dispatch_attempts > 0
+                || before.dispatch_error.is_some();
+            task.clear_dispatch_generation();
         }
         let new_review = if approved {
             ReviewStatus::Approved
         } else {
             ReviewStatus::Rejected
         };
-        if before.status == task.status && before.review_status == new_review {
+        if before.status == task.status && before.review_status == new_review && !rearmed {
             return Ok(task);
         }
         task.review_status = new_review;
@@ -1515,6 +1536,84 @@ mod tests {
         db.delete_project(&pid, true).await.unwrap();
         let err = db.delete_project(&pid, true).await.unwrap_err();
         assert_eq!(err.error_code(), "project_not_found");
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_dispatch_is_rearmed_by_retry_or_a_repeat_approval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = new_store(tmp.path());
+        let project = db
+            .create_project_as(
+                CreateProject {
+                    title: "self dispatch".into(),
+                    description: String::new(),
+                    metadata: Default::default(),
+                },
+                "human",
+                MemberKind::User,
+            )
+            .await
+            .unwrap();
+        // The field shape: an agent files for itself (`created_by == assignee`).
+        db.add_project_member(&project.id, "agent-1", MemberKind::Agent)
+            .await
+            .unwrap();
+        let mut input = task_input("self-assigned", None);
+        input.assignee = Some("agent-1".into());
+        let task = db
+            .create_task_as(&project.id, input, "agent-1", MemberKind::Agent)
+            .await
+            .unwrap();
+        assert_eq!(task.created_by, "agent-1");
+
+        // A creation review keeps it out of the candidate set until a human
+        // approves; the approval is the first moment it can be dispatched.
+        assert!(db.dispatch_due_ids(Utc::now(), 10).is_empty());
+        db.review_task(&task.id, true, "human", None).await.unwrap();
+        assert_eq!(db.dispatch_due_ids(Utc::now(), 10), vec![task.id.clone()]);
+
+        // Five failures abandon it — the scanner drops it entirely.
+        for _ in 0..crate::dispatch::MAX_DISPATCH_ATTEMPTS {
+            db.record_dispatch_failure(&task.id, "gateway rejected (422)")
+                .await
+                .unwrap();
+        }
+        assert!(db.dispatch_due_ids(Utc::now(), 10).is_empty(), "abandoned");
+
+        // Recovery 1: approving again re-arms it (the human's obvious action,
+        // and it used to be a silent no-op because the status never changed).
+        db.review_task(&task.id, true, "human", None).await.unwrap();
+        assert_eq!(db.dispatch_due_ids(Utc::now(), 10), vec![task.id.clone()]);
+        let fresh = db.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(fresh.dispatch_attempts, 0);
+        assert!(fresh.dispatch_error.is_none());
+        assert!(fresh.dispatch_message_id.is_none(), "a new generation gets a new identity");
+        assert!(fresh.dispatched_at.is_none());
+
+        // Recovery 2: the explicit retry entry, without touching the status.
+        for _ in 0..crate::dispatch::MAX_DISPATCH_ATTEMPTS {
+            db.record_dispatch_failure(&task.id, "still broken").await.unwrap();
+        }
+        assert!(db.dispatch_due_ids(Utc::now(), 10).is_empty());
+        let retried = db.retry_dispatch(&task.id, "human").await.unwrap();
+        assert_eq!(retried.dispatch_attempts, 0);
+        assert!(retried.dispatch_error.is_none());
+        assert_eq!(retried.status, TaskStatus::Pending);
+        assert_eq!(db.dispatch_due_ids(Utc::now(), 10), vec![task.id.clone()]);
+
+        // A delivered task keeps its generation: approving it again must not
+        // send a second dispatch row for work already handed over.
+        db.mark_dispatched(&task.id).await.unwrap();
+        db.review_task(&task.id, true, "human", None).await.unwrap();
+        let delivered = db.get_task(&task.id).await.unwrap().unwrap();
+        assert!(delivered.dispatched_at.is_some(), "repeat approval is not a re-dispatch");
+        assert!(db.dispatch_due_ids(Utc::now(), 10).is_empty());
+
+        // Only a task the scanner still owns has a dispatch to re-arm: a
+        // dispatched or non-pending one is refused rather than silently
+        // reported as retried.
+        let err = db.retry_dispatch(&task.id, "human").await.unwrap_err();
+        assert_eq!(err.error_code(), "conflict");
     }
 
     #[tokio::test]

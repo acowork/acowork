@@ -417,35 +417,29 @@ async fn dispatch_task(
         ApiError::service_unavailable("task dispatch requires the user service")
     })?;
 
-    // Chat session: use the PM-provided one, else ensure the project group
-    // (idempotent on project_id in the user service).
+    // Chat session: the PM-provided one, else the project's group as PM
+    // provisioned it. Dispatch never derives a roster — `[creator, target]` was
+    // the Gateway guessing at project membership (and made every self-assigned
+    // task a 422). Who belongs to a project group is PM's fact, and a
+    // 2-identity guess is not a subset of it.
     let chat_session_id = match req.chat_session_id.as_deref() {
         Some(c) if !c.is_empty() => c.to_string(),
-        _ => {
-            let participants = [req.owner.clone(), req.target_agent.clone()];
-            let session = chat_client::ensure_group(
-                port,
-                &req.project_id,
-                // Same rule as the owner below: `req.title` is the *task* title,
-                // not `Project::title()`, and the user service converges the
-                // title it is handed. Passing it would rename the project
-                // channel to the dispatched task on every dispatch. `""` = "this
-                // caller does not know it" — a cold create then has no title
-                // until PM's ensure / sync (or the boot backfill) sets it, which
-                // is strictly better than naming a channel after one task.
-                "",
-                &participants,
-                // No project owner here: `req.owner` is the task's *creator*
-                // (`Task::created_by`, an agent for MCP-created tasks), not
-                // `Project::owner()`. Writing it would hand the group prompt's
-                // ADR-098 governance to whoever filed the task. `None` leaves
-                // the stored owner alone; PM's own ensure / sync sets it.
-                None,
-            )
+        _ => match chat_client::project_group(port, &req.project_id)
             .await
-            .map_err(|e| ApiError::unprocessable_entity(&e))?;
-            session.session_id
-        }
+            .map_err(|e| ApiError::service_unavailable(&e))?
+        {
+            Some(s) => s.session_id,
+            // Not the task's failure and not something the Gateway may paper
+            // over by creating a group: PM owns provisioning and heals this on
+            // its next ensure / boot backfill. Reporting the code lets that
+            // owner act; inventing a membership hides the real gap.
+            None => {
+                return Ok(Json(serde_json::json!({
+                    "status": "failed",
+                    "error_code": "project_group_missing",
+                })));
+            }
+        },
     };
     let session = chat_client::load_session(port, &chat_session_id)
         .await
@@ -4485,6 +4479,157 @@ mod task_dispatch_human_tests {
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    /// A stub user service that knows one project group and counts every
+    /// attempt to create one. Dispatch must resolve the group through the
+    /// project id and never post a roster of its own.
+    async fn grouped_state()
+        -> (AppState, Arc<Mutex<Vec<serde_json::Value>>>, Arc<Mutex<usize>>) {
+        let rows: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let creates: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let sink = Arc::clone(&rows);
+        let created = Arc::clone(&creates);
+        let app = axum::Router::new()
+            // The read dispatch uses: the project's group, by project id.
+            .route(
+                "/internal/chat-sessions/group/{project_id}",
+                axum::routing::get(|axum::extract::Path(pid): axum::extract::Path<String>| async move {
+                    if pid == "p-1" {
+                        (StatusCode::OK, axum::Json(serde_json::from_str::<serde_json::Value>(ROSTER).unwrap())).into_response()
+                    } else {
+                        (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"error": "no group"}))).into_response()
+                    }
+                }),
+            )
+            // The write dispatch must NOT use. Counted, so a regression is a
+            // failed assertion instead of a silent second authority.
+            .route(
+                "/internal/chat-sessions/group",
+                axum::routing::post(move || {
+                    let created = Arc::clone(&created);
+                    async move {
+                        *created.lock().unwrap() += 1;
+                        (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(serde_json::json!({"error": "duplicate participant id in session membership"}))).into_response()
+                    }
+                }),
+            )
+            .route(
+                "/internal/chat-sessions/{sid}",
+                axum::routing::get(|| async move {
+                    (StatusCode::OK, [("content-type", "application/json")], ROSTER).into_response()
+                }),
+            )
+            .route(
+                "/internal/chat-sessions/messages",
+                axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let sink = Arc::clone(&sink);
+                    async move {
+                        sink.lock().unwrap().push(body);
+                        axum::Json(serde_json::json!([])).into_response()
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = crate::test_support::unique_temp_dir(format!(
+            "acowork-test-dispatch-group-{}",
+            std::process::id()
+        ));
+        let mut gw = GatewayState::new(&dir.to_string_lossy());
+        gw.internal_service_token = Some("svc-token".to_string());
+        gw.user_process = Some(crate::lifecycle::user_supervisor::UserProcessState {
+            pid: 0,
+            port,
+            ready: true,
+        });
+        (
+            AppState::new(
+                Arc::new(tokio::sync::RwLock::new(gw)),
+                Arc::new(HttpAuth::new(false)),
+            ),
+            rows,
+            creates,
+        )
+    }
+
+    /// Dispatch with no `chat_session_id`: the group is resolved from the
+    /// project id. Two cases, both regressions of the same bug — a
+    /// self-assigned task (`owner == target_agent`) used to be a deterministic
+    /// 422 because the Gateway sent `[owner, target]` as the group roster, and
+    /// an unknown project used to get a two-member group invented for it.
+    #[tokio::test]
+    async fn dispatch_resolves_the_project_group_and_never_creates_one() {
+        let (state, rows, creates) = grouped_state().await;
+        let body = serde_json::json!({
+            "project_id": "p-1",
+            "task_id": "t-1",
+            "target_agent": "u-dana",
+            "owner": "u-dana",
+            "project_owner": "u-dana",
+            "message": "do the thing",
+            "assignment_brief": "",
+            "message_id": "pm-self-1",
+        });
+        let resp = intent_routes()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/intents/task-dispatch")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer svc-token")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, StatusCode::OK, "self dispatch: {body}");
+        assert_eq!(
+            body["status"], "delivered",
+            "a self-assigned task dispatches (owner == target_agent): {body}"
+        );
+        assert_eq!(rows.lock().unwrap().len(), 1, "one sentence, one row");
+
+        // Unknown project: the gap is named, and nothing was created.
+        let missing = serde_json::json!({
+            "project_id": "p-missing",
+            "task_id": "t-2",
+            "target_agent": "u-dana",
+            "owner": "u-dana",
+            "project_owner": "u-dana",
+            "message": "do the other thing",
+            "assignment_brief": "",
+            "message_id": "pm-self-2",
+        });
+        let resp = intent_routes()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/intents/task-dispatch")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer svc-token")
+                    .body(Body::from(missing.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["error_code"], "project_group_missing",
+            "a project without a group is reported, not papered over: {body}"
+        );
+        assert_eq!(
+            *creates.lock().unwrap(), 0,
+            "dispatch never provisions a project group — PM owns its roster"
+        );
     }
 
     #[tokio::test]

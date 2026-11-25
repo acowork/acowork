@@ -227,6 +227,25 @@ pub async fn ensure_group(
     read_json(resp).await
 }
 
+/// `GET /internal/chat-sessions/group/{project_id}` — the project's group
+/// chat, `None` when the project has none.
+///
+/// The read half of [`ensure_group`], for a caller that must *address* the
+/// group PM provisioned but has no business inventing its membership.
+pub async fn project_group(port: u16, project_id: &str) -> Result<Option<SessionInfo>, String> {
+    let resp = client()
+        .get(format!(
+            "http://127.0.0.1:{port}/internal/chat-sessions/group/{project_id}"
+        ))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    read_json(resp).await.map(Some)
+}
+
 /// `POST /internal/chat-sessions/group/deleted` — PM archived the project, so
 /// its group chat is now deletable by its owner (design 27 §4.4). Stamps
 /// `project_deleted_at` on the session row; `None` when the project never had

@@ -63,7 +63,7 @@ import { StyledInput, StyledTextarea } from "../../components/common/StyledInput
 import { DateTimePicker } from "../../components/common/DateTimePicker";
 import { Dropdown } from "../../components/common/Dropdown";
 import { showToast } from "../../components/common/ToastProvider";
-import { attachmentUrl, deleteTask } from "../../lib/pm-api";
+import { attachmentUrl, deleteTask, retryTaskDispatch } from "../../lib/pm-api";
 import { canViewExecSession, openTaskExecSession } from "../../lib/pmTaskExecSession";
 import { useActorLabel } from "./pmMembers";
 import { TaskActivitySection } from "./TaskActivity";
@@ -667,6 +667,28 @@ function BasicInfoTab({
   onMoved: () => void;
 }) {
   const { t } = useTranslation();
+  const [retrying, setRetrying] = useState(false);
+  // 放弃派发后的人工出口：只重置派发代次，任务仍是 pending，扫描器下一个
+  // tick 会重新投递。以前唯一的解封办法是把状态改出去再改回来（改状态确实
+  // 结束代次），但那一来任务已离开 pending，扫描器反而看不到它。
+  const retryDispatch = useCallback(async () => {
+    if (!row) return;
+    setRetrying(true);
+    try {
+      await retryTaskDispatch(row.id);
+      showToast({ type: "success", message: t("pm.task.dispatchRetried") });
+      onMoved();
+    } catch (e) {
+      showToast({
+        type: "error",
+        message: t("pm.task.dispatchRetryFailed", {
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      });
+    } finally {
+      setRetrying(false);
+    }
+  }, [row, onMoved, t]);
   // A column, not a stack of margins: 描述 takes whatever height is left in the
   // fixed-height box (≈30px slack when editing, ≈75px when creating), so the
   // form ends at the footer instead of leaving a dead strip above it.
@@ -694,14 +716,27 @@ function BasicInfoTab({
           {/* A dispatch failure is a durable task fact — surfacing it here is
               the only place a stuck row explains itself. */}
           {row.status === "pending" && !row.dispatched_at && row.dispatch_error && (
-            <p className="mt-1.5 rounded bg-warning-surface-hover px-2 py-1 text-warning-quiet">
+            <div className="mt-1.5 rounded bg-warning-surface-hover px-2 py-1 text-warning-quiet">
               {row.dispatch_attempts >= 5
                 ? t("pm.task.dispatchAbandoned", { error: row.dispatch_error })
                 : t("pm.task.dispatchFailed", {
                     attempts: row.dispatch_attempts,
                     error: row.dispatch_error,
                   })}
-            </p>
+              {/* 放弃之后扫描器不再看这张任务，人得有一个自己的按钮把它放回
+                  候选集（服务端只重置代次，状态不动）。还在退避期内（<5 次）
+                  不给按钮：那时候扫描器本来就会自己重试。 */}
+              {row.dispatch_attempts >= 5 && (
+                <button
+                  type="button"
+                  disabled={retrying}
+                  onClick={() => void retryDispatch()}
+                  className="ml-2 font-medium underline disabled:opacity-50"
+                >
+                  {retrying ? t("pm.task.dispatching") : t("pm.task.dispatchRetry")}
+                </button>
+              )}
+            </div>
           )}
           {/* 未排期 = 没有开始时间 = 扫描器不派发（fail-closed）。清掉了开始
               时间的任务在这里必须自己说出来,否则它和"等扫描器"长得一样。 */}

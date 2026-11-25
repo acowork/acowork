@@ -99,6 +99,13 @@ pub fn build_assignment_brief(task: &Task) -> String {
 /// persisted-attempt gate that replaces the old in-process abandon map).
 pub const MAX_DISPATCH_ATTEMPTS: u32 = 5;
 
+/// The Gateway's error code for "this project has no group chat" — the one
+/// dispatch failure PM repairs instead of charging to the task. The wire text
+/// lives here on this side so the branch has no second literal.
+fn is_missing_project_group(reason: &str) -> bool {
+    reason.contains("project_group_missing")
+}
+
 fn next_retry_delay(attempts: u32) -> Option<Duration> {
     match attempts {
         1 => Some(Duration::from_secs(60)),
@@ -294,6 +301,44 @@ pub fn spawn_scanner(
                         dispatched += 1;
                     }
                     Err(reason) => {
+                        // The project group chat is PM's to provision. The
+                        // Gateway reports its absence (`project_group_missing`)
+                        // instead of inventing members — deriving them was the
+                        // bug: `[creator, assignee]` made a self-assigned task
+                        // a duplicate-participant 422 and made every dispatch a
+                        // guess at a project's roster. Heal with the real
+                        // roster and do NOT charge a dispatch attempt: a missing
+                        // channel is infrastructure, not this task's failure.
+                        if is_missing_project_group(&reason) {
+                            match store.get_project(&task.project_id).await {
+                                Ok(Some(p)) => {
+                                    let participants =
+                                        crate::api::projects::group_participants(&p);
+                                    let healed = client
+                                        .ensure_group(
+                                            p.id.as_str(),
+                                            &p.title,
+                                            &participants,
+                                            p.owner(),
+                                        )
+                                        .await;
+                                    tracing::warn!(
+                                        task = %tid,
+                                        project = %task.project_id,
+                                        healed = healed.is_some(),
+                                        "project group chat was missing; re-provisioned from \
+                                         the project roster instead of inventing members"
+                                    );
+                                }
+                                other => tracing::warn!(
+                                    task = %tid,
+                                    project = %task.project_id,
+                                    error = ?other.err(),
+                                    "project group chat missing and the project unreadable"
+                                ),
+                            }
+                            continue; // next tick retries against the healed group
+                        }
                         // Persist the failure first: the count survives a
                         // restart and the reason lands on the task record,
                         // visible on every task surface.
@@ -422,6 +467,20 @@ mod tests {
             !brief.contains("p-test1"),
             "project_id is not needed to claim"
         );
+    }
+
+    /// PM repairs a missing project group instead of charging the attempt, so
+    /// the recognition of the Gateway's code is load-bearing. The literal is
+    /// pinned on both sides on purpose: the Gateway's dispatch test asserts it
+    /// emits `project_group_missing`, this one asserts PM acts on that text.
+    #[test]
+    fn missing_project_group_is_recognized_in_the_gateway_reason() {
+        assert!(is_missing_project_group(
+            "gateway rejected (200 OK): project_group_missing"
+        ));
+        assert!(!is_missing_project_group(
+            "gateway rejected (500): unreachable"
+        ));
     }
 
     #[test]

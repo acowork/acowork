@@ -196,6 +196,35 @@ pub async fn claim(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// POST /tasks/:tid/dispatch/retry
+// ────────────────────────────────────────────────────────────────────────────
+
+/// 重派：把一张被扫描器放弃（`dispatch_attempts >= MAX`）的任务放回候选集。
+///
+/// 只结束当前派发代次（`dispatch_attempts` / `dispatch_error` /
+/// `dispatch_message_id` 清空），任务仍是 `pending`：真正的投递由扫描器下一
+/// 个 tick 完成，与首次派发走同一条路径。人类在任务详情面点「重派」，不再需
+/// 要先把状态改出去再改回来绕过放弃闸门。
+#[tracing::instrument(skip(state))]
+pub async fn retry_dispatch(
+    State(state): State<ApiState>,
+    Path(tid): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Task>, crate::error::PmError> {
+    let tid = tid.parse::<TaskId>()?;
+    // 与 claim / review 同一条约定：写路径必须有操作者（Gateway 反代注入
+    // 可信值，Desktop 客户端固定带 `X-Actor`）。重派会留一条活动流，缺身份
+    // 就不是"未知人做了件事"，而是调用方接错了线。
+    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).ok_or(
+        crate::error::PmError::Internal("missing X-Actor header".to_string()),
+    )?;
+    // One store call: the reset and its activity entry share a write, so a
+    // 500 here can never mean "re-armed but nobody knows who".
+    let task = state.store.retry_dispatch(&tid, actor).await?;
+    Ok(Json(task))
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // POST /tasks/:tid/submit
 // ────────────────────────────────────────────────────────────────────────────
 

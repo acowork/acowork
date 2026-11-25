@@ -3099,6 +3099,23 @@ pub fn list_project_groups(data_dir: &Path) -> Vec<ChatSession> {
     }
 }
 
+/// The project's group chat, resolved through the project → session index.
+///
+/// `None` means the project has none (never provisioned, or the row was
+/// deleted) — a fact, not an error: the caller decides whether that is a
+/// loud failure. Read-only by construction, unlike [`create_session`]: a
+/// caller that only needs to *address* an existing group can never invent
+/// one, so PM stays the single authority on who a project group contains.
+pub fn find_project_group(data_dir: &Path, project_id: &str) -> Option<ChatSession> {
+    if !projects_index_path(data_dir).exists() {
+        // Pre-index data dir: one backfill scan that also writes the index,
+        // the same rule `list_project_groups` applies.
+        let _ = list_project_groups(data_dir);
+    }
+    let sid = read_projects_index(data_dir).get(project_id)?.clone();
+    load(data_dir, &sid).ok()
+}
+
 /// Design 27 §8.3: sync a project group's participant set to exactly
 /// `participants` — ids missing from the session are added, ids absent
 /// from the set are removed. Resolves the session through the project
@@ -6895,5 +6912,44 @@ mod tests {
         assert_eq!(g2.default_responder.as_deref(), Some("agent-2"));
         let cleared = set_default_responder(&dir, &g.session_id, Some("  "), "u-a", false).unwrap();
         assert_eq!(cleared.default_responder, None, "blank means clear");
+    }
+
+    /// The read half of the project-group lookup: a caller that must address
+    /// the group PM provisioned (task dispatch) resolves it by project id, and
+    /// an unknown project is a plain `None` — never a session invented on the
+    /// spot. This is what replaced the Gateway deriving `[creator, target]` as
+    /// a roster, which made every self-assigned task a duplicate-id 422.
+    #[test]
+    fn find_project_group_resolves_by_project_id_and_invents_nothing() {
+        let dir = temp_dir();
+        let roster = vec![Participant::new("u-a", ParticipantIdentity::Human)];
+        let group = create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &roster,
+            "P",
+            Some("u-a"),
+            Some("proj-a"),
+            1,
+        )
+        .unwrap();
+        create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &roster,
+            "Q",
+            Some("u-a"),
+            Some("proj-b"),
+            2,
+        )
+        .unwrap();
+
+        let found = find_project_group(&dir, "proj-a").expect("the project has a group");
+        assert_eq!(found.session_id, group.session_id);
+        // One member, exactly what the caller must not have guessed.
+        assert_eq!(found.participants.len(), 1);
+        assert!(find_project_group(&dir, "proj-unknown").is_none());
+        // A lookup must not create: the index still holds only the two above.
+        assert_eq!(read_projects_index(&dir).len(), 2);
     }
 }

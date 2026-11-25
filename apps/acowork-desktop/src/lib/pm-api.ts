@@ -187,6 +187,18 @@ export function deleteTask(tid: string, opts?: { cascade?: boolean }) {
   });
 }
 
+/**
+ * 重派一张被放弃派发的任务（`dispatch_attempts` 已到上限）。
+ *
+ * 服务端只重置派发代次，任务仍是 `pending`：真正的投递由扫描器下一个 tick
+ * 完成。不先改状态再改回来——那条绕路会让扫描器看不到它。
+ */
+export function retryTaskDispatch(tid: string) {
+  return request<PmTask>(`/tasks/${encodeURIComponent(tid)}/dispatch/retry`, {
+    method: "POST",
+  });
+}
+
 /** 移动任务到新父下（new_parent=null 提升为根任务） */
 export function reparentTask(tid: string, newParent: string | null) {
   return request<void>(`/tasks/${encodeURIComponent(tid)}/parent`, {

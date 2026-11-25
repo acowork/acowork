@@ -60,6 +60,19 @@ pub trait PmMaintenance: Send + Sync {
     async fn dispatch_identity(&self, id: &TaskId) -> Result<Option<String>>;
     async fn mark_dispatched(&self, id: &TaskId) -> Result<()>;
     async fn record_dispatch_failure(&self, id: &TaskId, reason: &str) -> Result<u32>;
+    /// Re-arm the dispatch of a task whose attempts were given up on: end the
+    /// current generation (`dispatch_attempts` / `dispatch_error` /
+    /// `dispatch_message_id` cleared), so the scanner sees it again on the next
+    /// tick — the same delivery path as a first dispatch, no bypass.
+    ///
+    /// Lives with the rest of the dispatch generation (`mark_dispatched` /
+    /// `record_dispatch_failure`) because it only manipulates that machinery;
+    /// it is not a task-lifecycle transition. Only a `pending`,
+    /// never-dispatched task has anything to re-arm — anything else returns a
+    /// conflict instead of quietly reporting success. The re-arm is recorded
+    /// on the activity stream in the same write: a delivered row and its trail
+    /// cannot disagree.
+    async fn retry_dispatch(&self, id: &TaskId, actor: &str) -> Result<Task>;
 }
 
 /// PM 业务方法集合。上层只依赖此 trait，不直接引用具体 store。
@@ -148,7 +161,6 @@ pub trait PmStore: PmMaintenance + Send + Sync {
         reviewer: &str,
         comment: Option<&str>,
     ) -> Result<Task>;
-
     // ── Activity (submission history) ──────────────────────────────
 
     async fn list_activity(&self, task_id: &TaskId) -> Result<Vec<TaskActivity>>;

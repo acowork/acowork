@@ -27,7 +27,10 @@ use serde_json::{Value, json};
 
 use crate::config::PmConfig;
 use crate::error::{PmError, Result};
-use crate::types::{DependencyKind, Project, ProjectId, ReviewStatus, Task, TaskId, TaskStatus};
+use crate::types::{
+    ActivityKind, DependencyKind, Project, ProjectId, ReviewStatus, Task, TaskActivity, TaskId,
+    TaskStatus,
+};
 
 use crate::store::contract::PmMaintenance;
 use crate::store::rules::{parse_task_id, priority_rank};
@@ -742,6 +745,36 @@ impl PmMaintenance for SqlitePmStore {
         task.dispatch_error = Some(reason.to_string());
         self.save_task(&task)?;
         Ok(task.dispatch_attempts)
+    }
+
+    async fn retry_dispatch(&self, id: &TaskId, actor: &str) -> Result<Task> {
+        let mut task = self
+            .load_task(id)?
+            .ok_or_else(|| PmError::TaskNotFound(id.to_string()))?;
+        // Only a task the scanner is still responsible for has a dispatch to
+        // re-arm. An already-dispatched row would be sent twice, and anything
+        // outside `pending` is out of the scanner's reach anyway — say so
+        // instead of returning a success that changed nothing.
+        if task.status != TaskStatus::Pending || task.dispatched_at.is_some() {
+            return Err(PmError::Conflict(format!(
+                "task {id} is not awaiting dispatch (status {}, dispatched_at {})",
+                task.status.board_column(),
+                task.dispatched_at.is_some(),
+            )));
+        }
+        let before = task.clone();
+        task.clear_dispatch_generation();
+        task.updated_at = Utc::now();
+        // Same transaction as the reset: the generation that is about to be
+        // thrown away is described by the row we clear, so a re-arm whose
+        // audit entry failed would be a dispatch nobody can explain later.
+        let activity = TaskActivity::new(
+            ActivityKind::Comment,
+            actor,
+            "dispatch retried (attempts reset)",
+        );
+        self.commit_task_activity(id, &task, &before, activity)?;
+        Ok(task)
     }
 }
 

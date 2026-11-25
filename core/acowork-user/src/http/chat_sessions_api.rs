@@ -169,6 +169,13 @@ pub fn chat_session_routes() -> Router<AppState> {
         )
         .route("/internal/chat-sessions/pair", post(system_ensure_pair))
         .route("/internal/chat-sessions/group", post(system_ensure_group))
+        // Read-only resolution of a project's group chat by project id: the
+        // caller that must *address* the group PM provisioned does not have
+        // to be able to create one (task dispatch is that caller).
+        .route(
+            "/internal/chat-sessions/group/{project_id}",
+            get(system_project_group),
+        )
         // Design 27 §8.3: PM member add / remove re-syncs the group's
         // participant set to exactly the project's current members.
         .route("/internal/chat-sessions/group/sync", post(system_sync_group))
@@ -1586,6 +1593,26 @@ async fn system_ensure_group(
     })
     .await?;
     Ok(Json(session))
+}
+
+/// `GET /internal/chat-sessions/group/{project_id}` — the project's group
+/// chat, `404` when the project has none.
+///
+/// A lookup, not an ensure: the caller (task dispatch) has to address the
+/// channel PM provisioned, and the shape of the problem was a caller deriving
+/// its own roster because the only API it had *created* one. Read-only, so a
+/// missing group stays a visible failure instead of becoming whatever two ids
+/// the caller happened to hold.
+async fn system_project_group(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<ChatSession>, ApiError> {
+    let dir = data_dir_any(&state).await;
+    let found =
+        offload(move || Ok(chat_sessions::find_project_group(&dir, &project_id))).await?;
+    found
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("this project has no group chat"))
 }
 
 /// `POST /internal/chat-sessions/group/sync` — set the group's participant
