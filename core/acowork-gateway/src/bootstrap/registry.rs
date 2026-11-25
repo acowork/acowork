@@ -81,7 +81,8 @@ impl SubsystemState {
     ///
     /// Both [`SubsystemState::Ready`] and [`SubsystemState::Skipped`]
     /// satisfy the required-subsystem check — `Skipped` is for
-    /// optional subsystems that were intentionally not started.
+    /// subsystems intentionally not started by configuration (e.g.
+    /// `mqtt.enabled = false` skips the required `mqtt` / `publisher`).
     /// [`SubsystemState::Deregistered`] never satisfies anything; the
     /// record it describes no longer exists.
     pub fn is_satisfying(self) -> bool {
@@ -167,8 +168,11 @@ impl SubsystemHandle {
         }
     }
 
-    /// Mark the subsystem as intentionally skipped (optional-only).
+    /// Mark the subsystem as intentionally skipped by configuration.
     ///
+    /// Valid for Required subsystems too: `mqtt.enabled = false` skips
+    /// both `mqtt` and `publisher`, and the aggregated phase must still
+    /// reach READY — a disabled feature is not a boot blocker.
     /// Behaves like `mark_ready` for phase aggregation purposes but
     /// records a distinct state so `phase_detail` can surface "skipped"
     /// separately from "ready".

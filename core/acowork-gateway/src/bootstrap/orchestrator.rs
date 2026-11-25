@@ -554,6 +554,27 @@ mod tests {
         assert_eq!(orch.snapshot().phase, BootstrapPhase::Failed);
     }
 
+    /// Matrix #5 (`mqtt.enabled = false`): the wiring in `gateway/mod.rs`
+    /// marks BOTH required MQTT subsystems `Skipped`. A disabled feature
+    /// is not a boot blocker — the aggregated phase must reach READY,
+    /// not sit in BOOTING for the lifetime of the process (the second
+    /// dead-end found in the 2026-11-24 incident review).
+    #[test]
+    fn required_skipped_satisfies_readiness() {
+        let (orch, registry) = build();
+        registry.register("vault", ReadinessKind::Required).mark_ready(None);
+        let mqtt = registry.register("mqtt", ReadinessKind::Required);
+        let publisher = registry.register("publisher", ReadinessKind::Required);
+        mqtt.mark_skipped(Some("mqtt disabled by configuration".into()));
+        publisher.mark_skipped(Some("mqtt disabled by configuration".into()));
+        orch.recompute();
+        assert_eq!(
+            orch.snapshot().phase,
+            BootstrapPhase::Ready,
+            "a configuration-disabled required subsystem must not block READY"
+        );
+    }
+
     #[test]
     fn version_is_monotonic() {
         let (orch, registry) = build();
