@@ -109,7 +109,7 @@ const next = () => screen.getByRole("button", { name: /Next|下一步|次へ/ })
 const back = () => screen.getByRole("button", { name: /Back|上一步/ });
 
 async function fillBasics(agentId = "com.example.agent", name = "Agent") {
-  fireEvent.change(screen.getByLabelText("Agent ID"), { target: { value: agentId } });
+  fireEvent.change(screen.getByLabelText("Bot ID"), { target: { value: agentId } });
   fireEvent.change(screen.getByLabelText("Name"), { target: { value: name } });
 }
 
@@ -138,25 +138,25 @@ describe("CreateWizard — step 1: identity and labels", () => {
   it("does not advance on an invalid step, and only complains after the user tries", async () => {
     renderWizard();
     // Nothing is flagged before the user acts — an empty form is not an error.
-    expect(screen.queryByText(/Agent ID must be reverse-domain/)).toBeNull();
+    expect(screen.queryByText(/Bot ID must be reverse-domain/)).toBeNull();
     expect(screen.queryByText(/A name is required/)).toBeNull();
 
     fireEvent.click(next());
     // Still on step 1, and now the problems are spelled out.
-    expect(screen.getByLabelText("Agent ID")).toBeTruthy();
-    expect(screen.getByText(/Agent ID must be reverse-domain/)).toBeTruthy();
+    expect(screen.getByLabelText("Bot ID")).toBeTruthy();
+    expect(screen.getByText(/Bot ID must be reverse-domain/)).toBeTruthy();
     expect(screen.getByText(/A name is required/)).toBeTruthy();
 
     await fillBasics("not-a-domain", "Agent");
     fireEvent.click(next());
-    expect(screen.getByLabelText("Agent ID")).toBeTruthy();
+    expect(screen.getByLabelText("Bot ID")).toBeTruthy();
 
     await fillBasics("com.example.agent", "Agent");
     // The list clears itself once the fields are valid.
-    expect(screen.queryByText(/Agent ID must be reverse-domain/)).toBeNull();
+    expect(screen.queryByText(/Bot ID must be reverse-domain/)).toBeNull();
     fireEvent.click(next());
     // Advanced to step 2 (config).
-    expect(screen.queryByLabelText("Agent ID")).toBeNull();
+    expect(screen.queryByLabelText("Bot ID")).toBeNull();
   });
 
   it("refuses an invalid label and keeps it out of the draft", async () => {
@@ -185,7 +185,7 @@ describe("CreateWizard — step 1: identity and labels", () => {
     }
     fireEvent.click(next());
     // Step 2 is config — walk straight to preview.
-    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+    while (!screen.queryByText("Review your bot")) fireEvent.click(next());
 
     await waitFor(() => expect(lastDraftFor("preview_manifest").labels).toEqual([
       "project-management",
@@ -201,7 +201,7 @@ describe("CreateWizard — step 2: [config] defaults", () => {
     fireEvent.click(next());
     expect(screen.getByText(/Defaults this package suggests/)).toBeTruthy();
     fireEvent.click(next());
-    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+    while (!screen.queryByText("Review your bot")) fireEvent.click(next());
 
     await waitFor(() => expect("config" in lastDraftFor("preview_manifest")).toBe(false));
   });
@@ -213,7 +213,7 @@ describe("CreateWizard — step 2: [config] defaults", () => {
     fireEvent.change(screen.getByLabelText("Temperature"), { target: { value: "0.5" } });
     fireEvent.change(screen.getByLabelText("Context window"), { target: { value: "128000" } });
     fireEvent.click(next());
-    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+    while (!screen.queryByText("Review your bot")) fireEvent.click(next());
 
     await waitFor(() =>
       expect(lastDraftFor("preview_manifest").config).toEqual({
@@ -250,7 +250,7 @@ describe("CreateWizard — step 3: tools and MCP", () => {
     fireEvent.click(screen.getByLabelText("Brave Search"));
 
     fireEvent.click(next());
-    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+    while (!screen.queryByText("Review your bot")) fireEvent.click(next());
 
     await waitFor(() => {
       const draft = lastDraftFor("preview_manifest");
@@ -271,12 +271,12 @@ describe("CreateWizard — step 3: tools and MCP", () => {
     await waitFor(() => expect(screen.getByLabelText("Brave Search")).toBeTruthy());
     fireEvent.click(screen.getByLabelText("Brave Search"));
 
-    const why = screen.getByLabelText("Why this agent needs it brave-search");
+    const why = screen.getByLabelText("Why this bot needs it brave-search");
     fireEvent.change(why, { target: { value: "fresh docs" } });
     fireEvent.click(screen.getByRole("switch", { name: "Required" }));
 
     fireEvent.click(next());
-    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+    while (!screen.queryByText("Review your bot")) fireEvent.click(next());
 
     await waitFor(() =>
       expect(lastDraftFor("preview_manifest").mcp_servers).toEqual([
@@ -347,7 +347,7 @@ describe("CreateWizard — step 3: tools and MCP", () => {
     fireEvent.click(screen.getByRole("switch", { name: "pm_claim_task" }));
 
     fireEvent.click(next());
-    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+    while (!screen.queryByText("Review your bot")) fireEvent.click(next());
 
     await waitFor(() => {
       const servers = lastDraftFor("preview_manifest").mcp_servers as Record<string, unknown>[];
@@ -397,7 +397,7 @@ describe("CreateWizard — step 3: tools and MCP", () => {
     // opinion", so the draft must not carry a guessed whitelist.
     await waitFor(() => expect(screen.getByText(/Tool list unavailable/)).toBeTruthy());
     fireEvent.click(next());
-    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+    while (!screen.queryByText("Review your bot")) fireEvent.click(next());
     await waitFor(() =>
       expect((lastDraftFor("preview_manifest").mcp_servers as Record<string, unknown>[])[0].tools).toEqual([]),
     );
@@ -468,7 +468,7 @@ describe("CreateWizard — step 3: builtin tool defaults", () => {
     fireEvent.click(screen.getByLabelText("todo_write"));
 
     fireEvent.click(next());
-    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+    while (!screen.queryByText("Review your bot")) fireEvent.click(next());
     await waitFor(() => expect(lastDraftFor("preview_manifest").tools).toEqual(["file_write"]));
   });
 
@@ -537,7 +537,7 @@ describe("CreateWizard — step 4: skills and capabilities", () => {
     await waitFor(() => expect(screen.getByText("requirements-analysis")).toBeTruthy());
 
     fireEvent.click(next());
-    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+    while (!screen.queryByText("Review your bot")) fireEvent.click(next());
 
     await waitFor(() => {
       const draft = lastDraftFor("preview_manifest");
@@ -570,7 +570,7 @@ describe("CreateWizard — step 4: skills and capabilities", () => {
     fireEvent.click(screen.getByRole("button", { name: "requirements-analysis" }));
 
     fireEvent.click(next());
-    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+    while (!screen.queryByText("Review your bot")) fireEvent.click(next());
 
     await waitFor(() =>
       expect(lastDraftFor("preview_manifest").capabilities).toEqual([
@@ -641,7 +641,7 @@ describe("CreateWizard — step 5: preview and create", () => {
     fireEvent.click(next());
     fireEvent.click(next());
     fireEvent.click(next());
-    await waitFor(() => expect(screen.getByText("Review your agent")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Review your bot")).toBeTruthy());
     await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === "preview_manifest")).toBe(true));
   }
 
@@ -667,7 +667,7 @@ describe("CreateWizard — step 5: preview and create", () => {
     });
     await goToPreview();
     expect(screen.getByText(/1 hint\(s\)/)).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Create Agent" }) as HTMLButtonElement).disabled).toBe(
+    expect((screen.getByRole("button", { name: "Create Bot" }) as HTMLButtonElement).disabled).toBe(
       false,
     );
   });
@@ -680,7 +680,7 @@ describe("CreateWizard — step 5: preview and create", () => {
     });
     await goToPreview();
     expect(screen.getByText(/duplicate capability/)).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Create Agent" }) as HTMLButtonElement).disabled).toBe(
+    expect((screen.getByRole("button", { name: "Create Bot" }) as HTMLButtonElement).disabled).toBe(
       true,
     );
   });
@@ -692,7 +692,7 @@ describe("CreateWizard — step 5: preview and create", () => {
     });
 
     const previewDraft = lastDraftFor("preview_manifest");
-    fireEvent.click(screen.getByRole("button", { name: "Create Agent" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Bot" }));
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith("com.example.agent"));
 
     // Same object, field for field: preview and create cannot drift.
@@ -710,7 +710,7 @@ describe("CreateWizard — step 5: preview and create", () => {
       },
       preview_manifest: () => ({ toml: "x", errors: [], warnings: [] }),
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create Agent" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Bot" }));
     await waitFor(() => expect(screen.getByText(/gateway rejected the package/)).toBeTruthy());
     expect(onCreated).not.toHaveBeenCalled();
   });
@@ -727,7 +727,7 @@ describe("CreateWizard — reset", () => {
     rerender(<CreateWizard open={false} nodeId="n1" onCreated={onCreated} onClose={onClose} />);
     rerender(<CreateWizard open nodeId="n1" onCreated={onCreated} onClose={onClose} />);
 
-    expect((screen.getByLabelText("Agent ID") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Bot ID") as HTMLInputElement).value).toBe("");
     expect(screen.queryByRole("button", { name: "Remove label agile" })).toBeNull();
     // Back on step 1, not wherever the closed dialog was.
     expect(within(document.body).getByText("Basic")).toBeTruthy();
