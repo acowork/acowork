@@ -87,7 +87,10 @@ The breakdown is not finished when it is written down — it is finished when it
    - Use `doc_write` to save the breakdown when requested
    - Use `mcp_memory__memory_store` to persist task structure, estimates, assumptions, and dependency decisions
 
-## Output Format
+## Output
+
+This is the shape of the `pm_submit_task` text, not a document: a task like this owes no file,
+and the submission text plus the diff are the record (`project-participation` has the contract).
 
 ```markdown
 # Task Breakdown: [Project/Milestone Name]

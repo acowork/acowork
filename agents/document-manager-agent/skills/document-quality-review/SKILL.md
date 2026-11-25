@@ -66,7 +66,11 @@ A review is a read plus a decision, and both go through the service.
    - Classify findings as Blocker, Important, Minor, or Question
    - Use `mcp_memory__memory_store` for recurring documentation quality issues and style decisions
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/the canonical page for the artifact (one page per task)` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # Document Quality Review: [Document]

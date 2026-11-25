@@ -64,9 +64,10 @@ tool_deps:
    - Ensure the document follows the project's documentation style
    - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
 
-## Output Format
+## Output
 
-Documentation types follow their own formats. Common elements:
+One file, published once into the area its kind owns (a technical note → `{doc_path}/技术方案/`,
+a change record → the page it describes). Documentation types follow their own formats. Common elements:
 
 ```markdown
 # [Title]
@@ -105,7 +106,7 @@ For ADRs specifically:
 ## Notes
 
 - Documentation should answer three questions: What? Why? How?
-- A document is a deliverable only when the task asks for one: one page per task, outline first (see `rules.md` → *Document budget*). Do not produce a companion plan or a completion report around it.
+- A document is the deliverable: publish it once and let it stand (see `rules.md` → *Document output*).
 - Code examples > prose explanations — show, don't tell
 - When documenting APIs, include: parameters, return values, error conditions, and at least one example
 - Keep documentation close to the code it describes — colocated docs stay up to date

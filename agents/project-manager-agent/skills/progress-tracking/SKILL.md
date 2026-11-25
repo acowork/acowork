@@ -77,7 +77,11 @@ Status comes from the service, never from recollection.
    - Use `doc_write` to save the status report when requested
    - Use `mcp_memory__memory_store` to persist status, metrics, decisions, velocity, estimation accuracy, and blockers
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/周报/{YYYY-WW}.md` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # Project Status Report — [Date]

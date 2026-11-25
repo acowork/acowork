@@ -70,7 +70,10 @@ If you did not see the test fail for the expected reason, you have not proven th
 7. **Record useful findings**
    - Use `mcp_memory__memory_store` for recurring edge cases, testing patterns, flaky-test causes, and project-specific test commands
 
-## Output Format
+## Output
+
+This is the shape of the `pm_submit_task` text, not a document: a task like this owes no file,
+and the submission text plus the diff are the record (`project-participation` has the contract).
 
 ```markdown
 ## Test Report

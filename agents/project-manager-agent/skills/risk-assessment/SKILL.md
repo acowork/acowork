@@ -81,7 +81,11 @@ A risk register in a file is a risk nobody watches.
    - Use `doc_write` to save the risk register when requested
    - Use `mcp_memory__memory_store` to persist risk patterns, realized risks, mitigation outcomes, and estimation learnings
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/风险登记册.md` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # Risk Register: [Project Name]

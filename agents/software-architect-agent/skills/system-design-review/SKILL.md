@@ -60,7 +60,11 @@ tool_deps:
 7. **Persist review insights**
    - Use `mcp_memory__memory_store` for recurring architectural risks, project conventions, and important decisions
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/评审/{YYYY-MM-DD}-{slug}.md` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # System Design Review: [Design Name]

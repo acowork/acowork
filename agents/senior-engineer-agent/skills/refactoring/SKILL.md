@@ -72,7 +72,10 @@ Do not refactor without a safety net. Add characterization tests first when cove
    - Update affected documentation only when public structure or usage changed
    - Use `mcp_memory__memory_store` to record refactoring rationale, safe patterns, and avoided pitfalls
 
-## Output Format
+## Output
+
+This is the shape of the `pm_submit_task` text, not a document: a task like this owes no file,
+and the submission text plus the diff are the record (`project-participation` has the contract).
 
 ```markdown
 ## Refactoring Report

@@ -56,7 +56,11 @@ tool_deps:
    - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist key decisions and implementation constraints
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/技术方案/{slug}.md` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # [Feature/System] Technical Implementation Plan

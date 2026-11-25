@@ -63,11 +63,10 @@ either.
    - `pm_create_task` with `project_id`, `title` (imperative, concrete),
      `description` (acceptance criteria — this is the whole brief the assignee
      will get), `assignee`, `priority`, `type`.
-   - **Name the document, or say "none".** The brief decides whether a task ends
-     in a document: `技术方案/{slug}.md`, `评审/{date}-{slug}.md`, or nothing at all
-     for a fix or a test run. A brief that asks for a plan *and* an implementation
-     record *and* an acceptance report buys three redundant files — the brief is
-     already the spec (see `prompts/rules.md` → *Document Budget*).
+   - **Name the document, or say "none".** The brief decides whether a task ends in
+     a document: `技术方案/{slug}.md`, `评审/{date}-{slug}.md`, or nothing at all for
+     a fix or a test run. Whatever the assignee must hand back, the brief already
+     says it — one deliverable per task (see `prompts/rules.md` → *Document output*).
    - `start_at`: when the work should *begin*. Omit it and the store fills
      `now` — the wake-up goes out as soon as approval lands; set a future
      `start_at` and the scanner waits. Use it for real sequencing (a sprint
@@ -130,7 +129,10 @@ away.
 - Editing `assignee` back and forth to force a re-dispatch. Clearing the
   generation is the effect, but the cause is never fixed and the history lies.
 
-## Output Format
+## Output
+
+This is the shape of the `pm_submit_task` text, not a document: a task like this owes no file,
+and the submission text plus the diff are the record (`project-participation` has the contract).
 
 ```markdown
 ## Dispatch

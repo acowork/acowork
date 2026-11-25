@@ -61,7 +61,11 @@ Collecting means importing into the library, not copying files around.
    - Include provenance and open questions
    - Use `mcp_memory__memory_store` to persist inventory location, canonical-source candidates, and collection rules
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/the canonical page for the artifact (one page per task)` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # Document Collection Inventory: [Topic]

@@ -59,7 +59,11 @@ A conversion produces a new document, not an overwrite.
    - Compare source and target for missing sections
    - Use `mcp_memory__memory_store` to persist reusable conversion mapping or template decisions
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/the canonical page for the artifact (one page per task)` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # Format Conversion Report: [Document]

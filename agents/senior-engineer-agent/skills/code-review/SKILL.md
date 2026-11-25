@@ -77,7 +77,11 @@ Critical and Important issues must be resolved before proceeding unless the user
    - Acknowledge good decisions worth preserving
    - Use `mcp_memory__memory_store` for recurring project review findings and conventions
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/评审/{YYYY-MM-DD}-{slug}.md` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 ## Code Review Report

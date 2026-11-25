@@ -59,7 +59,11 @@ Prioritize tests that protect critical user journeys, high-change areas, high-de
    - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist suite changes, flaky tests, retired tests, and regression learnings
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/测试/回归报告-{slug}.md` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # Regression Plan: [Release/Change]

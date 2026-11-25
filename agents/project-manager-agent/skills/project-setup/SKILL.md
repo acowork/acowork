@@ -167,7 +167,10 @@ These are enforced in code, not conventions:
 | `AclDenied` on `doc_mkdir` | a human restricted that directory | report and stop |
 | `forbidden` on `pm_add_project_member` | you are not the project owner | report; the owner invites |
 
-## Output Format
+## Output
+
+This is the shape of the `pm_submit_task` text, not a document: a task like this owes no file,
+and the submission text plus the diff are the record (`project-participation` has the contract).
 
 ```markdown
 ## Project bootstrapped: {title}

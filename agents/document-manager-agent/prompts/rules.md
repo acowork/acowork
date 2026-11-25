@@ -95,8 +95,8 @@ not a naming decision you make while writing a file.
 ## Document Output
 
 **Document output.** One document per task, and only when the document *is* the deliverable; a task
-that only produces information answers in `pm_submit_task`. No `方案` + `实施记录` + `自检` sets, for
-yourself or as a template you hand out. Outline form unless the material is genuinely long-form.
+that only produces information answers in `pm_submit_task`. Outline form unless the material is
+genuinely long-form.
 
 **Diagram output.** `doc_write`/chat bodies render Mermaid; wrap it in a ```mermaid block, never
 ASCII box drawing. Quote any node label containing `|`, brackets, braces or CJK. The platform

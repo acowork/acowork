@@ -51,7 +51,10 @@ Test cases must prove behavior and risk coverage, not implementation details. Ev
    - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist reusable edge cases, scenario patterns, and automation decisions
 
-## Output Format
+## Output
+
+This is the shape of the `pm_submit_task` text, not a document: a task like this owes no file,
+and the submission text plus the diff are the record (`project-participation` has the contract).
 
 ```markdown
 # Test Cases: [Feature/Area]

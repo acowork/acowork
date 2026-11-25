@@ -77,7 +77,11 @@ Notes are worth nothing if the actions in them evaporate.
    - Distribute notes within 24 hours
    - Use `mcp_memory__memory_store` to persist decisions, action items, owner commitments, and follow-up dates
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/会议纪要/{YYYY-MM-DD}-{slug}.md` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # Meeting Notes: [Meeting Title]

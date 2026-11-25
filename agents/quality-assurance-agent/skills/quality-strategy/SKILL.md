@@ -55,7 +55,10 @@ Quality strategy must be risk-based and evidence-driven. Do not define generic q
    - Use `mcp_memory__memory_store` to persist quality strategy, metrics, gates, and known risks
    - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
 
-## Output Format
+## Output
+
+This is the shape of the `pm_submit_task` text, not a document: a task like this owes no file,
+and the submission text plus the diff are the record (`project-participation` has the contract).
 
 ```markdown
 # Quality Strategy: [Product/Release]

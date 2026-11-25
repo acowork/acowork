@@ -88,7 +88,11 @@ The sprint lives in the PM service, not in the planning document.
    - Use `doc_write` to save the sprint plan when requested
    - Use `mcp_memory__memory_store` to persist sprint goal, commitment, capacity assumptions, selected items, risks, and retrospective actions
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/冲刺计划.md` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ````markdown
 # Sprint Plan: Sprint [N]

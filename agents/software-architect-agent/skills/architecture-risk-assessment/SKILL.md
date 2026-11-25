@@ -53,7 +53,10 @@ tool_deps:
 6. **Persist learnings**
    - Use `mcp_memory__memory_store` for recurring risks, mitigation patterns, and project-specific rollback practices
 
-## Output Format
+## Output
+
+This is the shape of the `pm_submit_task` text, not a document: a task like this owes no file,
+and the submission text plus the diff are the record (`project-participation` has the contract).
 
 ```markdown
 # Architecture Risk Assessment: [Change Name]

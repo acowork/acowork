@@ -74,7 +74,10 @@ Report from the service, and record what you reported.
    - Use `mcp_memory__memory_store` to record what was communicated, to whom, decisions, commitments, feedback, and follow-up date
    - Track pending responses and escalate missed decision deadlines
 
-## Output Format
+## Output
+
+This is the shape of the `pm_submit_task` text, not a document: a task like this owes no file,
+and the submission text plus the diff are the record (`project-participation` has the contract).
 
 ```markdown
 # [Project Name] — Stakeholder Communication

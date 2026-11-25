@@ -50,7 +50,11 @@ Do not accept a feature by impression. Acceptance requires evidence against PRD,
    - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist acceptance decision, gaps, follow-ups, and rationale
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/验收/{slug}-验收报告.md` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # Feature Acceptance Report: [Feature]

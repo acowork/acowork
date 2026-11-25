@@ -55,7 +55,11 @@ Do not write vague requirements that cannot be accepted or rejected.
    - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist PRD location, decisions, requirements, and open questions
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/PRD.md (the PM's page — a write there is a pending_review proposal)` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # PRD: [Feature Name]

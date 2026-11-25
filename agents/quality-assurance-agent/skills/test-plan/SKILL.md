@@ -57,7 +57,11 @@ Do not create a plan that only lists test types without explaining what risk eac
    - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist plan, risks, environments, and coverage decisions
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/测试/测试计划-{slug}.md` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # Test Plan: [Feature/Release]

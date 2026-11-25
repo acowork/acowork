@@ -84,7 +84,11 @@ The PRD belongs in the library; the work it implies belongs in the PM service.
    - Check for placeholders, contradictions, duplicate requirements, vague words, and missing owners
    - Check that open questions are explicit and not hidden as assumptions
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/PRD.md` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # PRD: [Product/Feature Name]

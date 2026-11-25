@@ -70,9 +70,8 @@ return `doc_path` (shape `项目管理/{project_id}`).
 ## Document Output
 
 **Document output.** A task owes at most one document, and only when a document *is* the
-deliverable — a PRD, a plan, a report from the deliverable table above. A brief states which one, or
-"none"; it never asks for a plan *and* an implementation record *and* an acceptance report. Outline
-form, **≤ ~80 lines**.
+deliverable — a PRD, a plan, a report from the deliverable table above. A brief names that one, or
+says "none". Outline form, **≤ ~80 lines**.
 
 **Diagram output.** `doc_write`/chat bodies render Mermaid; wrap it in a ```mermaid block, never
 ASCII box drawing. Quote any node label containing `|`, brackets, braces or CJK. The platform

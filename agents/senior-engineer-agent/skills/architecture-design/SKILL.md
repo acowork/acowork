@@ -67,12 +67,16 @@ Architecture is trade-off management. Always document the choice, rejected alter
    - If rollback is unclear, mark the design incomplete
 
 7. **Write and self-review the design**
-   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
+   - Publish to `{doc_path}/技术方案/{slug}.md` (see `project-participation`) — this design is the task's one document.
    - Use `mcp_memory__memory_store` to persist accepted decisions, rejected alternatives, risks, and assumptions
    - Self-review the design for placeholders, contradictions, ambiguous requirements, missing tests, and oversized scope
    - If the design has unresolved material questions, surface them before implementation planning
 
-## Output Format
+## Output
+
+One file, published once into `{doc_path}/技术方案/{slug}.md` — this is the task's deliverable, not a record of
+doing it. Outline it: headings and bullets, ≤ ~80 lines unless the material is long-form.
+See `rules.md` → *Document output*.
 
 ```markdown
 # Architecture Design: [System Name]
@@ -132,12 +136,6 @@ Architecture is trade-off management. Always document the choice, rejected alter
 ## 10. Open Questions
 - [Question]
 
-## 11. Self-Review
-- [x] Requirements covered
-- [x] No placeholders
-- [x] Interfaces explicit
-- [x] Tests and rollout defined
-- [x] Rollback path defined
 ```
 
 ## Red Flags
