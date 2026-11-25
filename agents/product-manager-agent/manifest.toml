@@ -2,7 +2,7 @@
 # A product manager agent for strategy, discovery, PRD, roadmap, Figma design review, feature acceptance, and launch planning.
 
 agent_id = "com.acowork.product-manager"
-version = "1.2.2"
+version = "1.2.3"
 name = "Product"
 role = "Product Manager"
 description = "A product manager agent skilled in product strategy, user research, PRD writing, roadmap prioritization, Figma design review, feature acceptance, and launch planning."
@@ -137,9 +137,13 @@ why = "Claim, work and submit project tasks — the participation surface, not t
 # management-plane tools — `pm_update_task`, `pm_create_project`,
 # `pm_update_project`, `pm_add_project_member`, `pm_list_agents` (plan D-1): the
 # boundary is enforced by the whitelist, not by skill prose.
+# `pm_create_task` is management-plane too (task creation is the PM's call, not
+# a participant's): a participant that files its own tasks competes with the
+# PM's own dispatch and duplicates work. Report through `pm_add_activity`
+# instead and let the PM raise the card.
 tools = [
   "pm_list_tasks", "pm_get_task", "pm_get_project", "pm_claim_task",
-  "pm_submit_task", "pm_add_activity", "pm_list_activity", "pm_create_task",
+  "pm_submit_task", "pm_add_activity", "pm_list_activity",
 ]
 
 [[mcp_servers]]

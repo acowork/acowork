@@ -15,7 +15,6 @@ tool_deps:
   - doc_stat
   - doc_check_request
   - doc_list_requests
-  - pm_create_task
   - pm_add_activity
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -35,8 +34,7 @@ A review is a read plus a decision, and both go through the service.
 
 - `doc_stat` (metadata, version, timestamps) then `doc_read` (body). Review the thing
   that is stored, not a copy you made.
-- Findings that require a change are `pm_create_task` entries with the document path
-  and section; findings you fix yourself are a `doc_write` with `if_version`.
+- Findings that require a change are reported with `pm_add_activity` — the document path, the section, and what is wrong — and the PM raises the task; findings you fix yourself are a `doc_write` with `if_version`.
 - Pending changes you are asked about: `doc_list_requests` (`reference=<path>`) shows
   the queue; `doc_check_request` shows one decision.
 - Record the verdict with `pm_add_activity` on the review task — "reviewed and

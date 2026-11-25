@@ -2,7 +2,7 @@
 # A documentation management agent for collection, organization, archiving, writing, format conversion, and knowledge base maintenance.
 
 agent_id = "com.acowork.document-manager"
-version = "1.1.2"
+version = "1.1.3"
 name = "Docs"
 role = "Document Manager"
 description = "A document management agent skilled in collecting, organizing, archiving, writing, reviewing, converting, and maintaining documentation and knowledge bases."
@@ -146,8 +146,12 @@ tools = [
 
 [[mcp_servers]]
 hosted = "pm"
-why = "Collection, conversion and archive chores are tracked as tasks with owners and dates instead of living in notes"
-tools = ["pm_create_task", "pm_add_activity"]
+why = "Collection, conversion and archive chores are reported on the task thread with owners and dates instead of living in notes"
+# `pm_create_task` is absent on purpose: task creation is the PM's call, not a
+# participant's. A participant that files its own tasks competes with the PM's
+# own dispatch and duplicates work. Report through `pm_add_activity` and let
+# the PM raise the card.
+tools = ["pm_add_activity"]
 
 [[mcp_servers]]
 preset = "docling"

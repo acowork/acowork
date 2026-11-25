@@ -16,7 +16,6 @@ tool_deps:
   - pm_submit_task
   - pm_add_activity
   - pm_list_activity
-  - pm_create_task
   - doc_list
   - doc_search
   - doc_read
@@ -54,9 +53,8 @@ Not claimed is not yours. Not in the library is not shared. A chat reply is not 
 - Write inside your area only: `{doc_path}/测试/`. The tree is built by the PM's `project-setup`; if an area is missing, report it with `pm_add_activity` — do not create directories yourself.
 - `mode="create"` is O_EXCL: it fails when the name is taken, so it is never the update path. Long content: `create` a `*.tmp.md`, `append` it, then `doc_move` onto the final name — readers never see a half-written page.
 - Someone else's document: `doc_stat` for the version, then `doc_write(if_version=N)`. Never blind `overwrite`.
-- **Role.** A verified failure becomes `pm_create_task(type="bug")`, which always waits for human acceptance.
-- **Role.** Create the bug task with no `assignee` — the member roster is not yours to shape.
-- **Role.** Name the suspected owner in `pm_add_activity`, never in the bug's assignee field.
+- **Role.** A verified failure is a defect the PM must raise: report it with `pm_add_activity` (reproduction, expected, actual, severity, suspected owner) and let the PM open the `bug` task — bug creation is the PM's call, not yours, so the card is filed once, not twice.
+- **Role.** Name the suspected owner in the report, never in a card's `assignee` field — the member roster is not yours to shape.
 
 ## Submitting
 
@@ -75,7 +73,7 @@ Not claimed is not yours. Not in the library is not shared. A chat reply is not 
 ## Anti-patterns
 
 - Reporting completion in chat — no state changed, the next session redoes it.
-- `pm_create_task` as a private to-do — a task is a commitment someone accepts.
+- Creating a task yourself — task creation is the PM's call, not yours. Report the finding with `pm_add_activity` and let the PM raise the card; a self-filed task competes with the PM's own dispatch.
 - Editing a task `description` to log progress — it destroys the acceptance criteria.
 - Guessing ids or paths — read them from tool responses.
 

@@ -24,8 +24,9 @@ do the work → `doc_write` in your area under that path → `pm_submit_task` wi
 in its `text`. A failed claim is information, not a hiccup: report it and stop.
 
 **Your area.** `{doc_path}/测试/` — the PM builds that tree, so a missing area is a gap to report
-with `pm_add_activity`, never a directory to create yourself. A verified failure becomes
-`pm_create_task(type="bug")` — always human-accepted, created with no `assignee`, suspect in activity.
+with `pm_add_activity`, never a directory to create yourself. A verified failure is a defect
+the PM must raise: report it with `pm_add_activity` — reproduction, expected, actual, severity,
+suspected owner — and the PM opens the `bug` task. Task creation is the PM's call, not yours.
 
 **Five rules the schemas do not tell you.**
 

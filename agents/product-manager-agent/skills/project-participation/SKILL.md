@@ -16,7 +16,6 @@ tool_deps:
   - pm_submit_task
   - pm_add_activity
   - pm_list_activity
-  - pm_create_task
   - doc_list
   - doc_search
   - doc_read
@@ -75,7 +74,7 @@ Not claimed is not yours. Not in the library is not shared. A chat reply is not 
 ## Anti-patterns
 
 - Reporting completion in chat — no state changed, the next session redoes it.
-- `pm_create_task` as a private to-do — a task is a commitment someone accepts.
+- Creating a task yourself — task creation is the PM's call, not yours. Report the finding with `pm_add_activity` and let the PM raise the card; a self-filed task competes with the PM's own dispatch.
 - Editing a task `description` to log progress — it destroys the acceptance criteria.
 - Guessing ids or paths — read them from tool responses.
 

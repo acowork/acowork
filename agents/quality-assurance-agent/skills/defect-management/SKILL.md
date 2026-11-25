@@ -15,7 +15,6 @@ tool_deps:
   - doc_write
   - pm_get_task
   - pm_add_activity
-  - pm_create_task
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -45,6 +44,7 @@ Do not accept or close a defect without evidence. A defect needs reproduction, i
    - Link affected requirement, test case, release, or known issue
    - Decide: fix now, defer, duplicate, cannot reproduce, expected behavior, or needs more information
    - Define verification criteria before work starts
+   - **Filing the defect is the PM's call, not yours.** You have no `pm_create_task`; you report the triaged defect with `pm_add_activity` (severity, priority, reproduction, expected, actual, suspected owner, verification criteria) and the PM opens the `bug` card, which always waits for human acceptance. Name the suspected owner in the report — never in a card's `assignee` field, the member roster is not yours to shape.
 
 4. **Track resolution and verification**
    - Verify fixes against original reproduction and regression coverage
