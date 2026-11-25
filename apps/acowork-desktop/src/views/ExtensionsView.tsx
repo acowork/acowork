@@ -26,21 +26,108 @@ import {
 } from "../lib/appGallery";
 import { sameCatalog } from "../lib/catalogCache";
 import {
-    installAppFromUrl,
-    installAppPackage,
+    installErrorText,
     installErrorMessage,
+    installJobActive,
+    installJobPct,
     listAppVersions,
     listApps,
+    listInstallJobs,
     readCachedInstalledApps,
     rollbackApp,
     setAppEnabled,
+    startAppInstallFromPackage,
+    startAppInstallFromUrl,
     uninstallApp,
     type AppDto,
     type AppVersionInfo,
+    type InstallJobDto,
 } from "../lib/apps-api";
 import { useLayoutStore } from "../stores/layoutStore";
 import { cn } from "../lib/utils";
 import { useTranslation } from "../i18n/useTranslation";
+
+/** Sentinel id for an uploaded `.app`: the gateway assigns the real app id
+ *  only after it unpacks the package, but the upload has an in-flight state
+ *  to show exactly like a gallery install does. */
+const LOCAL_INSTALL = "\0local";
+
+/** How often the panel polls the Gateway while an install is running. */
+const INSTALL_POLL_MS = 600;
+
+/**
+ * A just-installed app reports `starting` until its own process answers. Poll
+ * the local list until it flips, bounded — an app that never comes up must not
+ * be polled forever (it then keeps the amber dot, which is the truth).
+ */
+const LAUNCH_POLL_MS = 1500;
+const LAUNCH_POLL_MAX = 20;
+
+/**
+ * Identity-preserving compare (repo convention): a poll that returns what is
+ * already on screen must not produce a new array, or every card re-renders
+ * twice a second for nothing.
+ */
+function sameJobs(a: InstallJobDto[], b: InstallJobDto[]): boolean {
+    if (a.length !== b.length) return false;
+    return a.every((job, i) => {
+        const other = b[i];
+        return (
+            job.job_id === other.job_id &&
+            job.phase === other.phase &&
+            job.received_bytes === other.received_bytes &&
+            job.total_bytes === other.total_bytes &&
+            job.error === other.error &&
+            job.app_id === other.app_id
+        );
+    });
+}
+
+/** Insert-or-replace one job by id, keeping the list newest-first. */
+function upsertJob(jobs: InstallJobDto[], job: InstallJobDto): InstallJobDto[] {
+    return [job, ...jobs.filter((j) => j.job_id !== job.job_id)];
+}
+
+/**
+ * One row's progress: a real byte bar while the package downloads, an
+ * indeterminate one for the steps behind it (unpack / verify / spawn take
+ * however long the package and the disk need, and no honest percentage
+ * exists for them).
+ */
+function InstallProgress({ job }: { job: InstallJobDto }) {
+    const { t } = useTranslation();
+    const pct = installJobPct(job);
+    const label =
+        job.phase === "download"
+            ? t("extensions.downloading")
+            : job.phase === "verify"
+              ? t("extensions.verifying")
+              : t("extensions.installing");
+    return (
+        <div role="status" aria-live="polite" className="w-full">
+            <div className="flex items-center justify-between gap-2 text-[11px] text-text-tertiary">
+                <span className="inline-flex items-center gap-1">
+                    <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                    {label}
+                </span>
+                {pct !== null && <span className="tabular-nums">{pct}%</span>}
+            </div>
+            {/* Unknown size (no Content-Length yet) is 0 %, not "full": an
+                empty track pulsing is honest, a full bar reads as finished. */}
+            <div
+                className={cn(
+                    "mt-1 h-1 w-full overflow-hidden rounded-full bg-nav-surface",
+                    pct === null && "animate-pulse",
+                )}
+            >
+                <div
+                    className="h-full rounded-full bg-accent-strong transition-[width] duration-500 ease-out"
+                    style={{ width: `${pct ?? 0}%` }}
+                />
+            </div>
+        </div>
+    );
+}
 
 function badgeClass(badge: InstallBadge): string {
     switch (badge) {
@@ -67,6 +154,14 @@ function statusDot(app: AppDto | null): string {
     if (app.status === "ready") return "bg-ok-solid";
     if (app.status === "disabled") return "bg-text-tertiary";
     return "bg-warning-solid";
+}
+
+/** `app_status` in the Gateway is exactly these three plus "not installed". */
+function statusLabelKey(app: AppDto | null): string {
+    if (!app) return "extensions.statusNotInstalled";
+    if (app.status === "ready") return "extensions.statusReady";
+    if (app.status === "disabled") return "extensions.statusDisabled";
+    return "extensions.statusStarting";
 }
 
 export function ExtensionsView() {
@@ -96,14 +191,21 @@ export function ExtensionsView() {
     const [currentVersion, setCurrentVersion] = useState<string | null>(null);
     const [confirmUninstall, setConfirmUninstall] = useState(false);
     const [purgeData, setPurgeData] = useState(false);
-    const [installPct, setInstallPct] = useState<number | null>(null);
+    // Install jobs live on the Gateway (`/api/apps/install-jobs`), so this
+    // panel is only a view of them: it refetches on mount — that is what makes
+    // a running install survive switching panels — and polls while one is
+    // active. The Gateway is also what refuses a duplicate submit for the same
+    // card, so a re-click cannot start a second 17–77 MB download.
+    const [jobs, setJobs] = useState<InstallJobDto[]>([]);
 
-    const reloadLocal = async () => {
+    // `quiet` for the launch poll below: it must not wipe an install error the
+    // user is still reading.
+    const reloadLocal = async (quiet = false) => {
         if (typeof fetch !== "function") return [];
         try {
             const next = await listApps();
             setApps((prev) => (sameCatalog(prev, next) ? prev : next));
-            setActionError(null);
+            if (!quiet) setActionError(null);
             return next;
         } catch {
             return [] as AppDto[];
@@ -134,6 +236,23 @@ export function ExtensionsView() {
     useEffect(() => {
         void reloadAll();
     }, []);
+
+    // The install job's single `reloadAll()` lands before the spawned process
+    // answers, so its dot used to stay amber until the panel was remounted.
+    // While anything is mid-launch, ask again.
+    const launching = apps.some((a) => a.status === "starting");
+    useEffect(() => {
+        if (!launching) return;
+        let ticks = 0;
+        const timer = setInterval(() => {
+            if (++ticks > LAUNCH_POLL_MAX) {
+                clearInterval(timer);
+                return;
+            }
+            void reloadLocal(true);
+        }, LAUNCH_POLL_MS);
+        return () => clearInterval(timer);
+    }, [launching]);
 
     useEffect(() => {
         setCards((prev) => {
@@ -183,6 +302,64 @@ export function ExtensionsView() {
     );
     const selected = visible.find((c) => c.id === selectedId) ?? cards.find((c) => c.id === selectedId) ?? null;
 
+    // Running jobs by card id. A finished job drops out immediately: the card
+    // then shows its real badge again ( Installed / Update ), because the
+    // install either landed or errored — see the completion effect below.
+    const jobsByCard = useMemo(() => {
+        const map = new Map<string, InstallJobDto>();
+        for (const job of jobs) {
+            if (job.hint_id && installJobActive(job)) map.set(job.hint_id, job);
+        }
+        return map;
+    }, [jobs]);
+    const selectedJob = selected ? jobsByCard.get(selected.id) : undefined;
+    const polling = useMemo(() => jobs.some(installJobActive), [jobs]);
+
+    // Reattach on entry: the Gateway, not this component, knows what is
+    // running. Without this the panel came back showing a fresh Install
+    // button while the download was still going.
+    useEffect(() => {
+        void listInstallJobs()
+            .then((next) => setJobs((prev) => (sameJobs(prev, next) ? prev : next)))
+            .catch(() => {});
+    }, []);
+
+    // Poll only while something is actually moving.
+    useEffect(() => {
+        if (!polling) return;
+        const timer = setInterval(() => {
+            void listInstallJobs()
+                .then((next) => setJobs((prev) => (sameJobs(prev, next) ? prev : next)))
+                .catch(() => {});
+        }, INSTALL_POLL_MS);
+        return () => clearInterval(timer);
+    }, [polling]);
+
+    // One place where a job's terminal state becomes a UI effect, however the
+    // job got here (started in this panel, or reattached on entry).
+    const settledRef = useRef<ReadonlySet<string>>(new Set());
+    useEffect(() => {
+        const settled = jobs.filter((job) => !installJobActive(job));
+        const fresh = settled.filter((job) => !settledRef.current.has(job.job_id));
+        if (fresh.length === 0) return;
+        settledRef.current = new Set([...settledRef.current, ...fresh.map((j) => j.job_id)]);
+        const done = fresh.filter((job) => job.phase === "done");
+        const failed = fresh.filter((job) => job.phase === "failed");
+        if (done.length > 0) {
+            void reloadAll();
+            bumpHostedAppsEpoch();
+            const last = done[done.length - 1];
+            if (last.app_id) setSelectedId(last.app_id);
+        }
+        if (failed.length > 0) {
+            const last = failed[failed.length - 1];
+            setActionError(installErrorText(last.error_code, last.error));
+            // The error line lives in the detail pane, so bring the failing
+            // card into view — otherwise the click just left a dead button.
+            if (last.hint_id && last.hint_id !== LOCAL_INSTALL) setSelectedId(last.hint_id);
+        }
+    }, [jobs]);
+
     const moveSelection = (key: string) => {
         if (visible.length === 0) return;
         const at = visible.findIndex((e) => e.id === selectedId);
@@ -206,41 +383,32 @@ export function ExtensionsView() {
         }
     };
 
+    // Both starters only ACCEPT the work: the Gateway answers with the job it
+    // now owns, and the polling effect above carries it from there.
     const onInstallFile = async (file: File | undefined) => {
         if (!file) return;
-        setBusy(true);
         setActionError(null);
-        setInstallPct(0);
         try {
-            const result = await installAppPackage(file, setInstallPct);
-            await reloadAll();
-            bumpHostedAppsEpoch();
-            if (result.app?.id) setSelectedId(result.app.id);
-            else if (result.app_id) setSelectedId(result.app_id);
+            const job = await startAppInstallFromPackage(file, LOCAL_INSTALL);
+            setJobs((prev) => upsertJob(prev, job));
         } catch (e) {
             setActionError(installErrorMessage(e));
         } finally {
-            setBusy(false);
-            setInstallPct(null);
             if (fileRef.current) fileRef.current.value = "";
         }
     };
 
     const onInstallUrl = async (card: GalleryCard) => {
         const pkg = card.gallery?.package;
+        // Unreachable from the UI (the button requires a package), kept so the
+        // handler cannot fire an install POST with a half-read catalog entry.
         if (!pkg?.url || !pkg.sha256) return;
-        setBusy(true);
         setActionError(null);
         try {
-            const result = await installAppFromUrl(pkg.url, pkg.sha256);
-            await reloadAll();
-            bumpHostedAppsEpoch();
-            if (result.app?.id) setSelectedId(result.app.id);
-            else setSelectedId(card.id);
+            const job = await startAppInstallFromUrl(pkg.url, pkg.sha256, card.id);
+            setJobs((prev) => upsertJob(prev, job));
         } catch (e) {
             setActionError(installErrorMessage(e));
-        } finally {
-            setBusy(false);
         }
     };
 
@@ -326,9 +494,12 @@ export function ExtensionsView() {
                         type="button"
                         disabled={busy}
                         onClick={() => fileRef.current?.click()}
-                        className="shrink-0 rounded-md border border-border-divider px-2 py-1 text-[11px] text-text-secondary disabled:opacity-50"
+                        className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border-divider px-2 py-1 text-[11px] text-text-secondary disabled:opacity-50"
                         title={t("extensions.installLocal")}
                     >
+                        {jobsByCard.has(LOCAL_INSTALL) && (
+                            <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                        )}
                         {t("extensions.installLocal")}
                     </button>
                     <input
@@ -375,6 +546,7 @@ export function ExtensionsView() {
                 >
                     {visible.map((card) => {
                         const active = card.id === selectedId;
+                        const job = jobsByCard.get(card.id);
                         return (
                             <button
                                 key={card.id}
@@ -414,7 +586,12 @@ export function ExtensionsView() {
                                         <span className="truncate text-[12px] font-medium text-text-primary">
                                             {card.name}
                                         </span>
-                                        <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", statusDot(card.installed))} />
+                                        <span
+                                            role="img"
+                                            title={t(statusLabelKey(card.installed))}
+                                            aria-label={t(statusLabelKey(card.installed))}
+                                            className={cn("h-1.5 w-1.5 shrink-0 rounded-full", statusDot(card.installed))}
+                                        />
                                     </div>
                                     <div className="mt-0.5 truncate text-[11px] text-text-tertiary">
                                         {card.publisherLabel}
@@ -425,14 +602,20 @@ export function ExtensionsView() {
                                     <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-text-secondary">
                                         {card.summary}
                                     </div>
-                                    <span
-                                        className={cn(
-                                            "mt-1.5 inline-block rounded px-1.5 py-0.5 text-[10px]",
-                                            badgeClass(card.badge),
-                                        )}
-                                    >
-                                        {badgeLabel(card.badge)}
-                                    </span>
+                                    {job ? (
+                                        <div className="mt-1.5">
+                                            <InstallProgress job={job} />
+                                        </div>
+                                    ) : (
+                                        <span
+                                            className={cn(
+                                                "mt-1.5 inline-block rounded px-1.5 py-0.5 text-[10px]",
+                                                badgeClass(card.badge),
+                                            )}
+                                        >
+                                            {badgeLabel(card.badge)}
+                                        </span>
+                                    )}
                                 </div>
                             </button>
                         );
@@ -484,9 +667,14 @@ export function ExtensionsView() {
                                 </div>
                             </div>
 
-                            {installPct !== null && (
-                                <div className="mt-3 text-xs text-text-tertiary">
-                                    {t("extensions.installing")} {installPct}%
+                            {selectedJob && (
+                                <div className="mt-3">
+                                    <InstallProgress job={selectedJob} />
+                                </div>
+                            )}
+                            {jobsByCard.has(LOCAL_INSTALL) && !selectedJob && (
+                                <div className="mt-3">
+                                    <InstallProgress job={jobsByCard.get(LOCAL_INSTALL)!} />
                                 </div>
                             )}
                             {actionError && (
@@ -494,16 +682,37 @@ export function ExtensionsView() {
                             )}
 
                             <div className="mt-4 flex flex-wrap items-center gap-2">
-                                {selected.badge === "available" || selected.badge === "update" ? (
+                                {/* A catalog entry with no downloadable package
+                                    cannot be installed: showing a button for it
+                                    was a dead click (badge `update` does not
+                                    imply a `package`). */}
+                                {(selected.badge === "available" || selected.badge === "update") &&
+                                selected.gallery?.package?.url ? (
                                     <button
                                         type="button"
-                                        disabled={busy}
+                                        disabled={busy || !!selectedJob}
+                                        aria-busy={!!selectedJob}
                                         onClick={() => void onInstallUrl(selected)}
-                                        className="rounded-md btn-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
+                                        className={cn(
+                                            "inline-flex items-center gap-1.5 rounded-md btn-accent px-3 py-1.5 text-xs text-white",
+                                            busy && !selectedJob && "opacity-50",
+                                        )}
                                     >
-                                        {selected.badge === "update"
-                                            ? t("extensions.update")
-                                            : t("extensions.install")}
+                                        {selectedJob ? (
+                                            <>
+                                                <Loader2
+                                                    className="h-3.5 w-3.5 animate-spin"
+                                                    aria-hidden="true"
+                                                />
+                                                {selectedJob.phase === "download"
+                                                    ? t("extensions.downloading")
+                                                    : t("extensions.installing")}
+                                            </>
+                                        ) : selected.badge === "update" ? (
+                                            t("extensions.update")
+                                        ) : (
+                                            t("extensions.install")
+                                        )}
                                     </button>
                                 ) : null}
 
@@ -588,7 +797,7 @@ export function ExtensionsView() {
                                         />
                                         {t("extensions.purgeData")}
                                     </label>
-                                    <div className="ml-auto flex gap-2">
+                                    <div className="flex gap-2">
                                         <button
                                             type="button"
                                             onClick={() => setConfirmUninstall(false)}
@@ -620,8 +829,13 @@ export function ExtensionsView() {
                                 <dl className="grid grid-cols-[120px_1fr] gap-y-2 text-xs text-text-secondary">
                                     <dt className="text-text-tertiary">{t("extensions.status")}</dt>
                                     <dd className="flex items-center gap-2">
-                                        <span className={cn("h-1.5 w-1.5 rounded-full", statusDot(selected.installed))} />
-                                        {selected.installed.status}
+                                        <span
+                                            role="img"
+                                            title={t(statusLabelKey(selected.installed))}
+                                            aria-label={t(statusLabelKey(selected.installed))}
+                                            className={cn("h-1.5 w-1.5 rounded-full", statusDot(selected.installed))}
+                                        />
+                                        {t(statusLabelKey(selected.installed))}
                                         {selected.installed.port ? ` · port ${selected.installed.port}` : ""}
                                     </dd>
                                     <dt className="text-text-tertiary">{t("extensions.version")}</dt>

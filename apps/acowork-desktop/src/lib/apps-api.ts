@@ -49,14 +49,6 @@ export interface AppVersionInfo {
     current: boolean;
 }
 
-export interface InstallResult {
-    installed_version: string;
-    fingerprint?: string | null;
-    origin?: string;
-    app?: AppDto;
-    app_id?: string;
-}
-
 export class AppApiError extends Error {
     code?: string;
     constructor(public status: number, message: string, code?: string) {
@@ -136,32 +128,99 @@ export async function mintAppTicket(id: string): Promise<string> {
 /** The Gateway refuses a package it has to stream past this size (`MAX_APP_PACKAGE_BYTES`). */
 const MAX_APP_PACKAGE_BYTES = 200 * 1024 * 1024;
 
-/** Upload a local `.app` package (`Content-Type: application/octet-stream`). */
-export async function installAppPackage(file: Blob, onProgress?: (pct: number) => void): Promise<InstallResult> {
+/**
+ * One install running (or just finished) on the Gateway.
+ *
+ * The Gateway owns this state, not the view that started it: that is what
+ * makes a running install survive switching panels (the panel remounts and
+ * refetches `listInstallJobs`), and what lets the Gateway answer a duplicate
+ * submit with the job that is already downloading.
+ */
+export interface InstallJobDto {
+    job_id: string;
+    /** Card the Desktop asked for. Display key only — never the installed id. */
+    hint_id?: string | null;
+    phase: "download" | "verify" | "install" | "start" | "done" | "failed";
+    received_bytes: number;
+    /** 0 when the server sent no `Content-Length`. */
+    total_bytes: number;
+    started_at: number;
+    finished_at?: number | null;
+    app_id?: string | null;
+    installed_version?: string | null;
+    error_code?: string | null;
+    error?: string | null;
+}
+
+/** Whether a job still needs polling. */
+export function installJobActive(job: InstallJobDto): boolean {
+    return job.phase !== "done" && job.phase !== "failed";
+}
+
+/** Download progress in whole percent, or `null` when the size is unknown. */
+export function installJobPct(job: InstallJobDto): number | null {
+    if (!job.total_bytes) return null;
+    return Math.min(100, Math.max(0, Math.round((job.received_bytes / job.total_bytes) * 100)));
+}
+
+/**
+ * Hand an uploaded `.app` to the Gateway. The upload is a loopback copy; the
+ * slow part (unpack, signature, spawn) runs as a job the caller polls.
+ */
+export async function startAppInstallFromPackage(
+    file: Blob,
+    hintId?: string,
+): Promise<InstallJobDto> {
     // Checked here because the refusal that matters is the body cap: it answers
     // 413 without the CORS headers the renderer needs, so the browser reports
     // "Failed to fetch" and the user never learns what went wrong.
     if (file.size > MAX_APP_PACKAGE_BYTES) {
         throw new AppApiError(413, "应用包超过 200 MB 限制", "package_too_large");
     }
-    // Progress is best-effort: fetch has no upload progress without XHR.
-    onProgress?.(0);
-    const result = await request<InstallResult>("/api/apps/install", {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: file,
-    });
-    onProgress?.(100);
-    return result;
+    const query = hintId ? `?hint_id=${encodeURIComponent(hintId)}` : "";
+    return asInstallJob(
+        await request<InstallJobDto>(`/api/apps/install${query}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: file,
+        }),
+    );
 }
 
-/** Install from a gallery / Release URL (Gateway verifies sha256). */
-export async function installAppFromUrl(url: string, sha256: string): Promise<InstallResult> {
-    return request<InstallResult>("/api/apps/install-url", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, sha256 }),
-    });
+/**
+ * Hand a gallery / Release URL install to the Gateway (it verifies sha256
+ * while downloading). Answers immediately with the job.
+ */
+export async function startAppInstallFromUrl(
+    url: string,
+    sha256: string,
+    hintId?: string,
+): Promise<InstallJobDto> {
+    return asInstallJob(
+        await request<InstallJobDto>("/api/apps/install-url", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url, sha256, hint_id: hintId ?? null }),
+        }),
+    );
+}
+
+/**
+ * A Gateway built before install jobs answers the install routes with a plain
+ * result and has no `/api/apps/install-jobs`. Say so instead of rendering a
+ * job-less card that never moves.
+ */
+function asInstallJob(body: InstallJobDto): InstallJobDto {
+    if (!body?.job_id) {
+        throw new AppApiError(500, "网关需要重新构建以支持安装任务（install jobs）", "install_jobs_unsupported");
+    }
+    return body;
+}
+
+/** Every job the Gateway knows, running first. Poll this while one is active. */
+export async function listInstallJobs(): Promise<InstallJobDto[]> {
+    const body = await request<{ jobs: InstallJobDto[] }>("/api/apps/install-jobs");
+    return body.jobs ?? [];
 }
 
 export async function listAppVersions(id: string): Promise<{ current: string; versions: AppVersionInfo[] }> {
@@ -181,26 +240,41 @@ export async function uninstallApp(id: string, purgeData = false): Promise<void>
     await request(`/api/apps/${encodeURIComponent(id)}${q}`, { method: "DELETE" });
 }
 
-/** Map stable install error codes to Chinese copy for the workbench. */
+/**
+ * Stable install error codes → workbench copy.
+ *
+ * `package_malformed` covers a dozen unrelated gateway failures (zip entry,
+ * missing manifest, and every download error), and the localized line alone
+ * reads as "your package is bad" while the truth may be a reset mid-download.
+ * So the gateway's own detail is kept alongside it.
+ */
+const INSTALL_ERROR_COPY: Record<string, string> = {
+    package_too_large: "应用包超过 200 MB 限制",
+    package_malformed: "应用包格式无效",
+    package_tampered: "应用包已被篡改",
+    unsigned_package: "未签名的应用包已被拒绝",
+    signer_mismatch: "签名证书与已安装版本不一致",
+    app_api_unsupported: "应用契约版本不受当前平台支持",
+    platform_unsupported: "应用包不支持当前操作系统/架构",
+    app_id_reserved: "不能覆盖内置应用",
+    version_exists: "该版本已安装",
+    binary_missing: "应用包缺少可执行文件",
+    platform_signature_required: "该应用需要平台签名",
+    app_not_installed: "应用未安装",
+    invalid_app_id: "应用 ID 无效",
+    gateway_unavailable: "网关数据目录不可用",
+    uninstall_failed: "卸载失败：安装目录被占用或无法移入回收站",
+};
+
+/** Copy for a failure reported by a code + detail pair (a failed install job). */
+export function installErrorText(code?: string | null, message?: string | null): string {
+    const localized = code ? INSTALL_ERROR_COPY[code] : undefined;
+    if (!localized) return message || "";
+    return message ? `${localized}（${message}）` : localized;
+}
+
+/** Copy for a failure that rejected the request itself. */
 export function installErrorMessage(err: unknown): string {
-    if (err instanceof AppApiError && err.code) {
-        const map: Record<string, string> = {
-            package_too_large: "应用包超过 200 MB 限制",
-            package_malformed: "应用包格式无效",
-            package_tampered: "应用包已被篡改",
-            unsigned_package: "未签名的应用包已被拒绝",
-            signer_mismatch: "签名证书与已安装版本不一致",
-            app_api_unsupported: "应用契约版本不受当前平台支持",
-            platform_unsupported: "应用包不支持当前操作系统/架构",
-            app_id_reserved: "不能覆盖内置应用",
-            version_exists: "该版本已安装",
-            binary_missing: "应用包缺少可执行文件",
-            platform_signature_required: "该应用需要平台签名",
-            app_not_installed: "应用未安装",
-            invalid_app_id: "应用 ID 无效",
-            uninstall_failed: "卸载失败：安装目录被占用或无法移入回收站",
-        };
-        return map[err.code] ?? err.message;
-    }
+    if (err instanceof AppApiError) return installErrorText(err.code, err.message);
     return err instanceof Error ? err.message : String(err);
 }
