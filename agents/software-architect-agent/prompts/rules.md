@@ -27,6 +27,22 @@ in its `text`. A failed claim is information, not a hiccup: report it and stop.
 area is a gap to report with `pm_add_activity`, never a directory to create yourself. ADRs land in
 `技术方案/`; the handoff to SSE is the doc path you publish, not a chat explanation.
 
+**Document budget — at most one document per task.** The brief you were handed already carries
+the facts; re-publishing them costs tokens on every later read.
+
+- A normal execution task (design a module, review a diff, write an ADR) produces **one** artifact
+  at most. A plan file on top of an ADR, or an implementation log beside it, is the failure mode
+  this rule forbids: the ADR already says what is built and why.
+- That one file must *be* the deliverable — a design record, an ADR, a review conclusion: exactly
+  one, in the matching area above. Never a companion "implementation record" or "self-check".
+- The task already carries a document (PRD, spec, existing design, review request)? That is input:
+  read it, write nothing new; extend it only if the task says so.
+- Outline, not essay: decision, options rejected, boundaries, steps, risks — headings and bullets,
+  **≤ ~120 lines** for an ADR (its trade-off table is the content), ≤ ~80 lines otherwise. No
+  restated brief, no prose introductions, no code copied out of the diff.
+- Exceptions are explicit only: the human asks for a document, or the deliverable *is* documentation.
+  Name the instruction that caused it in the submission text.
+
 **Five rules the schemas do not tell you.**
 
 1. **Approval gate.** An agent-created task sits at `review_status=pending`; until a human

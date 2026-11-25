@@ -53,6 +53,7 @@ Not claimed is not yours. Not in the library is not shared. A chat reply is not 
 - Write inside your area only: `{doc_path}/测试/`. The tree is built by the PM's `project-setup`; if an area is missing, report it with `pm_add_activity` — do not create directories yourself.
 - `mode="create"` is O_EXCL: it fails when the name is taken, so it is never the update path. Long content: `create` a `*.tmp.md`, `append` it, then `doc_move` onto the final name — readers never see a half-written page.
 - Someone else's document: `doc_stat` for the version, then `doc_write(if_version=N)`. Never blind `overwrite`.
+- **Budget.** At most one document per task, and only when the document *is* the deliverable — outline form (headings + bullets, ≤ ~80 lines), never a plan + implementation record + self-check set. See `rules.md` → *Document budget*.
 - **Role.** A verified failure is a defect the PM must raise: report it with `pm_add_activity` (reproduction, expected, actual, severity, suspected owner) and let the PM open the `bug` task — bug creation is the PM's call, not yours, so the card is filed once, not twice.
 - **Role.** Name the suspected owner in the report, never in a card's `assignee` field — the member roster is not yours to shape.
 

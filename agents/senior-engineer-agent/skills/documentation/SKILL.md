@@ -105,6 +105,7 @@ For ADRs specifically:
 ## Notes
 
 - Documentation should answer three questions: What? Why? How?
+- A document is a deliverable only when the task asks for one: one page per task, outline first (see `rules.md` → *Document budget*). Do not produce a companion plan or a completion report around it.
 - Code examples > prose explanations — show, don't tell
 - When documenting APIs, include: parameters, return values, error conditions, and at least one example
 - Keep documentation close to the code it describes — colocated docs stay up to date

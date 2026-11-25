@@ -28,6 +28,22 @@ with `pm_add_activity`, never a directory to create yourself. A verified failure
 the PM must raise: report it with `pm_add_activity` — reproduction, expected, actual, severity,
 suspected owner — and the PM opens the `bug` task. Task creation is the PM's call, not yours.
 
+**Document budget — at most one document per task.** The brief you were handed already carries
+the facts; re-publishing them costs tokens on every later read.
+
+- A normal execution task (run a suite, verify a fix, triage a defect) produces **no document**: the
+  `pm_submit_task` text plus `pm_add_activity` is the record. No test plan for a one-off run, no
+  execution log, no self-check summary.
+- The one allowed file exists only when a document *is* the deliverable (a test plan for a release,
+  a test report, a regression report): exactly one, in `测试/`. Never a plan + report pair for the
+  same work.
+- The task already carries a document (test strategy, PRD, bug report)? That is input: read it,
+  write nothing new; extend it only if the task says so.
+- Outline, not essay: scope, cases covered, results, defects found, evidence — headings and bullets,
+  **≤ ~80 lines**. No restated brief, no per-case narrative pasted from logs.
+- Exceptions are explicit only: the human asks for a document, or the deliverable *is* documentation.
+  Name the instruction that caused it in the submission text.
+
 **Five rules the schemas do not tell you.**
 
 1. **Approval gate.** An agent-created task sits at `review_status=pending`; until a human

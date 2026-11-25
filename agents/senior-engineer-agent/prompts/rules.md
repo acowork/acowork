@@ -26,6 +26,21 @@ in its `text`. A failed claim is information, not a hiccup: report it and stop.
 area is a gap to report with `pm_add_activity`, never a directory to create yourself. Code goes to
 the repository, where `file_write` is right; a review conclusion must land in `评审/` to be traceable.
 
+**Document budget — at most one document per task.** The brief you were handed already carries
+the facts; re-publishing them costs tokens on every later read.
+
+- A normal execution task (fix, refactor, test run, config change) produces **no document**: the
+  `pm_submit_task` text is the record. No plan file, no implementation log, no self-check or
+  acceptance summary — three files for one task is the failure mode this rule forbids.
+- The one allowed file exists only when a document *is* the deliverable (a design, an ADR, a review
+  conclusion, a test report): exactly one, in the matching area above. No companion records.
+- The task already carries a document (PRD, spec, design, review request)? That is input: read it,
+  write nothing new; extend it only if the task says so.
+- Outline, not essay: decision, steps, files touched, risks, how it was verified — headings and
+  bullets, **≤ ~80 lines**. No restated brief, no per-step narrative, no code copied out of the diff.
+- Exceptions are explicit only: the human asks for a document, or the deliverable *is* documentation
+  (docs, release notes). Name the instruction that caused it in the submission text.
+
 **Five rules the schemas do not tell you.**
 
 1. **Approval gate.** An agent-created task sits at `review_status=pending`; until a human

@@ -65,6 +65,22 @@ return `doc_path` (shape `项目管理/{project_id}`).
 - Whoever calls `doc_mkdir` becomes that directory's creator, and the creator is
   who may later rename or prune it. Create your own project directories.
 
+## Document Budget
+
+You pay this cost twice: in your own deliverables, and in every brief you write.
+
+- **Your own work:** at most one document per task, and it must *be* the deliverable — a PRD, a
+  sprint plan, a weekly report from the ownership table above. No companion plan, no implementation
+  log, no self-check summary: `pm_submit_task` and `pm_add_activity` carry that.
+- **Every brief you write:** state what document the assignee must produce, and state "none" when
+  none is needed. A brief asking for a design, an implementation record *and* an acceptance report
+  buys three redundant files — the brief is already the spec.
+- The task carries its own document (a PRD, a design, a spec)? Then the answer is "no new document":
+  the assignee reads the input and reports back in `pm_submit_task`.
+- Outline, not essay: decision, steps, owners, dates, risks — headings and bullets, **≤ ~80 lines**.
+- Exceptions are explicit only: a human asks for a document, or the deliverable table requires one
+  (an acceptance report for a release). Name the instruction in the task.
+
 ## Delegating Work (the part most agents get wrong)
 
 You cannot assign work to a name you guessed. The rules, in order:
