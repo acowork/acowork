@@ -310,6 +310,38 @@ impl BootstrapOrchestrator {
 
         let detail = derive_phase_detail(new_phase, registry);
 
+        // Name the blockers in the Gateway's OWN log.
+        //
+        // ADR-059 §5.4.4 forbids subsystem identifiers on the wire, and
+        // that rule is right: a client must not have to know the
+        // Gateway's internal decomposition. But it leaves an operator
+        // staring at "2/5 required ready" with no way to tell which
+        // subsystem is stuck — the 2026-11-24 incident ended exactly
+        // there. The protocol stays aggregate; the process that owns the
+        // subsystems is the one that names them.
+        if matches!(new_phase, BootstrapPhase::Booting | BootstrapPhase::Failed) {
+            let blockers: Vec<String> = registry
+                .snapshot()
+                .into_iter()
+                .filter(|(_, state, kind, _)| {
+                    *kind == crate::bootstrap::registry::ReadinessKind::Required
+                        && *state != SubsystemState::Ready
+                        && *state != SubsystemState::Skipped
+                })
+                .map(|(id, state, _, detail)| match detail {
+                    Some(d) if !d.is_empty() => format!("{id}={state:?}({d})"),
+                    _ => format!("{id}={state:?}"),
+                })
+                .collect();
+            if !blockers.is_empty() {
+                tracing::warn!(
+                    phase = ?new_phase,
+                    blockers = %blockers.join(", "),
+                    "Gateway not ready — blocking required subsystems"
+                );
+            }
+        }
+
         let version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
 
         new_snapshot.phase = new_phase;

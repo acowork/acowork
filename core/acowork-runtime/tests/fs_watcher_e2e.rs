@@ -141,7 +141,7 @@ fn fs_watcher_full_chain_e2e() {
         // ── Real Runtime MQTT client (the production publisher), placed
         //    into the same late-bind slot type the HTTP server holds.
         let (control_tx, _control_rx) = mpsc::unbounded_channel();
-        let runtime_client = RuntimeMqttClient::connect(MqttConnectConfig {
+        let runtime_client = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: AGENT_ID,
@@ -167,6 +167,7 @@ fn fs_watcher_full_chain_e2e() {
         })
         .await
         .expect("runtime mqtt connect");
+        assert!(runtime_client.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
 
         let slot: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(Some(Arc::new(
             tokio::sync::Mutex::new(runtime_client),
@@ -379,7 +380,7 @@ fn fs_watcher_two_instances_route_to_separate_topics() {
         //    keyed on instance_id (now read from the bound client). ──
         let (control_tx_a, _control_rx_a) = mpsc::unbounded_channel();
         let (control_tx_b, _control_rx_b) = mpsc::unbounded_channel();
-        let client_a = RuntimeMqttClient::connect(MqttConnectConfig {
+        let client_a = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: AGENT_ID,
@@ -405,7 +406,8 @@ fn fs_watcher_two_instances_route_to_separate_topics() {
         })
         .await
         .expect("runtime A connect");
-        let client_b = RuntimeMqttClient::connect(MqttConnectConfig {
+        assert!(client_a.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
+        let client_b = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: AGENT_ID,
@@ -431,6 +433,7 @@ fn fs_watcher_two_instances_route_to_separate_topics() {
         })
         .await
         .expect("runtime B connect (must not be kicked off by A)");
+        assert!(client_b.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
 
         let slot_a: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(Some(Arc::new(
             tokio::sync::Mutex::new(client_a),

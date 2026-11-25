@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use prost::Message as _;
 use rumqttc::{AsyncClient, LastWill, QoS};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::Mutex;
 
 use acowork_core::defaults;
 use acowork_core::mqtt_proto::{
@@ -352,7 +352,7 @@ fn extract_provider_keys(
         .collect()
 }
 
-/// Configuration for `RuntimeMqttClient::connect`.
+/// Configuration for `RuntimeMqttClient::spawn`.
 ///
 /// ADR-034 Phase 8: replaces 11 individual parameters.
 pub struct MqttConnectConfig<'a> {
@@ -505,6 +505,8 @@ pub struct RuntimeMqttClient {
     /// Cached inputs needed to re-run `run_bootstrap` on every
     /// (re)connect. See `docs/adr/zh/ADR-039-mqtt-client-lifecycle.md`.
     bootstrap_data: Arc<BootstrapData>,
+    /// Generation counter of successful bootstraps (0 = none yet).
+    bootstrap_rx: tokio::sync::watch::Receiver<u64>,
 }
 
 // `Clone` lets the same underlying MQTT client be shared between
@@ -521,13 +523,14 @@ impl Clone for RuntimeMqttClient {
             agent_id: self.agent_id.clone(),
             instance_id: self.instance_id.clone(),
             bootstrap_data: Arc::clone(&self.bootstrap_data),
+            bootstrap_rx: self.bootstrap_rx.clone(),
         }
     }
 }
 
 /// Cached inputs needed to re-run bootstrap on every (re)connect.
 ///
-/// Built once in `RuntimeMqttClient::connect` and shared (via
+/// Built once in `RuntimeMqttClient::spawn` and shared (via
 /// `Arc<BootstrapData>`) between the initial bootstrap call inside
 /// `connect` and the event-loop task that re-runs bootstrap on every
 /// subsequent `ConnAck`. See ADR-039.
@@ -629,8 +632,10 @@ struct RuntimeHandler {
     /// Last known node reverse-proxy base URL — dedupes the node's
     /// 60 s heartbeat, which re-delivers an unchanged NodeInfo.
     last_node_proxy_base: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// Signals `connect()` when the first ConnAck bootstrap completes.
-    first_conn_tx: tokio::sync::Mutex<Option<oneshot::Sender<Result<(), String>>>>,
+    /// Bumped once per SUCCESSFUL bootstrap (first ConnAck and every
+    /// reconnect). A fact consumers can wait on, not a gate the
+    /// constructor imposes.
+    bootstrap_tx: tokio::sync::watch::Sender<u64>,
 }
 
 #[async_trait::async_trait]
@@ -974,8 +979,8 @@ impl MqttClientHandler for RuntimeHandler {
                 "Runtime MQTT bootstrap after (re)connect failed - agent is degraded"
             );
         }
-        if let Some(tx) = self.first_conn_tx.lock().await.take() {
-            let _ = tx.send(result.as_ref().map_err(|e| e.to_string()).map(|_| ()));
+        if result.is_ok() {
+            self.bootstrap_tx.send_modify(|g| *g += 1);
         }
         result.map_err(|e| e.to_string())
     }
@@ -999,10 +1004,20 @@ impl RuntimeMqttClient {
         self.shared_client.lock().await.clone()
     }
 
-    /// Connect to the MQTT broker and perform the Phase 2 startup sequence.
+    /// Construct the MQTT session and start its supervised poll task.
+    ///
+    /// Returns as soon as the session exists — it does **not** wait for
+    /// the broker. `Err` means the session could not be constructed at
+    /// all, never "the broker did not answer in time". The Phase 2
+    /// startup sequence (`run_bootstrap`) runs on every ConnAck,
+    /// including the first, and re-runs after any reconnect.
+    ///
+    /// Consumers that need to know whether the link is usable watch
+    /// [`Self::session_state_rx`]; the session guarantees a bounded time
+    /// to its next state transition, so such a wait cannot hang.
     ///
     /// ADR-034 Phase 8: takes a single `MqttConnectConfig` struct.
-    pub async fn connect(cfg: MqttConnectConfig<'_>) -> Result<Self, RuntimeMqttClientError> {
+    pub async fn spawn(cfg: MqttConnectConfig<'_>) -> Result<Self, RuntimeMqttClientError> {
         // ADR-073: the broker client id identifies THIS RUNTIME INSTANCE.
         // Two instances of the same package must never share a client id
         // (the broker would disconnect one); the package `agent_id` is
@@ -1071,13 +1086,10 @@ impl RuntimeMqttClient {
             queue_capacity: 100,
         };
 
-        // ADR-039 §5.2.1: use a oneshot channel to synchronise
-        // connect() with the first ConnAck instead of the old
-        // wait_for_connection() anti-pattern (subscribe to a dummy
-        // topic as a readiness probe). The sender is consumed on
-        // the first ConnAck only; subsequent reconnects just
-        // re-run bootstrap and log.
-        let (first_conn_tx, first_conn_rx) = oneshot::channel::<Result<(), String>>();
+        // Bootstrap completion is published as a generation counter so
+        // any number of consumers can wait for it, and a reconnect
+        // produces a fresh fact rather than a one-shot that already fired.
+        let (bootstrap_tx, bootstrap_rx) = tokio::sync::watch::channel(0u64);
 
         let handler = RuntimeHandler {
             bootstrap_data: bootstrap_data.clone(),
@@ -1094,7 +1106,7 @@ impl RuntimeMqttClient {
             node_info_topic: bootstrap_data.node_info_topic.clone(),
             node_proxy_update_tx: cfg.node_proxy_update_tx.clone(),
             last_node_proxy_base: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            first_conn_tx: tokio::sync::Mutex::new(Some(first_conn_tx)),
+            bootstrap_tx,
             // The lifecycle stamp (current_lifecycle / lifecycle_detail)
             // is not cloned into the handler struct — it lives on
             // `bootstrap_data` (an `Arc<BootstrapData>` clone is held by
@@ -1106,18 +1118,24 @@ impl RuntimeMqttClient {
             .await
             .map_err(|e| RuntimeMqttClientError::Connection(e.to_string()))?;
 
-        // ADR-039 §5.2.1: wait for the first ConnAck bootstrap to
-        // complete via a oneshot channel instead of the old
-        // wait_for_connection() anti-pattern. The event loop's
-        // ConnAck handler runs run_bootstrap() and signals us here -
-        // no double bootstrap, no dummy subscribe probe.
-        let bootstrap_result = first_conn_rx.await.map_err(|_| {
-            RuntimeMqttClientError::Connection(
-                "bootstrap signal channel closed (event loop dropped)".into(),
-            )
-        })?;
-        bootstrap_result.map_err(RuntimeMqttClientError::Connection)?;
-
+        // Construction does NOT wait for the first ConnAck.
+        //
+        // The previous wiring awaited a oneshot that only fires on the
+        // first successful bootstrap. A Runtime spawned before the
+        // Gateway broker accepts connections therefore blocked here
+        // forever — no state, no error, no retry — and a bootstrap
+        // failure returned Err, which the caller turned into a
+        // permanent `mqtt_client = None`. Both are the same
+        // "constructor decides readiness once" fault the Gateway had.
+        //
+        // The session is a supervised resource: its poll task retries
+        // with backoff and re-runs `run_bootstrap` on every ConnAck,
+        // reporting failures itself. Subscribes and publishes issued
+        // before the connection are queued by rumqttc and replayed
+        // after it comes up (`EventLoop::clean()` drains the request
+        // channel into `pending`), so the handle is usable immediately.
+        // Readiness is a fact consumers watch via `session_state_rx()`,
+        // not a gate the constructor imposes.
         tracing::info!(
             host = %cfg.host,
             port = %cfg.port,
@@ -1134,6 +1152,7 @@ impl RuntimeMqttClient {
             agent_id: cfg.agent_id.to_string(),
             instance_id: instance_id.to_string(),
             bootstrap_data,
+            bootstrap_rx,
         };
 
         // Presence self-heal (2026-09-17 sleep/wake + Wi-Fi switch
@@ -1392,6 +1411,36 @@ impl RuntimeMqttClient {
     }
 
     /// ADR-039 Phase 2: subscribe to session state changes.
+    /// Wait until at least one bootstrap has completed, or `budget`
+    /// elapses.
+    ///
+    /// A **consumer-side** budget: expiry ends this wait and nothing
+    /// else — the session keeps retrying and will bootstrap on a later
+    /// ConnAck. Returns the observed generation, so `0` means "not yet",
+    /// never "failed forever".
+    pub async fn wait_bootstrapped(&self, budget: std::time::Duration) -> u64 {
+        let mut rx = self.bootstrap_rx.clone();
+        if *rx.borrow_and_update() > 0 {
+            return *rx.borrow();
+        }
+        let deadline = tokio::time::sleep(budget);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        return *rx.borrow();
+                    }
+                    let g = *rx.borrow_and_update();
+                    if g > 0 {
+                        return g;
+                    }
+                }
+                () = &mut deadline => return *rx.borrow(),
+            }
+        }
+    }
+
     pub fn session_state_rx(&self) -> SessionStateRx {
         // The unified client owns the session-state watch channel
         // (ADR-065 Step 4); subscribe to it directly.
@@ -2552,6 +2601,73 @@ mod tests {
     use rumqttc::Event;
     use std::time::Duration;
 
+    /// Regression: constructing a session must not wait for the broker.
+    ///
+    /// A Runtime is spawned by its Node, which can happen before the
+    /// Gateway broker accepts connections (remote node booting first,
+    /// Gateway restarting). The previous `connect` awaited a oneshot
+    /// fired only by the first successful bootstrap, so that case hung
+    /// the whole agent init forever — no state, no error, no retry.
+    ///
+    /// Nothing listens on this port. Construction must still return
+    /// promptly, and the session must be observable as not-connected
+    /// rather than silently absent.
+    #[tokio::test]
+    async fn spawn_returns_without_a_broker() {
+        // Bind then drop to obtain a port nobody is listening on.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let cache = crate::mqtt::new_shared_cache();
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let work_dir = std::env::temp_dir().join("acowork-test-spawn-no-broker");
+
+        let cfg = MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.agent",
+            instance_id: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+            agent_name: "Test Agent",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            mcp_notifier: None,
+            provider_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            work_dir,
+            username: None,
+            password: None,
+            http_advertise_endpoint: None,
+            http_port: None,
+        };
+
+        let client = tokio::time::timeout(Duration::from_secs(3), RuntimeMqttClient::spawn(cfg))
+            .await
+            .expect("construction must not wait for the broker")
+            .expect("session construction itself must succeed");
+
+        assert!(
+            !client.session_state().is_connected(),
+            "precondition: no broker is listening"
+        );
+        // The consumer-side budget expires without destroying anything.
+        assert_eq!(
+            client.wait_bootstrapped(Duration::from_millis(200)).await,
+            0,
+            "no bootstrap can have completed without a broker"
+        );
+        assert!(
+            !client.session_state().is_terminal(),
+            "an expired consumer budget must not kill the session"
+        );
+    }
+
     // ── ADR-085 lifecycle guard + status encoding ──────────────────────
 
     #[test]
@@ -2796,7 +2912,7 @@ mod tests {
         // filesystem writes (if any) from polluting the project tree.
         let work_dir = std::env::temp_dir().join("acowork-test-mqtt-client-18980");
 
-        let client = RuntimeMqttClient::connect(MqttConnectConfig {
+        let client = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.agent",
@@ -2822,7 +2938,11 @@ mod tests {
             http_port: None,
         })
         .await
-        .expect("Runtime MQTT client should connect");
+        .expect("Runtime MQTT session should be constructed");
+        assert!(
+            client.wait_bootstrapped(std::time::Duration::from_secs(10)).await > 0,
+            "bootstrap must complete against a live broker"
+        );
 
         // Verify status was published as retained by subscribing and receiving it
         use rumqttc::{AsyncClient as SubClient, MqttOptions as SubOpts};
@@ -2898,7 +3018,7 @@ mod tests {
         let work_dir = std::env::temp_dir().join("acowork-test-mqtt-heartbeat-18982");
         let instance_id = "bb22cc33-4dd4-4e5e-8f6f-7a8b9c0d1e2f";
 
-        let client = RuntimeMqttClient::connect(MqttConnectConfig {
+        let client = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.agent",
@@ -2922,7 +3042,11 @@ mod tests {
             http_port: None,
         })
         .await
-        .expect("Runtime MQTT client should connect");
+        .expect("Runtime MQTT session should be constructed");
+        assert!(
+            client.wait_bootstrapped(std::time::Duration::from_secs(10)).await > 0,
+            "bootstrap must complete against a live broker"
+        );
 
         use rumqttc::{AsyncClient as SubClient, MqttOptions as SubOpts};
         let mut sub_opts = SubOpts::new("test:heartbeat:sub", "127.0.0.1", port);
@@ -3011,7 +3135,7 @@ mod tests {
         // for rationale — bootstrap idempotency test never inspects the poll task).
         let work_dir = std::env::temp_dir().join("acowork-test-mqtt-bootstrap-18981");
 
-        let client = RuntimeMqttClient::connect(MqttConnectConfig {
+        let client = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.bootstrap",
@@ -3036,7 +3160,11 @@ mod tests {
             http_port: None,
         })
         .await
-        .expect("Runtime MQTT client should connect");
+        .expect("Runtime MQTT session should be constructed");
+        assert!(
+            client.wait_bootstrapped(std::time::Duration::from_secs(10)).await > 0,
+            "bootstrap must complete against a live broker"
+        );
 
         // Get the bootstrap data from the client and call run_bootstrap
         // a second and third time to verify idempotency.

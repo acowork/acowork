@@ -162,12 +162,14 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
         let cfg_a = runtime_connect_cfg(port, AGENT_ID, INSTANCE_A, tx_a);
         let cfg_b = runtime_connect_cfg(port, AGENT_ID, INSTANCE_B, tx_b);
 
-        let runtime_a = RuntimeMqttClient::connect(cfg_a)
+        let runtime_a = RuntimeMqttClient::spawn(cfg_a)
             .await
             .expect("runtime A connect (must not be kicked by B)");
-        let runtime_b = RuntimeMqttClient::connect(cfg_b)
+        assert!(runtime_a.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
+        let runtime_b = RuntimeMqttClient::spawn(cfg_b)
             .await
             .expect("runtime B connect (must not be kicked by A)");
+        assert!(runtime_b.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
 
         // ── 3) Each publishes its retained status to its own topic. ──
         runtime_a.publish_status(true).await.expect("A status");

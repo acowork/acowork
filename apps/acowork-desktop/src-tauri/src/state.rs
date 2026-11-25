@@ -29,6 +29,8 @@ use serde::{Deserialize, Serialize};
 
 use acowork_core::mqtt_proto::{BootstrapPhase, BootstrapState};
 
+use crate::commands::gateway::SharedBootInflight;
+
 use crate::gateway_client::{GatewayAuth, GatewayClient};
 use crate::mqtt_client::{MqttEndpoint, SharedDesktopMqttClient};
 
@@ -143,6 +145,24 @@ pub struct AppState {
     /// (historical behavior).
     pub gateway_keep_running_on_exit: Arc<AtomicBool>,
 
+    /// In-flight local-Gateway boot, for request coalescing.
+    ///
+    /// `init_local_gateway` is a whole pipeline (probe → spawn/adopt →
+    /// wait for bootstrap READY), and the frontend can legitimately
+    /// issue it twice concurrently — React.StrictMode double-invokes the
+    /// SplashScreen effect in dev, which produced two `spawn_gateway`
+    /// entries and two parallel 30 s bootstrap waits in the 2026-11-24
+    /// incident log. `spawn_gateway` was already serialised, but the
+    /// *wait* was not, so both callers burned the full budget and both
+    /// surfaced an error.
+    ///
+    /// The first caller registers a watch slot and runs the pipeline;
+    /// concurrent callers await the same outcome instead of starting a
+    /// second one. The slot is cleared when the pipeline finishes, so
+    /// this coalesces concurrent requests only — a later, deliberate
+    /// retry still runs a fresh boot.
+    pub gateway_boot_inflight: SharedBootInflight,
+
     /// ADR-033 Phase 3: Desktop MQTT client for real-time events.
     /// Connected after the Gateway is confirmed healthy. None until
     /// `connect_mqtt` is called from the frontend.
@@ -194,6 +214,7 @@ impl AppState {
             gateway_mode: Arc::new(tokio::sync::RwLock::new(GatewayMode::Local)),
             gateway_process: Arc::new(Mutex::new(None)),
             gateway_keep_running_on_exit: Arc::new(AtomicBool::new(false)),
+            gateway_boot_inflight: Arc::new(tokio::sync::Mutex::new(None)),
             mqtt_client: Arc::new(Mutex::new(None)),
             mqtt_endpoint: Arc::new(Mutex::new(None)),
             bootstrap_state: Arc::new(tokio::sync::RwLock::new(None)),

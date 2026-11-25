@@ -73,7 +73,7 @@ async fn connect_runtime(port: u16, agent_id: &str) -> (RuntimeMqttClient, Strin
     let cache = new_shared_cache();
     let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
     let instance_id = uuid::Uuid::new_v4().to_string();
-    let client = RuntimeMqttClient::connect(MqttConnectConfig {
+    let client = RuntimeMqttClient::spawn(MqttConnectConfig {
         host: "127.0.0.1",
         port,
         agent_id,
@@ -101,6 +101,7 @@ async fn connect_runtime(port: u16, agent_id: &str) -> (RuntimeMqttClient, Strin
     })
     .await
     .expect("RuntimeMqttClient connect");
+        assert!(client.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
     (client, instance_id)
 }
 

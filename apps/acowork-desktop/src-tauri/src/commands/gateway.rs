@@ -65,12 +65,22 @@ pub struct GatewayConfigOutput {
 
 /// Boot result returned by [`init_local_gateway`] / [`start_local_gateway`]:
 /// the resolved base URL plus the ownership of the running Gateway.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GatewayBootResult {
     pub base_url: String,
     /// `"owned"` if Desktop spawned it, `"foreign"` if it was adopted.
     pub ownership: String,
 }
+
+/// Outcome of one local-Gateway boot pipeline.
+pub type BootOutcome = Result<GatewayBootResult, DependencyNotReady>;
+
+/// The in-flight boot's outcome broadcast, or `None` when idle.
+///
+/// Concurrent `init_local_gateway` callers share one pipeline through
+/// this slot; see `AppState::gateway_boot_inflight`.
+pub type SharedBootInflight =
+    std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::watch::Receiver<Option<BootOutcome>>>>>;
 
 /// Push the persisted gateway configuration from the frontend into Rust.
 ///
@@ -224,12 +234,53 @@ pub async fn init_local_gateway(
         }
     }
 
+    // Coalesce concurrent boots onto one pipeline. See
+    // `AppState::gateway_boot_inflight` for why concurrent callers exist.
+    let outcome_tx = loop {
+        let mut slot = state.gateway_boot_inflight.lock().await;
+        match slot.as_ref() {
+            None => {
+                let (tx, rx) = tokio::sync::watch::channel(None);
+                *slot = Some(rx);
+                break tx;
+            }
+            Some(rx) => {
+                let mut rx = rx.clone();
+                drop(slot);
+                tracing::info!("[BOOT] joining an in-flight Gateway boot");
+                loop {
+                    if let Some(outcome) = rx.borrow_and_update().clone() {
+                        return outcome;
+                    }
+                    if rx.changed().await.is_err() {
+                        // Owner vanished without publishing an outcome
+                        // (its command future was dropped). Take over
+                        // rather than hanging or reporting a false error.
+                        break;
+                    }
+                }
+            }
+        }
+    };
+
+    let result = run_local_gateway_boot(&state, &app_handle).await;
+    // Publish before clearing: a joiner reads the value, not the slot.
+    let _ = outcome_tx.send(Some(result.clone()));
+    *state.gateway_boot_inflight.lock().await = None;
+    result
+}
+
+/// The actual boot pipeline, run by exactly one caller at a time.
+async fn run_local_gateway_boot(
+    state: &AppState,
+    app_handle: &tauri::AppHandle,
+) -> Result<GatewayBootResult, DependencyNotReady> {
     // Probe-then-spawn: the spawn path itself re-checks reachability under
     // a lock (concurrency-safe); here we just need the outcome.
-    let ownership = spawn_gateway(&state, &app_handle)
+    let ownership = spawn_gateway(state, app_handle)
         .await
         .map_err(DependencyNotReady::install_failed)?;
-    let base_url = adopt_spawned_base_url(&state, &ownership).await;
+    let base_url = adopt_spawned_base_url(state, &ownership).await;
 
     // Wait for READY on the configured URL. When ownership is "foreign",
     // the gateway is already up; this wait doubles as the health probe.
@@ -259,7 +310,7 @@ pub async fn init_local_gateway(
 /// Returns the URL the caller should use (and report back to the frontend)
 /// after re-pointing the client when needed.
 async fn adopt_spawned_base_url(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     ownership: &GatewayOwnership,
 ) -> String {
     let mut base_url = state.gateway.read().await.base_url().to_string();
@@ -303,7 +354,7 @@ fn bootstrap_probe_client() -> Result<reqwest::Client, DependencyNotReady> {
 ///
 /// Serialised as-is into the Tauri `Err` payload, so the frontend can
 /// branch on `error_code` instead of string-matching (ADR-059 §7).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DependencyNotReady {
     /// `"dependency_not_ready"` (bootstrap never reached READY) or
     /// `"install_failed"` (internal install error, kept for parity).

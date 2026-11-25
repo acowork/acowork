@@ -82,7 +82,7 @@ fn integration_gateway_and_runtime_connect() {
         // Runtime client connects
         let cache = new_shared_cache();
         let (control_tx, mut _control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let runtime = RuntimeMqttClient::connect(MqttConnectConfig {
+        let runtime = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.agent",
@@ -107,6 +107,7 @@ fn integration_gateway_and_runtime_connect() {
         })
         .await
         .expect("runtime connect");
+        assert!(runtime.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
 
         // Both connected — verify they're alive (can be dropped)
         drop(gw);
@@ -138,7 +139,7 @@ fn integration_control_message_flow() {
         // Runtime with control_rx
         let cache = new_shared_cache();
         let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _runtime = RuntimeMqttClient::connect(MqttConnectConfig {
+        let _runtime = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.agent",
@@ -163,6 +164,7 @@ fn integration_control_message_flow() {
         })
         .await
         .unwrap();
+        assert!(_runtime.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
 
         // Publish control message from Gateway
         let cmd = ControlCommand {
@@ -242,7 +244,7 @@ fn integration_control_intent_flow() {
 
         let cache = new_shared_cache();
         let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _rt = RuntimeMqttClient::connect(MqttConnectConfig {
+        let _rt = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.agent",
@@ -267,6 +269,7 @@ fn integration_control_intent_flow() {
         })
         .await
         .unwrap();
+        assert!(_rt.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
 
         let cmd = ControlCommand {
             instance_id: TEST_INSTANCE_ID.into(),
@@ -377,7 +380,7 @@ fn integration_multiple_messages() {
             .unwrap();
         let cache = new_shared_cache();
         let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _rt = RuntimeMqttClient::connect(MqttConnectConfig {
+        let _rt = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.agent",
@@ -402,6 +405,7 @@ fn integration_multiple_messages() {
         })
         .await
         .unwrap();
+        assert!(_rt.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
         let messages = ["msg-1", "msg-2", "msg-3"];
         for (i, content) in messages.iter().enumerate() {
             let cmd = ControlCommand {
@@ -480,7 +484,7 @@ fn integration_lwt_offline_on_disconnect() {
         rt.block_on(async {
             let cache = new_shared_cache();
             let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
-            let runtime = RuntimeMqttClient::connect(MqttConnectConfig {
+            let runtime = RuntimeMqttClient::spawn(MqttConnectConfig {
                 host: "127.0.0.1",
                 port,
                 agent_id: "com.test.lwt",
@@ -506,6 +510,7 @@ fn integration_lwt_offline_on_disconnect() {
             })
             .await
             .unwrap();
+        assert!(runtime.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
 
             // connect() returns only after bootstrap published the retained
             // "online" status — the checker in Phase 2 sees a pre-existing
@@ -610,7 +615,7 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
 
         let cache = new_shared_cache();
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _rt = RuntimeMqttClient::connect(MqttConnectConfig {
+        let _rt = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.catalog",
@@ -635,6 +640,7 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
         })
         .await
         .unwrap();
+        assert!(_rt.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
 
         // ── 2. Gateway publishes `acowork/global/mcps` (retained) ───
         // Mimics build_available_mcps in
@@ -786,7 +792,7 @@ fn integration_providers_retained_persists_to_agent_provider_json() {
 
         let cache = new_shared_cache();
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _rt = RuntimeMqttClient::connect(MqttConnectConfig {
+        let _rt = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.providers",
@@ -811,6 +817,7 @@ fn integration_providers_retained_persists_to_agent_provider_json() {
         })
         .await
         .unwrap();
+        assert!(_rt.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
 
         // ── 2. Gateway publishes `acowork/global/providers` (retained) ─
         let gw = GatewayMqttClient::new_publisher("127.0.0.1", port)
@@ -956,7 +963,7 @@ fn integration_mcp_template_instance_id_substituted_at_runtime() {
 
         let cache = new_shared_cache();
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _rt = RuntimeMqttClient::connect(MqttConnectConfig {
+        let _rt = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.template", // 包 ID（不应出现在 X-MCP-Actor 中）
@@ -981,6 +988,7 @@ fn integration_mcp_template_instance_id_substituted_at_runtime() {
         })
         .await
         .unwrap();
+        assert!(_rt.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
 
         // ── 1. Gateway publishes MCP catalog with `{instance_id}` template ─
         // 模拟 Gateway build_available_mcps（Diff K 后用 instance_id 模板）
@@ -1109,7 +1117,7 @@ fn record_complete_metadata_json_round_trips() {
     rt.block_on(async {
         let cache = new_shared_cache();
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let runtime = RuntimeMqttClient::connect(MqttConnectConfig {
+        let runtime = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.agent",
@@ -1134,6 +1142,7 @@ fn record_complete_metadata_json_round_trips() {
         })
         .await
         .expect("runtime connect");
+        assert!(runtime.wait_bootstrapped(std::time::Duration::from_secs(15)).await > 0, "bootstrap must complete");
 
         // Subscriber on the session messages topic. Subscribe before publishing
         // (record_complete here is QoS 0, non-retained — a late subscriber misses it).

@@ -5063,7 +5063,7 @@ mod tests {
         // 2. Connect runtime against the broker.
         let cache = new_shared_cache();
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let runtime = RuntimeMqttClient::connect(MqttConnectConfig {
+        let runtime = RuntimeMqttClient::spawn(MqttConnectConfig {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.agent",

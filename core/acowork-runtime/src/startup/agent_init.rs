@@ -346,7 +346,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 .flatten()
                 .map(|c| serde_json::to_string(&c).unwrap_or_default())
                 .unwrap_or_default();
-        match crate::mqtt::RuntimeMqttClient::connect(crate::mqtt::client::MqttConnectConfig {
+        match crate::mqtt::RuntimeMqttClient::spawn(crate::mqtt::client::MqttConnectConfig {
             // ADR-055 D3: parameterise the broker host instead of
             // hard-coding 127.0.0.1 so the Runtime can connect to a
             // remote / distributed Gateway broker. Defaults to
