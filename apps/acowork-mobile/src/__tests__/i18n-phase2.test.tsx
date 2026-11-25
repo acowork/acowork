@@ -92,6 +92,26 @@ describe('phase-2 msgid catalogue', () => {
     expect(t('回复 {{quote}}', { quote: 'hi' })).toBe('回覆 hi')
   })
 
+  // Terminology (D7): the product word is the latin `Bot` in every language.
+  // Renaming a msgid touches its key AND every bundle AND every `tr()` caller;
+  // a bundle left behind silently renders the zh-CN source, which is what this
+  // guards. `ボット` / `봇` are the rejected transliterations — never re-allow.
+  it('ships the `Bot` terminology in all bundles (D7)', () => {
+    const botKeys = Object.keys(MSGIDS.en).filter((k) => k.includes('Bot'))
+    expect(botKeys.length).toBe(13)
+    for (const key of botKeys) {
+      for (const lang of LANGS) {
+        expect(MSGIDS[lang][key], `${lang}: ${key}`).toBeDefined()
+        expect(MSGIDS[lang][key], `${lang}: ${key}`).not.toBe(key)
+      }
+    }
+    for (const lang of LANGS) {
+      for (const [key, value] of Object.entries(MSGIDS[lang])) {
+        expect(value, `${lang}: ${key}`).not.toMatch(/ボット|봇|エージェント|에이전트/)
+      }
+    }
+  })
+
   it('falls back to the key itself for an unknown msgid', () => {
     setLanguageOverride('en')
     expect(t('一条服务端返回的原始错误消息')).toBe('一条服务端返回的原始错误消息')

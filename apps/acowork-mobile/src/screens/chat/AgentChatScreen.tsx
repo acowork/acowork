@@ -344,7 +344,7 @@ export function AgentChatScreen() {
             <span className="navbar-title">{tr('会话')}</span>
             <span className="navbar-trail" />
           </header>
-          <div className="empty-state">{tr('未选择 Agent，请返回重试')}</div>
+          <div className="empty-state">{tr('未选择 Bot，请返回重试')}</div>
         </div>
       </EdgeSwipe>
     )
@@ -365,7 +365,7 @@ export function AgentChatScreen() {
           </span>
         </header>
 
-        {failed ? <Banner tone="error">{tr('无法打开与该 Agent 的会话，请返回重试')}</Banner> : null}
+        {failed ? <Banner tone="error">{tr('无法打开与该 Bot 的会话，请返回重试')}</Banner> : null}
 
         <div
           className="scroll scroll-chat"

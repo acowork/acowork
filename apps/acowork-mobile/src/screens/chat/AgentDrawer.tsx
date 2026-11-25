@@ -126,7 +126,7 @@ function Row({ k, v }: { k: string; v: React.ReactNode }) {
 function ErrBanner({ msg }: { msg: string }) {
   return (
     <div style={{ padding: 'var(--space-3)' }}>
-      <Banner tone="warning">{tr('{{msg}} · 该 Agent 可能不在此节点上，或 Runtime 尚未就绪', { msg })}</Banner>
+      <Banner tone="warning">{tr('{{msg}} · 该 Bot 可能不在此节点上，或 Runtime 尚未就绪', { msg })}</Banner>
     </div>
   )
 }
@@ -215,7 +215,7 @@ function WorkspaceTab({ agentId }: { agentId: string }) {
       {/* §4.2: file contents are read by the agent in the conversation, never
           previewed here. The note tells the user where that boundary is. */}
       <div style={{ padding: 'var(--space-3) var(--space-4)' }}>
-        <Banner tone="info">{tr('移动端不提供文件预览，请在对话中让 Agent 读取')}</Banner>
+        <Banner tone="info">{tr('移动端不提供文件预览，请在对话中让 Bot 读取')}</Banner>
       </div>
       {error ? <ErrBanner msg={tr('工作区不可得')} /> : null}
     </>
@@ -328,7 +328,7 @@ function SessionsTab({ agentId, onClose }: { agentId: string; onClose: () => voi
             }
           />
         ))}
-        {sessions.length === 0 ? <ListRow label={tr('该 Agent 暂无会话')} /> : null}
+        {sessions.length === 0 ? <ListRow label={tr('该 Bot 暂无会话')} /> : null}
         {hasMore && sessions.length > 0 ? <ListRow label={tr('加载更多会话')} onClick={() => void loadMore(agentId)} /> : null}
       </Section>
       <div style={{ padding: 'var(--space-3) var(--space-4)' }}>

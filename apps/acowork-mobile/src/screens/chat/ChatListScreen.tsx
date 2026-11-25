@@ -281,7 +281,7 @@ export function ChatListScreen() {
           className="searchbar-input"
           type="search"
           inputMode="search"
-          placeholder={tr('搜索群聊、Agent 或联系人')}
+          placeholder={tr('搜索群聊、Bot 或联系人')}
           aria-label={tr('搜索')}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -346,7 +346,7 @@ export function ChatListScreen() {
         ))}
         {onlineGroups.length === 0 && !loading ? (
           <ListSection>
-            <ListRow label={tr('暂无 Agent')} hint={tr('在桌面端安装后出现在这里')} />
+            <ListRow label={tr('暂无 Bot')} hint={tr('在桌面端安装后出现在这里')} />
           </ListSection>
         ) : null}
 

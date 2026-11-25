@@ -103,7 +103,7 @@ export function DocListScreen() {
             arrow
             onClick={() => push('docs/review')}
             label={<span className="row-title">{tr('审阅队列')}</span>}
-            hint={tr('Agent 提交的文档修改，需人工通过或驳回')}
+            hint={tr('Bot 提交的文档修改，需人工通过或驳回')}
             badge={pending?.length ?? 0}
           />
         ) : null}

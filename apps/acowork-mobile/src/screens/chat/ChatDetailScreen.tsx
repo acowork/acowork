@@ -814,7 +814,7 @@ function ComposerWorkspaceSheet({
       {loading ? <ListRow label={tr('载入中…')} /> : null}
       {error ? <ListRow label={error} destructive /> : null}
       {items && items.length === 0 ? (
-        <ListRow label={tr('该 Agent 暂无工作区')} hint={tr('在桌面端添加')} />
+        <ListRow label={tr('该 Bot 暂无工作区')} hint={tr('在桌面端添加')} />
       ) : null}
       {items?.map((ws) => {
         const id = ws.id
@@ -1124,7 +1124,7 @@ function ComposerSkillSheet({
       ) : null}
       {!loading && enabled.length === 0 ? (
         <ListRow
-          label={tr('该 Agent 暂无技能')}
+          label={tr('该 Bot 暂无技能')}
           hint={tr('在桌面端添加技能包')}
           value={<span className="badge">{tr('桌面端')}</span>}
           disabled

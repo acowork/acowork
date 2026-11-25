@@ -51,8 +51,8 @@ export function DeliveryAlertLine({ alert, name, align = 'end' }: DeliveryAlertL
   // the persisted receipt used, so nothing a reader sees changes except how
   // long it stays.
   const text = name
-    ? tr('消息未能送达 {{name}}，请重试或 @ 该 Agent', { name })
-    : tr('消息未能送达，请重试或 @ 该 Agent')
+    ? tr('消息未能送达 {{name}}，请重试或 @ 该 Bot', { name })
+    : tr('消息未能送达，请重试或 @ 该 Bot')
 
   return (
     <div

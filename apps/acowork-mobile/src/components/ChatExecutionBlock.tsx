@@ -731,7 +731,7 @@ function RoundCard({
 
 /** The label a parked decision wears on its collapsed line. */
 function cardLabel(card: BlockCard): string {
-  return card.kind === 'approval' ? tr('需要审批') : card.kind === 'pause' ? tr('步骤确认') : tr('Agent 询问')
+  return card.kind === 'approval' ? tr('需要审批') : card.kind === 'pause' ? tr('步骤确认') : tr('Bot 询问')
 }
 
 /** Bound a card's question to one line on the collapsed row — the sheet is where
