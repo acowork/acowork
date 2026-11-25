@@ -411,6 +411,7 @@
     "closeOtherChats": "他のセッションを閉じる",
     "openNewSession": "新しいセッションを開く",
     "rename": "名前を変更…",
+    "renameFailed": "名前の変更に失敗しました",
     "newConversation": "New conversation",
     "sessionHistory": "Session history",
     "clearAll": "Clear all conversations",

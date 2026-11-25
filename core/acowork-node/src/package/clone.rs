@@ -842,6 +842,7 @@ mod tests {
                     tokens: None,
                     corrupted: false,
                     model_usage: None,
+                    title_source: None,
                 })
                 .unwrap();
         }

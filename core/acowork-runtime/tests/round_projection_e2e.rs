@@ -94,6 +94,7 @@ fn meta(sid: &str, owner: &str, visibility: Option<SessionVisibility>) -> Sessio
         corrupted: false,
         chat_session_id: Some("chat-1".to_string()),
         model_usage: None,
+        title_source: None,
     }
 }
 

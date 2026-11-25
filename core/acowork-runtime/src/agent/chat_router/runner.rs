@@ -3534,6 +3534,7 @@ mod tests {
             model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
+            title_source: None,
         };
         (sid.into(), meta)
     }

@@ -318,21 +318,38 @@ impl super::loop_::AgentLoop {
         self.session.conversation.as_ref().map(|c| c.session_id())
     }
 
-    /// Lazy-persist any async-generated session title to the conversation
-    /// JSONL metadata and index.json.
+    /// Drain the generated-title mailbox and persist what it holds, if
+    /// anything.
     ///
-    /// The title generation task (spawned in [`super::AgentLoop::run_inner`])
-    /// writes the LLM-generated title to `session_core.title` asynchronously.
-    /// This method is called at iteration checkpoints to pick up the title
-    /// at the earliest opportunity and persist it to disk.
+    /// The title-generation task (spawned in [`super::AgentLoop::run_inner`])
+    /// drops its result into `session_core.pending_title` asynchronously; this
+    /// checkpoint hands it to the conversation at the earliest opportunity
+    /// after the LLM round-trip.
     ///
-    /// Idempotent: `ConversationSession::update_title_force` is a no-op if
-    /// the title hasn't changed.
+    /// **Take, never read.** The mailbox used to be read-and-kept, which made
+    /// it a live mirror of "the session's title" — and a second writer of it.
+    /// A human rename (`PUT …/config`) never touched the cell, so every
+    /// checkpoint after a rename silently re-persisted the stale automatic
+    /// title and pushed it back to the frontend. Consuming the value makes
+    /// that impossible: the cell is empty again the moment it is used, and
+    /// nothing can replay it.
+    ///
+    /// The receiving end also refuses a title the automatic path does not own
+    /// any more (`set_generated_title` is a no-op for a `user`-sourced
+    /// title) — that is the durable half of the same rule, and it is the one
+    /// that survives a restart.
     pub(crate) fn flush_pending_title(&mut self) {
-        if let Some(title) = self.session_core.title.read().unwrap().clone()
-            && let Some(ref conversation) = self.session.conversation
-        {
-            conversation.update_title_force(&title);
+        let Some(ref conversation) = self.session.conversation else {
+            return;
+        };
+        let Some(title) = self.session_core.pending_title.write().unwrap().take() else {
+            return;
+        };
+        if !conversation.set_generated_title(&title) {
+            tracing::debug!(
+                session_id = %conversation.session_id(),
+                "Discarded a generated session title: the session already has one (a human rename wins)"
+            );
         }
     }
 

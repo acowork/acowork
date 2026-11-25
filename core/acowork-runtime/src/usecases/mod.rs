@@ -52,6 +52,7 @@ pub mod attachment_impl;
 pub mod chat_usage_impl;
 pub mod debug_service_impl;
 pub mod git_query_impl;
+pub(crate) mod session_config_meta;
 pub mod session_config_impl;
 pub mod session_metadata_impl;
 pub mod workspace_mutation_impl;

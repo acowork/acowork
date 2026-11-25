@@ -620,7 +620,17 @@ interface AgentStoreState {
    */
   clearAllSessions: (agentId: string) => Promise<void>;
   closeSession: (agentId: string, sessionId: string) => Promise<void>;
-  /** Rename a session: optimistic local update + MQTT `update_session_title`. */
+  /**
+   * Rename a session: optimistic local patch, then
+   * `PUT /sessions/{sid}/config { title }`.
+   *
+   * The backend is the only writer of the persisted title, and it can refuse
+   * (no row, no write authority). On failure every optimistically patched
+   * surface — the `sessions[]` row, the sidebar's `sessionTitle` and the
+   * `chatStore` live overlay — is rolled back to the value the backend last
+   * reported, and the error is rethrown so the caller can show it. Swallowing
+   * it is what made a rejected rename look like a successful one.
+   */
   renameSession: (agentId: string, sessionId: string, title: string) => Promise<void>;
   /**
    * ADR-076 §决策 4: flip a session's read visibility (owner only).
@@ -1786,10 +1796,24 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   },
 
   renameSession: async (agentId: string, sessionId: string, title: string) => {
+    // Rollback material, read before the optimistic patch. A rename is a
+    // network write and it can be refused; restoring "what the backend last
+    // told us" is only possible if we capture it first. `sessionTitle` is the
+    // sidebar's derived "latest session title" (mirrors `sessions[0].title`,
+    // same heuristic as `fetchSessions`), so it needs the same treatment.
+    const before = get().agents[agentId];
+    const rowIndex = before?.sessions.findIndex((s) => s.session_id === sessionId) ?? -1;
+    const previousRow = rowIndex >= 0 ? before!.sessions[rowIndex] : undefined;
+    const previousRowTitle = previousRow?.title ?? null;
+    const previousSessionTitle = before?.sessionTitle;
+    const previousOverlayTitle =
+      useChatStore.getState().agentStates[agentId]?.sessionStates[sessionId]?.title;
+
     // Optimistic local update — the tab strip, session dropdown, and
     // AgentList sidebar all read `agents[agentId].sessions`, so patch it
-    // before the MQTT roundtrip. The Runtime persists the same title via
-    // `ConversationSession::update_title_force`.
+    // before the round-trip. The Runtime persists the same title through
+    // `SessionConfigService::apply_config` (resident session: the live
+    // conversation; non-resident: the session's meta row).
     set((state) => {
       const storage = state.agents[agentId];
       if (!storage) return state;
@@ -1817,7 +1841,30 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // `update_session_title`).
       await sessionControl.patchSessionConfig(agentId, sessionId, { title });
     } catch (e) {
+      // A refused rename must not survive on screen. Leaving the optimistic
+      // value in place was the whole visible half of the bug: the tab, the
+      // dropdown and the sidebar all showed the new name while the Backend
+      // still held the old one, so the "rename did not stick" report arrived
+      // with no error anywhere. Roll every surface back and rethrow — the
+      // caller owns the user-facing message (same contract as
+      // `setSessionVisibility`).
+      set((state) => {
+        const storage = state.agents[agentId];
+        if (!storage) return state;
+        const idx = storage.sessions.findIndex((s) => s.session_id === sessionId);
+        if (idx === -1) return state;
+        const sessions = [...storage.sessions];
+        sessions[idx] = { ...sessions[idx], title: previousRowTitle };
+        return patchAgent(state, agentId, {
+          sessions,
+          ...(idx === 0 ? { sessionTitle: previousSessionTitle } : {}),
+        });
+      });
+      useChatStore
+        .getState()
+        .rollbackSessionTitleLocal(agentId, sessionId, previousOverlayTitle);
       log.error("[AgentStore] Failed to rename session:", e);
+      throw e;
     }
   },
 

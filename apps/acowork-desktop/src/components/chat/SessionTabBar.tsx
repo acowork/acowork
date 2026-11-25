@@ -21,6 +21,7 @@ import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/Scrolla
 import { TabItem } from "../common/tab";
 import { Tooltip } from "../common/Tooltip";
 import { useReadOnlySessionIds } from "../../lib/session-write-access";
+import { showToast } from "../common/ToastProvider";
 import { useChatSessionStore } from "../../stores/chatSessionStore";
 
 const EMPTY_ARRAY: string[] = [];
@@ -586,7 +587,12 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
       t("sessionTabBar.untitled");
     // Empty / unchanged → close without a server roundtrip.
     if (!trimmed || trimmed === current) return;
-    void renameSession(agentId, sessionId, trimmed);
+    // The store rolls its optimistic patch back and rethrows, so this is the
+    // one place that can tell the user the rename did not take. Silence here
+    // was part of the bug: the tab snapped back with no explanation.
+    void renameSession(agentId, sessionId, trimmed).catch(() => {
+      showToast({ type: "error", message: t("sessionTabBar.renameFailed") });
+    });
   };
 
   const cancelRename = () => {

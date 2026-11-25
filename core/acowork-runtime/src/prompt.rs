@@ -173,9 +173,10 @@ Strict output rules — read carefully:
 ///
 /// ## Single source of truth
 ///
-/// Used by both `loop_.rs` (async LLM-titled path, after
-/// `compact_session_title_with_llm` returns) and `conversation.rs`
-/// (`set_title` + `update_title_force`). Keeping one implementation
+/// Used by `conversation.rs` alone, through `store_title` — the single
+/// chokepoint both title writers (`set_generated_title` and
+/// `set_user_title`) go through, so the truncation cannot diverge between
+/// the automatic and the human path. Keeping one implementation
 /// prevents drift between the two call sites — see `loop_.rs::run_inner`
 /// for the LLM-titled path.
 pub fn truncate_title_for_display(s: &str) -> String {

@@ -150,8 +150,10 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 /// builtin-tool / MCP configuration — JSON, `NULL` = inherit the agent
 /// layer); 14 = `sessions.interveners` (the human accounts allowed to steer
 /// an execution session they did not initiate: append turns and re-point the
-/// run at a usable model — plan D2).
-pub const SCHEMA_VERSION: i64 = 14;
+/// run at a usable model — plan D2); 15 = `sessions.title_source` (who wrote
+/// the title — `generated` by the automatic path or `user` by a human rename;
+/// `NULL` = a pre-upgrade row, i.e. generated).
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -357,6 +359,26 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         14,
         "ALTER TABLE sessions ADD COLUMN interveners JSON;",
+    ),
+    // Who authored `sessions.title` — the durable half of the "a human rename
+    // wins over the automatic title" rule (`acowork_core::session_meta::
+    // TitleSource`). Two writers own that one string: the Runtime's async
+    // title-generation call, and a human rename through
+    // `PUT /sessions/{sid}/config`. Without this column the two are
+    // indistinguishable on disk, so after a rename the auto path cannot tell
+    // that it has been overruled and re-persists its own stale title on the
+    // next turn.
+    //
+    // Nullable with no default: a row written before this migration reads as
+    // NULL = "generated", which is exactly what it was (a human rename had no
+    // way to be recorded), so no backfill and no behaviour change. Only a
+    // rename performed after the upgrade writes `user`.
+    //
+    // Same guard as v11-v14: SQLite rejects a `WHERE` on `ADD COLUMN`, so
+    // `apply_migrations` does the `has_column` check.
+    (
+        15,
+        "ALTER TABLE sessions ADD COLUMN title_source TEXT;",
     ),
 ];
 
@@ -572,6 +594,12 @@ const TARGET_SCHEMA: &[SchemaObject] = &[
         name: "interveners",
         decl: "interveners JSON",
     },
+    // v15 — who wrote the title (`generated` / `user`); NULL = generated.
+    SchemaObject::Column {
+        table: "sessions",
+        name: "title_source",
+        decl: "title_source TEXT",
+    },
 ];
 
 /// Apply the version-gated [`MIGRATIONS`] chain, then converge [`TARGET_SCHEMA`],
@@ -633,6 +661,10 @@ pub(crate) fn apply_migrations(conn: &mut rusqlite::Connection) -> rusqlite::Res
             }
             // v14 likewise.
             if *target == 14 && has_column(&tx, "sessions", "interveners")? {
+                continue;
+            }
+            // v15 is the `title_source` column-add; same guard, same reason.
+            if *target == 15 && has_column(&tx, "sessions", "title_source")? {
                 continue;
             }
             tx.execute_batch(sql)?;

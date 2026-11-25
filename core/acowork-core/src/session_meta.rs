@@ -442,6 +442,60 @@ impl SessionToolPolicy {
     }
 }
 
+/// Where a session's `title` came from — the tie-break between the two
+/// writers that both own that one string.
+///
+/// A title has exactly two possible authors:
+///
+/// * [`Generated`](Self::Generated) — the Runtime's asynchronous
+///   title-generation LLM call, derived from the session's first user turn;
+/// * [`User`](Self::User) — a human rename through
+///   `PUT /sessions/{sid}/config`.
+///
+/// Without this fact the two authors are indistinguishable on disk, and the
+/// auto path has no way to know it has been overruled: it only sees "some
+/// title exists", which after a rename is exactly what it *must not*
+/// overwrite. Recording the author makes "a human renamed this" a durable
+/// fact that survives a Runtime restart, instead of a timing convention that
+/// holds only until the next turn's checkpoint (see
+/// `SessionMeta::title_source`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TitleSource {
+    /// Written by the Runtime's automatic title generation.
+    Generated,
+    /// Written by a human rename; the automatic path must not replace it.
+    User,
+}
+
+impl TitleSource {
+    /// Stable `TEXT` encoding, used by the SQLite `sessions.title_source`
+    /// column. Hand-written for the same reason as
+    /// [`SessionVisibility::as_str`]: the column is plain `TEXT` and
+    /// `serde_json` would store the quotes too.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generated => "generated",
+            Self::User => "user",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`].
+    ///
+    /// Unrecognised text returns `None`, i.e. "absent" → generated. A value
+    /// this build does not know (hand-edited row, a future variant read by an
+    /// older binary) must not fail the listing, and it must not silently
+    /// become `User` either — claiming a human owns a title nobody human
+    /// typed would freeze the auto path forever.
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "generated" => Some(Self::Generated),
+            "user" => Some(Self::User),
+            _ => None,
+        }
+    }
+}
+
 /// Who may read a session (ADR-076 §决策 4).
 ///
 /// The field exists so a session can be *shared* rather than owned
@@ -933,6 +987,18 @@ pub struct SessionMeta {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Who authored [`Self::title`] — see [`TitleSource`].
+    ///
+    /// **Absent means generated**: every row written before this field
+    /// existed was titled by the automatic path (a human rename had no way to
+    /// be distinguished), so a pre-existing row keeps the behaviour it had.
+    ///
+    /// This is the durable half of the "a human rename wins" rule. The
+    /// in-memory mirror on `ConversationSession` is the read path; this column
+    /// is what makes the rule survive a restart, when the auto title task
+    /// comes back for a session that already carries a human's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_source: Option<TitleSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -991,6 +1057,22 @@ pub struct SessionMeta {
 }
 
 impl SessionMeta {
+    /// Who authored [`Self::title`], with the absent case resolved.
+    ///
+    /// `None` on disk means "written before `title_source` existed", i.e. by
+    /// the automatic path — see the field's own documentation. Every reader
+    /// asks this rather than matching on the `Option` itself, so the default
+    /// lives in exactly one place.
+    pub fn effective_title_source(&self) -> TitleSource {
+        self.title_source.unwrap_or(TitleSource::Generated)
+    }
+
+    /// `true` when a human renamed this session, so the automatic title path
+    /// must not replace what it wrote.
+    pub fn title_is_user_owned(&self) -> bool {
+        self.effective_title_source() == TitleSource::User
+    }
+
     /// The session's tool narrowing, materialised for callers that only
     /// need the deny-lists. `None` (never toggled) reads as the empty
     /// policy = "inherit the agent layer", so no call site has to spell

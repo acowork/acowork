@@ -1406,188 +1406,194 @@ impl AgentLoop {
             // Title generation runs only once per session — subsequent user
             // messages skip the LLM call entirely.
             //
-            // Gate on the in-flight claim, not just `title.is_none()`: a Stop
-            // interrupts this turn while the spawned LLM call is still in
-            // flight, and a follow-up message sent right after would spawn a
-            // second task whose result (derived from that follow-up) would
-            // overwrite the first-message title. See `title_task_in_flight`.
-            if self.session.conversation.is_some()
-                && self.session_core.title.read().unwrap().is_none()
+            // Three gates, each closing a different hole:
+            //
+            // * the **conversation** already has a title — the durable truth,
+            //   seeded from `SessionMeta` when the session was opened. This
+            //   is what keeps a human rename: `title_source = user` implies a
+            //   title exists, so the automatic path never even starts. It
+            //   also covers the resume case (no separate branch needed: a
+            //   resumed session's title comes from disk, not from a mirror).
+            // * the mailbox holds a generated title not yet persisted, so
+            //   there is nothing to re-generate;
+            // * the in-flight claim — a Stop interrupts a turn while its
+            //   spawned LLM call is still running, and a follow-up message
+            //   sent right after would otherwise spawn a second task whose
+            //   result (derived from that follow-up) could land first. See
+            //   `title_task_in_flight`.
+            // `is_some_and` on the conversation, not on the title: a loop with
+            // no conversation attached (test harnesses, CLI without a session)
+            // must never spawn a title call at all.
+            let needs_title = self
+                .session
+                .conversation
+                .as_ref()
+                .is_some_and(|conv| conv.title().is_none_or(|t| t.trim().is_empty()));
+            if needs_title
+                && self.session_core.pending_title.read().unwrap().is_none()
                 && !self
                     .session_core
                     .title_task_in_flight
                     .swap(true, Ordering::AcqRel)
             {
-                // Claim released on every exit path below — the spawned task
-                // holds it for its whole lifetime, the synchronous resume
-                // path drops it at the end of this block.
+                // Claim released when the spawned task finishes (including a
+                // panic), so a failed call can be retried on a later turn.
                 let _title_claim =
                     TitleTaskClaim::new(Arc::clone(&self.session_core.title_task_in_flight));
 
-                // Check if the conversation already has a title from a
-                // previous session run (session resume case). If so,
-                // propagate it to session_core.title and skip the LLM call.
-                if let Some(existing_title) = self
+                let lang = self
+                    .session
+                    .identity_context()
+                    .and_then(|ctx| {
+                        ctx.lines()
+                            .find(|l| l.starts_with("- Language:"))
+                            .and_then(|l| l.split(':').nth(1).map(|s| s.trim().to_string()))
+                    })
+                    .unwrap_or_else(|| "en".to_string());
+
+                // The title must always describe the session's FIRST user
+                // turn — never the message currently being handled. A
+                // follow-up sent after a Stop, or a session rebuilt from
+                // disk (which has no in-memory title cache), would
+                // otherwise title the conversation after a later message.
+                // The JSONL log is the durable source of the first turn;
+                // the current message is only a fallback for logs that
+                // have not flushed a user row yet.
+                //
+                // These are the user's original input (no
+                // [Attached context:] prefix, document content, or file
+                // hints) — exactly what the user typed.
+                //
+                // When the first turn has no text (e.g. user only
+                // uploaded files without typing text), the fallback below
+                // extracts filenames from <attached_document> tags in the
+                // current message.
+                // An agent-origin first turn has a human display projection
+                // beside the machine envelope (`metadata.intent`); titling
+                // the session from the envelope is what made an execution
+                // tab read `[intent:2f3c…:analyze] …`. One row, two
+                // audiences — the title belongs to the human one, and the
+                // reader picks between them so this call site does not have
+                // to read the log twice to see both.
+                let first_user_message = self
                     .session
                     .conversation
                     .as_ref()
-                    .and_then(|conv| conv.title())
-                {
-                    let trimmed = crate::prompt::truncate_title_for_display(&existing_title);
-                    *self.session_core.title.write().unwrap() = Some(trimmed);
-                } else {
-                    let lang = self
-                        .session
-                        .identity_context()
-                        .and_then(|ctx| {
-                            ctx.lines()
-                                .find(|l| l.starts_with("- Language:"))
-                                .and_then(|l| l.split(':').nth(1).map(|s| s.trim().to_string()))
-                        })
-                        .unwrap_or_else(|| "en".to_string());
+                    .and_then(|conv| {
+                        crate::conversation::read_first_user_turn(conv.session_path())
+                    })
+                    .and_then(|turn| turn.title_seed().map(str::to_string));
+                let title_input_owned = first_user_message
+                    .unwrap_or_else(|| raw_user_message.unwrap_or("").to_string());
+                let title_input = title_input_owned.as_str();
 
-                    // The title must always describe the session's FIRST user
-                    // turn — never the message currently being handled. A
-                    // follow-up sent after a Stop, or a session rebuilt from
-                    // disk (which has no in-memory title cache), would
-                    // otherwise title the conversation after a later message.
-                    // The JSONL log is the durable source of the first turn;
-                    // the current message is only a fallback for logs that
-                    // have not flushed a user row yet.
-                    //
-                    // These are the user's original input (no
-                    // [Attached context:] prefix, document content, or file
-                    // hints) — exactly what the user typed.
-                    //
-                    // When the first turn has no text (e.g. user only
-                    // uploaded files without typing text), the fallback below
-                    // extracts filenames from <attached_document> tags in the
-                    // current message.
-                    // An agent-origin first turn has a human display projection
-                    // beside the machine envelope (`metadata.intent`); titling
-                    // the session from the envelope is what made an execution
-                    // tab read `[intent:2f3c…:analyze] …`. One row, two
-                    // audiences — the title belongs to the human one, and the
-                    // reader picks between them so this call site does not have
-                    // to read the log twice to see both.
-                    let first_user_message = self
-                        .session
-                        .conversation
-                        .as_ref()
-                        .and_then(|conv| {
-                            crate::conversation::read_first_user_turn(conv.session_path())
-                        })
-                        .and_then(|turn| turn.title_seed().map(str::to_string));
-                    let title_input_owned = first_user_message
-                        .unwrap_or_else(|| raw_user_message.unwrap_or("").to_string());
-                    let title_input = title_input_owned.as_str();
-
-                    let prompt = crate::prompt::TITLE_PROMPT
-                        .replace("{language}", &lang)
-                        .replace("{user_message}", title_input);
-                    // ADR-056: title generation uses the same distillation
-                    // target resolution + provider rebuild as compaction, so
-                    // a cross-provider global default (e.g. local Ollama)
-                    // drives the title call too — never a mismatched
-                    // (session provider, other-provider model) pair.
-                    let resolved_distill = self.resolve_distill_model(title_input);
-                    let (provider, compact_model, _tier) = self.distill_provider(&resolved_distill);
-                    // Per-model attribution for the title call: empty
-                    // `provider_id` means "session provider" (same convention
-                    // as `distill_provider`) — resolved against the
-                    // conversation clone inside the spawned task.
-                    let title_provider_id = resolved_distill.provider_id.clone();
-                    let session_core_title = self.session_core.title.clone();
-                    let conversation_clone = self.session.conversation.clone();
-                    // ADR-028: clone the AgentCore so the spawned task can
-                    // feed the agent-scoped token counters for this
-                    // title-generation LLM call.
-                    let core_clone = self.core.clone();
-                    let fallback_msg = if title_input.is_empty() {
-                        // User only uploaded files (no text). Extract filenames
-                        // from <attached_document> tags as a meaningful fallback
-                        // title, e.g. "report.pdf, slides.pptx".
-                        let filenames: Vec<&str> = user_message
-                            .split("<attached_document filename=\"")
-                            .skip(1)
-                            .filter_map(|s| s.split('"').next())
-                            .collect();
-                        if filenames.is_empty() {
-                            String::new()
-                        } else {
-                            filenames.join(", ")
-                        }
+                let prompt = crate::prompt::TITLE_PROMPT
+                    .replace("{language}", &lang)
+                    .replace("{user_message}", title_input);
+                // ADR-056: title generation uses the same distillation
+                // target resolution + provider rebuild as compaction, so
+                // a cross-provider global default (e.g. local Ollama)
+                // drives the title call too — never a mismatched
+                // (session provider, other-provider model) pair.
+                let resolved_distill = self.resolve_distill_model(title_input);
+                let (provider, compact_model, _tier) = self.distill_provider(&resolved_distill);
+                // Per-model attribution for the title call: empty
+                // `provider_id` means "session provider" (same convention
+                // as `distill_provider`) — resolved against the
+                // conversation clone inside the spawned task.
+                let title_provider_id = resolved_distill.provider_id.clone();
+                // The mailbox the checkpoint drains. Only this task
+                // writes it, and it writes at most one value.
+                let pending_title = Arc::clone(&self.session_core.pending_title);
+                let conversation_clone = self.session.conversation.clone();
+                // ADR-028: clone the AgentCore so the spawned task can
+                // feed the agent-scoped token counters for this
+                // title-generation LLM call.
+                let core_clone = self.core.clone();
+                let fallback_msg = if title_input.is_empty() {
+                    // User only uploaded files (no text). Extract filenames
+                    // from <attached_document> tags as a meaningful fallback
+                    // title, e.g. "report.pdf, slides.pptx".
+                    let filenames: Vec<&str> = user_message
+                        .split("<attached_document filename=\"")
+                        .skip(1)
+                        .filter_map(|s| s.split('"').next())
+                        .collect();
+                    if filenames.is_empty() {
+                        String::new()
                     } else {
-                        title_input.to_string()
-                    };
+                        filenames.join(", ")
+                    }
+                } else {
+                    title_input.to_string()
+                };
 
-                    tokio::spawn(async move {
-                        // Hold the claim for the task's whole lifetime: it is
-                        // released only when this future completes (or panics),
-                        // so a follow-up turn cannot spawn a competing task.
-                        let _title_claim = _title_claim;
-                        // max_tokens=120 leaves room for a 60-char Chinese title
-                        // (CJK char ≈ 1.5–2 BPE tokens). 64 was tight for a 30-char
-                        // budget and would silently cap LLM output for Chinese
-                        // sessions, leaving our display truncation with a
-                        // half-sentence title.
-                        match crate::episode_distill::compact_session_title_with_llm(
-                            &prompt,
-                            provider.as_ref(),
-                            &compact_model,
-                            120,
-                        )
-                        .await
-                        {
-                            Ok((title, usage)) => {
-                                // ADR-027: record raw Provider usage from
-                                // title-generation call.
-                                if let Some(ref conv) = conversation_clone {
-                                    let provider_id = if title_provider_id.is_empty() {
-                                        conv.provider()
-                                    } else {
-                                        Some(title_provider_id.clone())
-                                    };
-                                    // The title call runs against `provider_id`
-                                    // above — the session's own provider unless the
-                                    // title provider was resolved separately.
-                                    let caps = core_clone
-                                        .model_caps(&compact_model, provider_id.as_deref());
-                                    conv.accumulate_llm_usage(
-                                        &usage,
-                                        &crate::conversation::ModelUsageAttribution {
-                                            provider_id: provider_id.as_deref(),
-                                            model_id: Some(&compact_model),
-                                            cost_delta: caps.as_ref().and_then(|c| {
-                                                crate::conversation::estimate_call_cost(
-                                                    c.cost.as_ref(),
-                                                    &usage,
-                                                )
-                                            }),
-                                        },
-                                    );
-                                }
-                                // ADR-028: also feed the agent-scoped
-                                // counters so the agent-total line in the
-                                // Results Panel accounts for this call.
-                                core_clone.accumulate_llm_usage(&usage);
-                                // Prefer natural break points over a blind cut so
-                                // the user sees a complete sentence (or "…") rather
-                                // than a half-word. See prompt.rs for details.
-                                let trimmed = crate::prompt::truncate_title_for_display(&title);
-                                *session_core_title.write().unwrap() = Some(trimmed);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "LLM session title generation failed (non-fatal): {e}"
+                tokio::spawn(async move {
+                    // Hold the claim for the task's whole lifetime: it is
+                    // released only when this future completes (or panics),
+                    // so a follow-up turn cannot spawn a competing task.
+                    let _title_claim = _title_claim;
+                    // max_tokens=120 leaves room for a 60-char Chinese title
+                    // (CJK char ≈ 1.5–2 BPE tokens). 64 was tight for a 30-char
+                    // budget and would silently cap LLM output for Chinese
+                    // sessions, leaving our display truncation with a
+                    // half-sentence title.
+                    match crate::episode_distill::compact_session_title_with_llm(
+                        &prompt,
+                        provider.as_ref(),
+                        &compact_model,
+                        120,
+                    )
+                    .await
+                    {
+                        Ok((title, usage)) => {
+                            // ADR-027: record raw Provider usage from
+                            // title-generation call.
+                            if let Some(ref conv) = conversation_clone {
+                                let provider_id = if title_provider_id.is_empty() {
+                                    conv.provider()
+                                } else {
+                                    Some(title_provider_id.clone())
+                                };
+                                // The title call runs against `provider_id`
+                                // above — the session's own provider unless the
+                                // title provider was resolved separately.
+                                let caps = core_clone
+                                    .model_caps(&compact_model, provider_id.as_deref());
+                                conv.accumulate_llm_usage(
+                                    &usage,
+                                    &crate::conversation::ModelUsageAttribution {
+                                        provider_id: provider_id.as_deref(),
+                                        model_id: Some(&compact_model),
+                                        cost_delta: caps.as_ref().and_then(|c| {
+                                            crate::conversation::estimate_call_cost(
+                                                c.cost.as_ref(),
+                                                &usage,
+                                            )
+                                        }),
+                                    },
                                 );
-                                let fallback =
-                                    crate::prompt::truncate_title_for_display(&fallback_msg);
-                                *session_core_title.write().unwrap() = Some(fallback);
                             }
+                            // ADR-028: also feed the agent-scoped
+                            // counters so the agent-total line in the
+                            // Results Panel accounts for this call.
+                            core_clone.accumulate_llm_usage(&usage);
+                            // Prefer natural break points over a blind cut so
+                            // the user sees a complete sentence (or "…") rather
+                            // than a half-word. See prompt.rs for details.
+                            let trimmed = crate::prompt::truncate_title_for_display(&title);
+                            *pending_title.write().unwrap() = Some(trimmed);
                         }
-                    });
-                }
+                        Err(e) => {
+                            tracing::warn!(
+                                "LLM session title generation failed (non-fatal): {e}"
+                            );
+                            let fallback =
+                                crate::prompt::truncate_title_for_display(&fallback_msg);
+                            *pending_title.write().unwrap() = Some(fallback);
+                        }
+                    }
+                });
             }
         }
 
@@ -1595,11 +1601,12 @@ impl AgentLoop {
         // agent reaches the memory service through the MCP catalog like any
         // other tool. Nothing to inject before the first LLM call.
 
-        // Title persistence is now handled lazily by flush_pending_title()
-        // called at the end of each execute_single_iteration(). The async
-        // title generation task (spawned above) writes to session_core.title
-        // when it completes, and the next iteration checkpoint picks it up
-        // and persists it via conversation.update_title_force().
+        // Title persistence is handled lazily by flush_pending_title() at the
+        // end of each execute_single_iteration(): the async title task
+        // (spawned above) drops its result into the `session_core.pending_title`
+        // mailbox, and the next checkpoint TAKES it and hands it to
+        // `ConversationSession::set_generated_title` — which refuses if a
+        // human has since renamed the session.
 
         let mut iteration = 0u32;
 
@@ -2128,10 +2135,11 @@ impl AgentLoop {
                     }
                 }
             };
-            // Lazy-persist any async-generated title to the conversation
-            // JSONL and index.json. The title generation task writes to
-            // session_core.title asynchronously; this checkpoint picks it
-            // up at the earliest opportunity after the LLM round-trip.
+            // Lazy-persist any async-generated title to the meta row. The
+            // title task fills the `pending_title` mailbox asynchronously;
+            // this checkpoint drains it at the earliest opportunity after the
+            // LLM round-trip. Draining (not copying) is what makes a human
+            // rename stick: once taken, the value is gone.
             self.flush_pending_title();
 
             // ADR-054 follow-up: refresh this iteration's messages snapshot
@@ -3029,6 +3037,108 @@ mod tests {
             "the interrupted reply must land once, not twice: {replies:?}"
         );
         assert_eq!(replies[0].content, "half a sentence");
+    }
+
+    /// M1 regression: **a human rename must survive the next checkpoint.**
+    ///
+    /// `flush_pending_title` used to *read* `session_core.title` and re-write
+    /// it to the conversation at every iteration checkpoint. That cell is
+    /// written only by the async title task, and a rename
+    /// (`PUT …/config` → `apply_config`) never touched it — so from the
+    /// rename onwards, every turn pushed the stale automatic title back over
+    /// the human's, on disk and (via `notify_config_change`) to the frontend.
+    /// The map keyed by "no title yet" was the only guard, and after a rename
+    /// a title exists, which is exactly the state that was misread.
+    ///
+    /// The cell is a one-shot mailbox now (drained with `take`, so nothing can
+    /// replay it) and the receiving end refuses a generated title for a
+    /// session a human owns (`title_source = user`, persisted). Either half
+    /// alone closes the hole; this walks the sequence that produced the bug.
+    #[tokio::test]
+    async fn a_human_rename_survives_the_next_title_checkpoint() {
+        use std::sync::atomic::AtomicUsize;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let work_dir = dir.path();
+        let session_id = "test-rename-survives-checkpoint";
+        let config = crate::conversation::SessionConfig {
+            agent_id: "com.test.loop".to_string(),
+            workspace_id: None,
+            model: None,
+            provider: None,
+        };
+        let (conversation, _config_rx, _state_rx) = ConversationSession::new(
+            work_dir,
+            session_id,
+            config,
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        let conversation = Arc::new(conversation);
+        let (mut agent_loop, _) = AgentLoop::new(
+            RuntimeConfig::default(),
+            test_manifest(),
+            Arc::new(MockProvider::single_text("ok")),
+            entries(vec![]),
+            test_budget(),
+            None,
+            Some(conversation.clone()),
+        );
+
+        // 1. The async title task finishes and drops its result in the mailbox;
+        //    the next checkpoint persists it and empties the cell.
+        *agent_loop.session_core.pending_title.write().unwrap() = Some("自动标题".into());
+        agent_loop.flush_pending_title();
+        assert_eq!(
+            conversation.title().as_deref(),
+            Some("自动标题"),
+            "the generated title reaches the conversation"
+        );
+        assert!(
+            agent_loop
+                .session_core
+                .pending_title
+                .read()
+                .unwrap()
+                .is_none(),
+            "the mailbox is drained, not mirrored: nothing left to replay"
+        );
+
+        // 2. The human renames the session (what `PUT …/config` does).
+        assert!(conversation.set_user_title("人工标题"));
+
+        // 3. The next turn's checkpoint finds an empty mailbox — no write.
+        agent_loop.flush_pending_title();
+        assert_eq!(
+            conversation.title().as_deref(),
+            Some("人工标题"),
+            "a checkpoint with nothing to hand over must not touch the title"
+        );
+
+        // 4. Even a stale candidate (the title task returned just before the
+        //    rename) is refused: the rename owns the field now.
+        *agent_loop.session_core.pending_title.write().unwrap() = Some("自动标题".into());
+        agent_loop.flush_pending_title();
+        assert_eq!(
+            conversation.title().as_deref(),
+            Some("人工标题"),
+            "a late generated title must not undo a rename"
+        );
+
+        // 5. Disk — what the frontend reads after a refresh, and what a
+        //    restart seeds from.
+        conversation.flush_pending().await.expect("flush");
+        let meta =
+            crate::conversation::read_session_meta(&work_dir.join("conversations"), session_id)
+                .expect("meta row");
+        assert_eq!(meta.title.as_deref(), Some("人工标题"));
+        assert_eq!(
+            meta.title_source,
+            Some(acowork_core::session_meta::TitleSource::User),
+            "the human owns the title on disk, so the rule survives a restart"
+        );
     }
 
     fn test_manifest() -> acowork_core::AgentManifest {
@@ -5483,7 +5593,7 @@ mod tests {
         // Pre-set the title so the async title-generation task is skipped —
         // otherwise it would consume one of the mock's canned responses and
         // shift the whole sequence (title gen only runs when unset).
-        conversation.set_title("pre-set");
+        conversation.set_generated_title("pre-set");
 
         // nudge #1 → nudge #2 → fresh resend → budget spent (error + empty
         // turn). The resend appends nothing, so only two internal rows land
@@ -5738,7 +5848,7 @@ mod tests {
         // Pre-set a title so the async title-generation task takes its
         // skip path — otherwise it fires a THIRD call at the same
         // MockProvider and overwrites `last_request` (race).
-        conversation.set_title("mid-turn config test");
+        conversation.set_generated_title("mid-turn config test");
 
         let provider = Arc::new(MockProvider::tool_call_then_text(
             "switch_model",

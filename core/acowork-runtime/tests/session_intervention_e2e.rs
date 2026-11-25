@@ -113,6 +113,7 @@ fn meta(sid: &str, initiator: Option<&str>, interveners: &[&str]) -> SessionMeta
         chat_session_id: None,
         model_usage: None,
         aware_users: Vec::new(),
+        title_source: None,
     }
 }
 

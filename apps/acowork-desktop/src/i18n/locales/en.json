@@ -414,6 +414,7 @@
     "closeOtherChats": "Close other chats",
     "openNewSession": "Open new session",
     "rename": "Rename…",
+    "renameFailed": "Rename failed",
     "newConversation": "New conversation",
     "sessionHistory": "Session history",
     "clearAll": "Clear all conversations",

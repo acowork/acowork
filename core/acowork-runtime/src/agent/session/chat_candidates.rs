@@ -464,6 +464,7 @@ mod tests {
             last_compaction_offset: None,
             corrupted: false,
             model_usage: None,
+            title_source: None,
         }
     }
 

@@ -4417,6 +4417,7 @@ mod tests {
             corrupted: false,
         chat_session_id: None,
             model_usage: None,
+            title_source: None,
         };
         crate::conversation::write_session_meta(&conversations_dir, &meta).unwrap();
 
@@ -4689,6 +4690,7 @@ mod tests {
             corrupted: false,
             chat_session_id: None,
             model_usage: None,
+            title_source: None,
         }
     }
 
@@ -6977,6 +6979,7 @@ mod tests {
             corrupted: false,
         chat_session_id: None,
             model_usage: None,
+            title_source: None,
         };
         crate::conversation::write_session_meta(&temp_dir.join("conversations"), &meta).unwrap();
 
@@ -7108,6 +7111,7 @@ mod tests {
         let svc: Arc<dyn crate::usecases::SessionConfigService> =
             Arc::new(crate::usecases::RuntimeSessionConfigService::new(
                 shared_configs,
+                work_dir.to_path_buf(),
                 None,                                   // no resolver for basic tests
                 Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
             ));
@@ -7654,6 +7658,7 @@ mod tests {
         let config_svc: Arc<dyn crate::usecases::SessionConfigService> =
             Arc::new(crate::usecases::RuntimeSessionConfigService::new(
                 shared_configs,
+                temp_dir.to_path_buf(),
                 Some(resolver),
                 Arc::new(std::sync::RwLock::new(None)),
             ));
@@ -7764,6 +7769,7 @@ mod tests {
             corrupted: false,
         chat_session_id: None,
             model_usage: None,
+            title_source: None,
         };
         write_session_meta(&temp_dir.join("conversations"), &meta).unwrap();
 

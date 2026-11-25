@@ -870,6 +870,9 @@ pub(crate) async fn phase_b_init_session(
         // constructed (it owns the session snapshots + chunk channel).
         let impl_arc = Arc::new(crate::usecases::RuntimeSessionConfigService::new(
             ctx.session_configs.clone(),
+            // The meta row is the config of a session this process does not
+            // hold open, so the service needs the dir those rows live in.
+            work_dir_path.to_path_buf(),
             Some(ctx.workspace_resolver.clone()),
             ctx.agent_core_shared.clone(),
         ));

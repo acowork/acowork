@@ -14,8 +14,15 @@ use serde::{Deserialize, Serialize};
 /// Partial session config update.
 ///
 /// Adding a new config parameter:
-/// 1. Add field here
-/// 2. Add handling in `ConversationSession::apply_config()`
+/// 1. Add field here, and to `SessionConfigSnapshot` (the two are one mirror
+///    pair — every field of the delta is a field of the snapshot).
+/// 2. Add handling in **both** write paths — `ConversationSession::apply_config`
+///    (a session this process holds open) and
+///    `usecases::session_config_meta::apply_field` (a session that lives only
+///    as a meta row). The differential test
+///    `session_config_meta::tests::the_two_residency_paths_agree_on_every_field`
+///    compares the whole snapshot and fails when only one of them was taught
+///    the new field.
 /// 3. Add to `SessionConfig` proto + `build_session_config_snapshot()`
 /// 4. (Optional) Add LLM-side effect in `llm_effects.rs`
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,7 +84,14 @@ impl SessionConfigDelta {
 /// Read-only snapshot of current session config.
 ///
 /// Used by HTTP GET, MQTT retained, and LLM-side effect application.
-#[derive(Debug, Clone, Default, Serialize)]
+///
+/// `PartialEq` exists for the differential test that keeps the two write
+/// paths (resident conversation / non-resident meta row) honest: comparing
+/// whole snapshots means a field added to this struct is compared there
+/// automatically, so the "mirror, not a second definition" rule is enforced
+/// by the compiler rather than by a comment. (`Eq` is out: `temperature` is
+/// an `f32`.)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct SessionConfigSnapshot {
     pub model: Option<String>,
     pub provider: Option<String>,

@@ -419,6 +419,7 @@ async fn legacy_meta_file_loads_with_tokens_none() {
         corrupted: false,
     chat_session_id: None,
         model_usage: None,
+        title_source: None,
     };
     write_session_meta(&conv_dir, &legacy_meta).expect("write legacy");
 
@@ -586,6 +587,7 @@ async fn resume_hydrates_last_compaction_offset_from_meta() {
         corrupted: false,
     chat_session_id: None,
         model_usage: None,
+        title_source: None,
     };
     write_session_meta(&conv_dir, &meta).expect("write meta");
     std::fs::write(conv_dir.join(format!("{session_id}.jsonl")), "").unwrap();

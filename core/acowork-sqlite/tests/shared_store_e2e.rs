@@ -43,6 +43,7 @@ fn meta(sid: &str, title: &str) -> SessionMeta {
         corrupted: false,
     chat_session_id: None,
         model_usage: None,
+        title_source: None,
     }
 }
 

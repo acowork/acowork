@@ -103,6 +103,16 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         .unwrap_or_default();
 
     let title: Option<String> = row.get("title")?;
+    // Who wrote `title` (see `acowork_core::session_meta::TitleSource`).
+    // NULL = a row written before the column existed, i.e. the automatic
+    // path — that resolve lives in `SessionMeta::effective_title_source`, so
+    // the column itself stays `Option<TitleSource>` with one on-disk
+    // spelling per state. Unrecognised text also reads as absent (generated):
+    // a hand-edited value must not be able to freeze the auto path forever.
+    let title_source_text: Option<String> = row.get("title_source")?;
+    let title_source = title_source_text
+        .as_deref()
+        .and_then(acowork_core::session_meta::TitleSource::from_db_str);
     let workspace_id: Option<String> = row.get("workspace_id")?;
     let model: Option<String> = row.get("model")?;
     let provider: Option<String> = row.get("provider")?;
@@ -230,6 +240,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         model_ratio,
         last_compaction_offset: last_compaction_offset.map(|o| o.max(0) as u64),
         corrupted: corrupted != 0,
+        title_source,
     })
 }
 
@@ -727,7 +738,7 @@ impl SessionMetaStore for SqliteSessionMetaStore {
 const SELECT_ALL_COLUMNS: &str = "SELECT \
     session_id, agent_id, created_at, last_active_at, \
     version, corrupted, initiator, visibility, \
-    title, workspace_id, model, provider, account_id, reasoning_effort, \
+    title, title_source, workspace_id, model, provider, account_id, reasoning_effort, \
     temperature, context_window, todos, message_count, \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
@@ -738,7 +749,7 @@ FROM sessions WHERE session_id = ?1";
 const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
     session_id, agent_id, created_at, last_active_at, \
     version, corrupted, initiator, visibility, \
-    title, workspace_id, model, provider, account_id, reasoning_effort, \
+    title, title_source, workspace_id, model, provider, account_id, reasoning_effort, \
     temperature, context_window, todos, message_count, \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
@@ -792,7 +803,7 @@ fn upsert_row(
     conn.execute(
         "INSERT INTO sessions( \
             session_id, agent_id, created_at, last_active_at, \
-            title, workspace_id, model, provider, account_id, reasoning_effort, \
+            title, title_source, workspace_id, model, provider, account_id, reasoning_effort, \
             temperature, context_window, todos, message_count, \
             llm_call_counter, model_ratio, last_compaction_offset, \
             token_last_input, token_last_output, token_total_input, token_total_output, \
@@ -801,19 +812,20 @@ fn upsert_row(
             version, corrupted, initiator, visibility, chat_session_id, aware_users, model_usage, tool_policy, interveners \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, \
-            ?5, ?6, ?7, ?8, ?9, ?10, \
-            ?11, ?12, ?13, ?14, \
-            ?15, ?16, ?17, \
-            ?18, ?19, ?20, ?21, \
-            ?22, ?23, ?24, ?25, \
-            ?26, ?27, ?28, ?29, \
-            ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38 \
+            ?5, ?6, ?7, ?8, ?9, ?10, ?11, \
+            ?12, ?13, ?14, ?15, \
+            ?16, ?17, ?18, \
+            ?19, ?20, ?21, ?22, \
+            ?23, ?24, ?25, ?26, \
+            ?27, ?28, ?29, ?30, \
+            ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39 \
          ) \
          ON CONFLICT(session_id) DO UPDATE SET \
             agent_id = excluded.agent_id, \
             created_at = excluded.created_at, \
             last_active_at = excluded.last_active_at, \
             title = excluded.title, \
+            title_source = excluded.title_source, \
             workspace_id = excluded.workspace_id, \
             model = excluded.model, \
             provider = excluded.provider, \
@@ -853,6 +865,7 @@ fn upsert_row(
             created_at_ms(meta),
             last_active_at_ms(meta),
             meta.title,
+            meta.title_source.map(|s| s.as_str()),
             meta.workspace_id,
             meta.model,
             meta.provider,

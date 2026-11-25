@@ -6156,6 +6156,7 @@ mod tests {
                 corrupted: false,
             chat_session_id: None,
                 model_usage: None,
+                title_source: None,
             },
         )
         .unwrap();
@@ -7423,6 +7424,7 @@ mod tests {
             model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
+            title_source: None,
         };
         crate::conversation::write_session_meta(&conversations_dir, &meta).expect("seed meta");
 

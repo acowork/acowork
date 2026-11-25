@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
@@ -28,7 +28,7 @@ use crate::agent::session_state::TodoItem;
 pub use acowork_core::session_meta::{
     ConfigField, ModelUsageEntry, SessionAuthority, SessionCapabilities, SessionMeta,
     SessionMetaStore, SessionPerf, SessionScope, SessionTokens, SessionToolPolicy,
-    SessionVisibility, TokenStatsRow, model_usage_key,
+    SessionVisibility, TitleSource, TokenStatsRow, model_usage_key,
 };
 // Plan D3: the provenance record a `user` row carries. Re-exported here because
 // every writer of such a row already reaches the transcript through this module,
@@ -1104,11 +1104,23 @@ pub struct ConversationSession {
     session_id: String,
     agent_id: String,
     created_at: String,
-    /// Whether the session title has been set (first user message).
-    title_set: AtomicBool,
-    /// Currently persisted title, for deduplicating force-update calls
-    /// and serving the `title()` getter without disk I/O.
+    /// Currently persisted title, for deduplicating title writes and
+    /// serving the `title()` getter without disk I/O.
+    ///
+    /// Two writers own this one string, and they are not symmetric:
+    /// [`Self::set_generated_title`] (the Runtime's automatic title call)
+    /// must never replace what [`Self::set_user_title`] (a human rename)
+    /// wrote. [`Self::title_source`] is the fact that keeps them apart, and
+    /// it is persisted, so the rule survives a restart.
     current_title: std::sync::Mutex<Option<String>>,
+    /// Who authored [`Self::current_title`], mirrored from
+    /// `SessionMeta::title_source`. `None` = absent on disk = generated
+    /// (every row written before that column existed was auto-titled).
+    ///
+    /// This is the gate the automatic title path asks before writing: a
+    /// session a human renamed is closed to it forever, not just until the
+    /// next turn's checkpoint.
+    title_source: std::sync::Mutex<Option<TitleSource>>,
     /// Per-session workspace selection, persisted in meta file.
     /// `None` or `"__agent_home__"` means the agent's home directory.
     /// Wrapped in Mutex for interior mutability so that both file persistence
@@ -1413,6 +1425,7 @@ impl ConversationSession {
             model_ratio: self.model_ratio.lock().ok().and_then(|r| *r),
             last_compaction_offset,
             corrupted: false,
+            title_source: self.title_source.lock().ok().and_then(|s| *s),
         }
     }
 
@@ -1720,8 +1733,10 @@ impl ConversationSession {
             session_id: session_id.to_string(),
             agent_id: config.agent_id,
             created_at: now.clone(),
-            title_set: AtomicBool::new(false),
             current_title: std::sync::Mutex::new(None),
+            // A brand-new session has no title and no author yet; the
+            // automatic path claims it on the first turn.
+            title_source: std::sync::Mutex::new(None),
             workspace_id: std::sync::Mutex::new(config.workspace_id),
             model: std::sync::Mutex::new(config.model),
             provider: std::sync::Mutex::new(config.provider),
@@ -1860,8 +1875,11 @@ impl ConversationSession {
                 session_id: session_id.to_string(),
                 agent_id: meta.agent_id,
                 created_at: meta.created_at,
-                title_set: AtomicBool::new(meta.title.is_some()),
                 current_title: std::sync::Mutex::new(meta.title.clone()),
+                // Seed the author from disk: a session a human renamed keeps
+                // that fact across the restart, so the automatic title call
+                // cannot claim it back.
+                title_source: std::sync::Mutex::new(meta.title_source),
                 workspace_id: std::sync::Mutex::new(meta.workspace_id),
                 model: std::sync::Mutex::new(meta.model),
                 provider: std::sync::Mutex::new(meta.provider),
@@ -2339,48 +2357,90 @@ impl ConversationSession {
         Ok(())
     }
 
-    /// Set the session title from the first user message.
+    /// Who authored the current title — `User` once a human renamed the
+    /// session, `Generated` otherwise (including "no title yet").
     ///
-    /// Truncates via [`crate::prompt::truncate_title_for_display`] (which
-    /// prefers natural break points over a blind cut). Only sets the title
-    /// once — subsequent calls are no-ops.
-    pub fn set_title(&self, content: &str) {
-        if self.title_set.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        let title = crate::prompt::truncate_title_for_display(content);
-        // Track current title for dedup
-        if let Ok(mut current) = self.current_title.lock() {
-            *current = Some(title);
-        }
-        // ADR-024: write entire meta file instead of rewrite_metadata + update_index_entry
-        self.write_meta();
-        self.notify_config_change();
-        tracing::info!(session_id = %self.session_id, "Session title set");
+    /// Reads the in-memory mirror of `SessionMeta::title_source`; the
+    /// absent case resolves to `Generated` exactly like the on-disk default
+    /// (`SessionMeta::effective_title_source`), so both sides of a restart
+    /// answer the same question the same way.
+    pub fn title_source(&self) -> TitleSource {
+        self.title_source
+            .lock()
+            .ok()
+            .and_then(|s| *s)
+            .unwrap_or(TitleSource::Generated)
     }
 
-    /// Force-update the session title (used by API, not first-message auto-set).
+    /// Write `title` / `title_source` into memory only.
     ///
-    /// Unlike `set_title`, this always writes the title even if one was
-    /// already set. Used by the `update_session_title` action from Gateway.
-    /// Returns `true` if the title was actually written (was different from current).
-    pub fn update_title_force(&self, title: &str) -> bool {
-        // No-op if the title hasn't changed
-        if let Ok(current) = self.current_title.lock()
-            && current.as_deref() == Some(title)
-        {
-            return false;
-        }
+    /// Returns `true` when the in-memory state actually changed, so callers
+    /// that batch several fields (e.g. [`Self::apply_config`]) can persist
+    /// once at the end. Never touches disk and never notifies by itself.
+    fn store_title(&self, title: &str, source: TitleSource) -> bool {
         let truncated = crate::prompt::truncate_title_for_display(title);
-        self.title_set.store(true, Ordering::Relaxed);
-        // Track current title for dedup
-        if let Ok(mut current) = self.current_title.lock() {
-            *current = Some(truncated.clone());
+        let mut changed = false;
+        if let Ok(mut current) = self.current_title.lock()
+            && current.as_deref() != Some(truncated.as_str())
+        {
+            *current = Some(truncated);
+            changed = true;
         }
-        // ADR-024: write entire meta file instead of rewrite_metadata + update_index_entry
+        if let Ok(mut slot) = self.title_source.lock()
+            && *slot != Some(source)
+        {
+            *slot = Some(source);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Split of the two title writers, persistence side.
+    fn persist_title_write(&self) {
+        // ADR-024: write the whole meta row instead of rewrite_metadata +
+        // update_index_entry, then let the relays push the new config.
         self.write_meta();
         self.notify_config_change();
-        tracing::info!(session_id = %self.session_id, title = %truncated, "Session title force-updated via API");
+    }
+
+    /// Persist a title produced by the **automatic** title-generation call.
+    ///
+    /// Two refusals, both deliberate, and both are what keeps a human rename
+    /// from being undone by the next turn:
+    ///
+    /// * a title already exists — the automatic path titles a session once,
+    ///   from its first user turn, and never re-titles it;
+    /// * the title is [`TitleSource::User`] — a human renamed the session, so
+    ///   the automatic path is closed to it for good (this is the durable
+    ///   half: the author is on disk, not inferred from ordering).
+    ///
+    /// Returns `true` only when the title was written. A `false` here is
+    /// normal, not an error: the caller just drops the candidate.
+    pub fn set_generated_title(&self, title: &str) -> bool {
+        if self.title().is_some() || self.title_source() == TitleSource::User {
+            return false;
+        }
+        if !self.store_title(title, TitleSource::Generated) {
+            return false;
+        }
+        self.persist_title_write();
+        tracing::info!(session_id = %self.session_id, "Session title generated");
+        true
+    }
+
+    /// Persist a title a **human** typed (rename, or `PUT …/config {title}`).
+    ///
+    /// Always wins over an existing title, whatever its author — that is the
+    /// whole point of a rename — and stamps the author as `User` so the
+    /// automatic path cannot reclaim the field later.
+    ///
+    /// Returns `true` if anything was written (title or author changed).
+    pub fn set_user_title(&self, title: &str) -> bool {
+        if !self.store_title(title, TitleSource::User) {
+            return false;
+        }
+        self.persist_title_write();
+        tracing::info!(session_id = %self.session_id, title = %title, "Session title renamed by user");
         true
     }
 
@@ -2906,12 +2966,12 @@ impl ConversationSession {
             changed = true;
         }
         if let Some(ref title) = delta.title {
-            let truncated = crate::prompt::truncate_title_for_display(title);
-            if let Ok(mut current) = self.current_title.lock() {
-                *current = Some(truncated);
-            }
-            self.title_set.store(true, Ordering::Relaxed);
-            changed = true;
+            // A `title` on the config path is always a **human** rename
+            // (this is the `PUT /sessions/{sid}/config` write), so it stamps
+            // `TitleSource::User` and the automatic title call can never
+            // take the field back. Memory-only here: the tail of this
+            // function persists once for every field in the delta.
+            changed |= self.store_title(title, TitleSource::User);
         }
 
         if changed {
@@ -3269,9 +3329,11 @@ impl Clone for ConversationSession {
             session_id: self.session_id.clone(),
             agent_id: self.agent_id.clone(),
             created_at: self.created_at.clone(),
-            title_set: AtomicBool::new(self.title_set.load(Ordering::Relaxed)),
             current_title: std::sync::Mutex::new(
                 self.current_title.lock().ok().and_then(|t| t.clone()),
+            ),
+            title_source: std::sync::Mutex::new(
+                self.title_source.lock().ok().and_then(|s| *s),
             ),
             workspace_id: std::sync::Mutex::new(
                 self.workspace_id.lock().ok().and_then(|w| w.clone()),
@@ -4917,6 +4979,7 @@ mod tests {
             corrupted: false,
         chat_session_id: None,
             model_usage: None,
+            title_source: None,
         };
         std::fs::write(conv.join(format!("{}.jsonl", sid)), "").unwrap();
         // ADR-106 D4: a session's round side table sits next to its transcript,
@@ -5158,6 +5221,7 @@ mod tests {
                 corrupted: false,
             chat_session_id: None,
                 model_usage: None,
+                title_source: None,
             };
             write_session_meta(&conv_dir, &meta).unwrap();
         }
@@ -5452,6 +5516,7 @@ mod tests {
             corrupted: false,
         chat_session_id: None,
             model_usage: None,
+            title_source: None,
         };
         write_session_meta(&conv_dir, &valid_meta).unwrap();
 
@@ -6220,6 +6285,7 @@ mod tests {
             corrupted: false,
         chat_session_id: None,
             model_usage: None,
+            title_source: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: SessionMeta = serde_json::from_str(&json).unwrap();
@@ -6549,6 +6615,7 @@ mod tests {
                 corrupted: false,
             chat_session_id: None,
                 model_usage: None,
+                title_source: None,
             };
 
             // Session A: full cache breakdown.
@@ -6739,7 +6806,7 @@ mod tests {
         );
 
         // An unrelated meta write must not drop the override.
-        resumed.set_title("renamed");
+        resumed.set_user_title("renamed");
         let (resumed_after_title, _cfg_rx, _state_rx) =
             ConversationSession::resume(temp_dir.path(), sid, Arc::new(AtomicUsize::new(0)))
                 .unwrap();
@@ -6758,6 +6825,86 @@ mod tests {
             cleared.tool_policy(),
             None,
             "an empty policy must persist as None (inherit the agent layer)"
+        );
+    }
+
+    /// M2: "a human rename wins" is a **persisted fact**, not a timing
+    /// convention.
+    ///
+    /// Gating the automatic title path on "does a title exist" only holds
+    /// inside one process lifetime: after a restart the resume path seeds the
+    /// title from `SessionMeta` and the next turn spawns the title task again.
+    /// `title_source` is what tells that task the field belongs to a human, so
+    /// it has to come back from disk — an in-memory flag would be forgotten by
+    /// exactly the event (restart) it is supposed to survive.
+    #[test]
+    fn a_user_rename_outlives_a_restart_and_closes_the_automatic_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let sid = "20261124_104538_2cf37c";
+        let cfg = || SessionConfig {
+            agent_id: "com.test".to_string(),
+            workspace_id: None,
+            model: None,
+            provider: None,
+        };
+
+        let (session, _cfg_rx, _state_rx) = ConversationSession::new(
+            temp_dir.path(),
+            sid,
+            cfg(),
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        // The automatic path titles the session once, from its first turn.
+        assert!(session.set_generated_title("第一条消息"));
+        assert_eq!(
+            session.title_source(),
+            TitleSource::Generated
+        );
+        // A human renames it.
+        assert!(session.set_user_title("分支出重构"));
+        drop(session);
+
+        // Restart: everything the rule needs must come back from disk.
+        let (resumed, _cfg_rx, _state_rx) =
+            ConversationSession::resume(temp_dir.path(), sid, Arc::new(AtomicUsize::new(0)))
+                .unwrap();
+        assert_eq!(resumed.title().as_deref(), Some("分支出重构"));
+        assert_eq!(
+            resumed.title_source(),
+            TitleSource::User
+        );
+        assert!(
+            !resumed.set_generated_title("迟到的自动标题"),
+            "the automatic path is closed to a renamed session for good"
+        );
+        assert_eq!(resumed.title().as_deref(), Some("分支出重构"));
+
+        // The other side of the same rule: a session that was never titled can
+        // still be titled after a restart — the gate must not freeze the
+        // automatic path for everyone.
+        let sid2 = "20261124_110000_aaaaaa";
+        let (untitled, _cfg_rx, _state_rx) = ConversationSession::new(
+            temp_dir.path(),
+            sid2,
+            cfg(),
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        assert_eq!(untitled.title(), None);
+        drop(untitled);
+        let (resumed_untitled, _cfg_rx, _state_rx) =
+            ConversationSession::resume(temp_dir.path(), sid2, Arc::new(AtomicUsize::new(0)))
+                .unwrap();
+        assert!(
+            resumed_untitled.set_generated_title("重启后生成"),
+            "an untitled session is still the automatic path's to name"
+        );
+        assert_eq!(
+            resumed_untitled.title_source(),
+            TitleSource::Generated
         );
     }
 
@@ -8522,6 +8669,7 @@ mod tests {
             last_compaction_offset: None,
         chat_session_id: None,
             model_usage: None,
+            title_source: None,
         };
 
         // (owner, visibility) -> (alice reads, bob reads, alice writes, bob writes)
@@ -8597,6 +8745,7 @@ mod tests {
             last_compaction_offset: None,
             corrupted: false,
             model_usage: None,
+            title_source: None,
         }
     }
 
@@ -8702,6 +8851,7 @@ mod tests {
                 last_compaction_offset: None,
                 corrupted: false,
                 model_usage: None,
+                title_source: None,
             }
         }
         let owner = SessionScope::user("u-alice");
@@ -8833,6 +8983,7 @@ mod tests {
                 last_compaction_offset: None,
             chat_session_id: None,
                 model_usage: None,
+                title_source: None,
             }
         };
 
@@ -8992,6 +9143,7 @@ mod tests {
                 last_compaction_offset: None,
                 chat_session_id: None,
                 model_usage: None,
+                title_source: None,
             }
         };
 
@@ -9113,6 +9265,7 @@ mod tests {
             last_compaction_offset: None,
             chat_session_id: chat.map(str::to_string),
             model_usage: None,
+            title_source: None,
         };
 
         // Four rows, activity stamps ascending with the index: s-0 and s-3 are

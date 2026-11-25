@@ -410,6 +410,7 @@
     "closeOtherChats": "다른 세션 닫기",
     "openNewSession": "새 세션 열기",
     "rename": "이름 바꾸기…",
+    "renameFailed": "이름 변경 실패",
     "newConversation": "New conversation",
     "sessionHistory": "Session history",
     "clearAll": "Clear all conversations",

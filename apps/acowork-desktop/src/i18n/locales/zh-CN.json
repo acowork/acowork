@@ -509,6 +509,7 @@
     "closeOtherChats": "关闭其他会话",
     "openNewSession": "打开新会话",
     "rename": "重命名…",
+    "renameFailed": "重命名失败",
     "newConversation": "新建会话",
     "sessionHistory": "会话历史",
     "clearAll": "清空所有会话",

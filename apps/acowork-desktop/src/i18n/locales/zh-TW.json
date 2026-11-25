@@ -410,6 +410,7 @@
     "closeOtherChats": "關閉其他工作階段",
     "openNewSession": "開啟新工作階段",
     "rename": "重新命名…",
+    "renameFailed": "重新命名失敗",
     "newConversation": "New conversation",
     "sessionHistory": "Session history",
     "clearAll": "Clear all conversations",

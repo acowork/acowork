@@ -1179,6 +1179,27 @@ interface ChatStore {
    *  model/provider. Empty / whitespace-only titles are ignored: the overlay
    *  shadows the list snapshot for readers, so a blank must never land. */
   setSessionTitleLocal: (agentId: string, sessionId: string, title: string) => void;
+  /**
+   * Put the live title overlay back to the value the backend last reported,
+   * after a rename the backend refused (`agentStore.renameSession`).
+   *
+   * Distinct from [`setSessionTitleLocal`] because the rollback target may be
+   * **absent**: a session that had no title of its own before the rename must
+   * end up with no overlay title either. Writing `""` would not do — the
+   * overlay is read first and `setSessionTitleLocal` refuses blank writes
+   * precisely so it cannot shadow the list snapshot — so the empty case
+   * *removes* the field and lets the snapshot (the authoritative value the
+   * user should see) win again.
+   *
+   * Without this, a failed rename leaves the tab reading the rejected title:
+   * the overlay outranks `sessions[]` for every reader, so the rollback of
+   * `sessions[]` alone is invisible until a refetch rebuilds the overlay.
+   */
+  rollbackSessionTitleLocal: (
+    agentId: string,
+    sessionId: string,
+    previousTitle: string | null | undefined,
+  ) => void;
   /** Seed a provisional title for a session that has none yet (a Chat-Router
    *  exec session), derived from the triggering user message. No-op once any
    *  title exists — live overlay OR the `fetchSessions` snapshot (both are
@@ -3727,6 +3748,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // the "Untitled" fallback. Title changes are always non-empty.
     if (!title.trim()) return;
     set((state) => updateSessionState(state, agentId, sessionId, { title }));
+  },
+
+  rollbackSessionTitleLocal: (
+    agentId: string,
+    sessionId: string,
+    previousTitle: string | null | undefined,
+  ) => {
+    const target = previousTitle?.trim();
+    if (target) {
+      set((state) => updateSessionState(state, agentId, sessionId, { title: target }));
+      return;
+    }
+    // No previous overlay: drop the field so readers fall through to the
+    // authoritative `sessions[]` snapshot again. `title: undefined` keeps the
+    // key present but empty on purpose — the merge in `updateSessionState`
+    // cannot delete a key, and every reader (`||` chain) treats both the same.
+    if (!getSessionState(get(), agentId, sessionId).title) return; // already clean
+    set((state) => updateSessionState(state, agentId, sessionId, { title: undefined }));
   },
 
   seedOptimisticTitle: (agentId: string, sessionId: string, userMessage: string) => {

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use crate::agent::session_config::llm_effects;
 use crate::agent::session_config::{SessionConfigDelta, SessionConfigSnapshot};
-use crate::conversation::ConversationSession;
+use crate::conversation::{ConversationSession, read_session_meta};
 use crate::error::{Result, RuntimeError};
 use crate::http::SharedAgentCore;
 use crate::tools::workspace_resolver::WorkspaceResolver;
@@ -26,7 +26,17 @@ pub type SharedSessionConfigs = Arc<RwLock<HashMap<String, Arc<ConversationSessi
 
 pub struct RuntimeSessionConfigService {
     /// Shared session config stores, keyed by session_id.
+    ///
+    /// Membership means "resident in this process". It is an implementation
+    /// detail, **not** a validity check: a session missing from this map is
+    /// still a session, and its config lives in its meta row — see
+    /// [`super::session_config_meta`].
     sessions: SharedSessionConfigs,
+    /// The Runtime work dir; its `conversations/` child holds every session's
+    /// meta row. This is the fallback store for a non-resident session, and
+    /// the reason the config surface no longer answers 500 for the entire
+    /// session history (`Session not found: …`).
+    work_dir: std::path::PathBuf,
     /// For workspace validation (optional - CLI mode may not have one).
     resolver: Option<Arc<RwLock<WorkspaceResolver>>>,
     /// Late-bind slot for `AgentCore` — populated by `Phase B` once
@@ -63,11 +73,13 @@ pub struct RuntimeSessionConfigService {
 impl RuntimeSessionConfigService {
     pub fn new(
         sessions: SharedSessionConfigs,
+        work_dir: std::path::PathBuf,
         resolver: Option<Arc<RwLock<WorkspaceResolver>>>,
         core_slot: SharedAgentCore,
     ) -> Self {
         Self {
             sessions,
+            work_dir,
             resolver,
             core_slot,
             usage_recompute: std::sync::RwLock::new(None),
@@ -102,21 +114,32 @@ impl SessionConfigService for RuntimeSessionConfigService {
             }
         }
 
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|e| RuntimeError::Config(format!("SessionConfigs lock poisoned: {}", e)))?;
+        // Resolve the target and drop the map guard before writing: a
+        // non-resident write goes to the meta store, which has its own lock,
+        // and holding both would be an unnecessary ordering constraint.
+        let conv = {
+            let sessions = self.sessions.read().map_err(|e| {
+                RuntimeError::Config(format!("SessionConfigs lock poisoned: {}", e))
+            })?;
+            sessions.get(session_id).cloned()
+        };
 
-        let conv = sessions
-            .get(session_id)
-            .ok_or_else(|| RuntimeError::Config(format!("Session not found: {}", session_id)))?;
-
-        // apply_config is &self (interior mutability via Mutex), so no
-        // additional locking is needed beyond the RwLock read guard.
-        conv.apply_config(&delta);
+        let resident = conv.is_some();
+        match conv {
+            // Live session: in-memory config + the loop's turn-boundary diff +
+            // the MQTT push. `apply_config` is `&self` (interior mutability
+            // via Mutex), so no extra locking beyond that clone is needed.
+            Some(conv) => conv.apply_config(&delta),
+            // Not resident: the meta row IS the session's config, and the next
+            // open seeds memory from it. Same delta, same normalisation.
+            None => {
+                super::session_config_meta::apply_to_meta(&self.work_dir, session_id, &delta)?;
+            }
+        }
 
         tracing::info!(
             session_id = %session_id,
+            resident,
             has_model = delta.model.is_some(),
             has_provider = delta.provider.is_some(),
             has_workspace = delta.workspace_id.is_some(),
@@ -145,17 +168,31 @@ impl SessionConfigService for RuntimeSessionConfigService {
     }
 
     async fn get_config(&self, session_id: &str) -> Result<SessionConfigSnapshot> {
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|e| RuntimeError::Config(format!("SessionConfigs lock poisoned: {}", e)))?;
+        let conv = {
+            let sessions = self.sessions.read().map_err(|e| {
+                RuntimeError::Config(format!("SessionConfigs lock poisoned: {}", e))
+            })?;
+            sessions.get(session_id).cloned()
+        };
 
-        let conv = sessions
-            .get(session_id)
-            .ok_or_else(|| RuntimeError::Config(format!("Session not found: {}", session_id)))?;
-
-        // Read raw in-memory snapshot first.
-        let mut snapshot = conv.config_snapshot();
+        // Read raw snapshot first: in-memory for a resident session, straight
+        // from the meta row otherwise. Both answer the same question, so a
+        // client cannot tell residency from the response.
+        let mut snapshot = match conv {
+            Some(conv) => conv.config_snapshot(),
+            None => {
+                let dir = super::session_config_meta::conversations_dir(&self.work_dir);
+                let meta = read_session_meta(&dir, session_id).map_err(|e| {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %e,
+                        "non-resident config read: session meta unavailable"
+                    );
+                    RuntimeError::Config(format!("Session not found: {}", session_id))
+                })?;
+                super::session_config_meta::snapshot_from_meta(&meta)
+            }
+        };
 
         // Apply the shared `resolve_effective_reasoning_effort` chain so
         // that the HTTP/MQTT read path observes the SAME effective

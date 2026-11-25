@@ -84,6 +84,7 @@ fn make_session(sid: &str, tokens: SessionTokens) -> SessionMeta {
         model_ratio: None,
         last_compaction_offset: None,
         corrupted: false,
+        title_source: None,
     }
 }
 

@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use acowork_core::error::Result as AcoworkResult;
 use acowork_core::session_meta::{
-    SessionMeta, SessionMetaStore, SessionPerf, SessionTokens, SessionVisibility, TodoItem,
-    TodoStatus, last_active_at_ms,
+    SessionMeta, SessionMetaStore, SessionPerf, SessionTokens, SessionVisibility, TitleSource,
+    TodoItem, TodoStatus, last_active_at_ms,
 };
 use acowork_sqlite::{SqliteSessionMetaStore, SqliteStore};
 
@@ -84,6 +84,7 @@ fn make_meta(
         visibility: None,
     chat_session_id: None,
         model_usage: None,
+        title_source: None,
     }
 }
 
@@ -196,6 +197,31 @@ fn round_trip_preserves_every_field() -> AcoworkResult<()> {
     assert_eq!(todos[0].id, "todo-1");
     assert_eq!(todos[0].content, "ship it");
     assert_eq!(todos[0].status, TodoStatus::InProgress);
+    // The title's author travels with it (schema v15). This assertion is also
+    // the guard on `upsert_row`'s positional bindings: `title_source` was
+    // inserted mid-list, which shifted 35 `?n` placeholders, and a silent
+    // off-by-one there would surface as "some other column holds the wrong
+    // value" — a shape no `compile` can check. Losing the author, in
+    // particular, re-opens the automatic title path after a restart, which is
+    // the defect this column exists to close.
+    let mut owned = sm.get("abc")?.expect("row present");
+    owned.title_source = Some(TitleSource::User);
+    sm.upsert(&owned)?;
+    assert_eq!(
+        sm.get("abc")?.expect("row present after rename").title_source,
+        Some(TitleSource::User),
+        "a human-owned title keeps its author on disk"
+    );
+    // Absent stays absent — it must not come back as a stamped `generated`,
+    // and it must not be mistaken for `user` either.
+    let mut cleared = sm.get("abc")?.expect("row present");
+    cleared.title_source = None;
+    sm.upsert(&cleared)?;
+    assert_eq!(
+        sm.get("abc")?.expect("row present after clearing").title_source,
+        None,
+        "an unset author round-trips as unset"
+    );
     Ok(())
 }
 
@@ -660,6 +686,7 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
              ALTER TABLE sessions DROP COLUMN aware_users;
              ALTER TABLE sessions DROP COLUMN tool_policy;
              ALTER TABLE sessions DROP COLUMN interveners;
+             ALTER TABLE sessions DROP COLUMN title_source;
              PRAGMA user_version = 1;",
         )
         .unwrap();
@@ -671,6 +698,39 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
         "an upgraded v1 database must end up with the same `sessions` shape as a fresh one"
     );
     assert_eq!(stored_user_version(&fresh), stored_user_version(&old));
+    Ok(())
+}
+
+/// A database whose **stamp is behind its shape** must still open.
+///
+/// This is the branch-collision failure mode `schema.rs` calls out: a build
+/// that ships a column before allocating / stamping its version leaves rows
+/// carrying `title_source` while `user_version` still claims 14. The v15 step
+/// is keyed on the stored version alone, so without the presence guard its
+/// `ALTER` would hard-fail `open` and strand every session row. The end state
+/// (column present, version 15) is the same either way.
+#[test]
+fn a_title_source_column_ahead_of_its_version_stamp_does_not_hard_fail() -> AcoworkResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+
+    {
+        let (_store, sm) = open_pair(&path);
+        sm.upsert(&make_meta("s", "2026-01-01T00:00:00.000Z", Some("t"), "a"))?;
+    }
+
+    // Column on disk, version key behind it.
+    open_raw(&path)
+        .execute_batch("PRAGMA user_version = 14;")
+        .unwrap();
+
+    let (_store, sm) = open_pair(&path);
+    assert_eq!(
+        stored_user_version(&path),
+        acowork_sqlite::schema_version(),
+        "the reopen upgrades the stamp"
+    );
+    assert!(sm.get("s")?.is_some(), "the row survives the upgrade");
     Ok(())
 }
 
@@ -800,6 +860,9 @@ fn v6_migration_backfills_unknown_breakdown_and_aggregate() -> AcoworkResult<()>
              ALTER TABLE sessions DROP COLUMN intent_closed;
              ALTER TABLE sessions DROP COLUMN aware_users;
              ALTER TABLE sessions ADD COLUMN last_compaction_summary TEXT;
+             ALTER TABLE sessions DROP COLUMN tool_policy;
+             ALTER TABLE sessions DROP COLUMN interveners;
+             ALTER TABLE sessions DROP COLUMN title_source;
              PRAGMA user_version = 5;",
         )
         .unwrap();

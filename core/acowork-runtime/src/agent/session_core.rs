@@ -221,14 +221,29 @@ pub(crate) struct SessionCore {
     /// None in CLI mode.
     pub(crate) approval_handle: Option<ApprovalHandle>,
 
-    /// Session title set by async LLM summarization.
-    /// Written by the spawned title task in `AgentLoop::run_inner`, read by
-    /// `notify_new_data_available()` to push the title to the frontend.
-    pub(crate) title: Arc<RwLock<Option<String>>>,
+    /// A generated title waiting to be persisted — a **one-shot mailbox**, not
+    /// a mirror of the session's current title.
+    ///
+    /// Written only by the spawned title-generation task in
+    /// `AgentLoop::run_inner`; drained (taken, never read-and-kept) by
+    /// `flush_pending_title` at the next iteration checkpoint, which hands the
+    /// value to `ConversationSession::set_generated_title`.
+    ///
+    /// It is deliberately **not** a live mirror of the conversation's title.
+    /// It used to be one, and that is what made a human rename impossible to
+    /// keep: a rename lands through `PUT …/config` →
+    /// `ConversationSession::apply_config`, which never touched this cell, so
+    /// after a successful rename the next checkpoint re-persisted the stale
+    /// auto title from here and pushed it back to the frontend. A mailbox has
+    /// exactly one producer and one consumer, so it cannot outlive its value
+    /// and cannot become a second, contradicting source of truth. Authority
+    /// over "what the title is" is the conversation's (and, on disk,
+    /// `SessionMeta::title` + `title_source`).
+    pub(crate) pending_title: Arc<RwLock<Option<String>>>,
 
     /// Claim flag for the async title-generation task.
     ///
-    /// `title` alone cannot gate spawning: it is only written when the LLM
+    /// The mailbox alone cannot gate spawning: it is only filled when the LLM
     /// call returns. A Stop followed by a new user message races that window
     /// — the next `run_inner` still sees `title == None` and spawns a second
     /// task whose result (derived from the *follow-up* message) can overwrite
@@ -279,7 +294,7 @@ impl SessionCore {
             retry_wait_handle: Some(RetryWaitHandle::new()),
             current_work_dir,
             approval_handle: None,
-            title: Arc::new(RwLock::new(None)),
+            pending_title: Arc::new(RwLock::new(None)),
             title_task_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }
