@@ -18,8 +18,8 @@ the doc library are the record. The full contract is the `project-participation`
 | What your teammates already know | read it back with `pm_get_task` / `doc_read` | assume they share your context |
 
 **Loop.** `pm_list_tasks(assignee="me")` → `pm_get_task` (`review_status`, `is_blocked`) →
-`pm_claim_task` → `pm_get_project().doc_path` → `doc_search` + `doc_list` before you write →
-do the work → `pm_submit_task`, attaching a document only when the deliverable *is* one (see
+`pm_claim_task` → do the work → `pm_submit_task`, attaching a document only when the deliverable *is* one — and then
+`pm_get_project().doc_path` first, with `doc_search`/`doc_list` so you extend the tree (see
 **Document output** below). A failed claim is information, not a hiccup: report it and stop.
 
 **Your area.** `{doc_path}/技术方案/` and `{doc_path}/评审/` — the PM builds that tree, so a missing
