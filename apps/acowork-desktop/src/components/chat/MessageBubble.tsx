@@ -30,12 +30,14 @@ import { BubbleMetaActions } from "./BubbleMetaActions";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import {
+  peerSpeakerId,
   speakerBubbleClass,
   speakerRendersMarkdown,
   type SpeakerKind,
 } from "./speakerBubble";
 import { isPmDispatchTurn } from "./pmDispatch";
 import { SpeakerBadge } from "./speakerNames";
+import { PeerAgentBubble } from "./PeerAgentBubble";
 
 // ── Utilities ─────────────────────────────────────────────────────────
 
@@ -333,6 +335,19 @@ const MessageBubble = React.memo(function MessageBubble({
   }, []);
 
   if (message.type === "user") {
+    // A PEER agent's turn (an `intent` / `intent_response` row, design 27
+    // §5.4.5) — the request in the responder's session and the answer routed
+    // back into the initiator's. The row's role is `user` because that is how
+    // every inbound turn is written, so the branch below would paint it on the
+    // initiator's side under the initiator's name: a peer agent's answer read
+    // as the human's own message. Attribution is a display fact, so it is
+    // settled here, without touching the stored row: the sender's bubble, on
+    // the LEFT, the side every agent gets on this surface.
+    const peer = peerSpeakerId(
+      message,
+      speakerKind === "agent" ? senderAgentId : null,
+    );
+    if (peer) return <PeerAgentBubble message={message} agentId={peer} />;
     return (
       <>
         <div className="flex items-start justify-end gap-2" onContextMenu={onContextMenu}>

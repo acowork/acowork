@@ -35,6 +35,7 @@
  */
 
 import type { InitiatorKind } from "../../lib/sessionInitiator";
+import type { ChatMessage } from "../../lib/types";
 
 /** Who is speaking on the initiator side of a session. `unknown` is the
  *  conservative value: the id resolved to neither the agent registry nor the
@@ -55,4 +56,46 @@ export function speakerBubbleClass(kind: SpeakerKind): string {
  *  speech is: a person's words are shown exactly as typed. */
 export function speakerRendersMarkdown(kind: SpeakerKind): boolean {
   return kind === "agent";
+}
+
+/** The machine envelope `intent_turn::render_intent_message` writes as an
+ *  agent-origin turn's row body: `[intent:from:action] …` for a request,
+ *  `[intent_response:from:action] …` for the answer. The `from` is the only
+ *  place the SENDER survives on the row — the display projection beside it
+ *  (`metadata.intent`) carries the words, not who sent them. */
+const INTENT_SENDER_PREFIX = /^\s*\[intent(?:_response)?:([^:\]\s]+):/;
+
+/**
+ * The agent that actually SPOKE this turn, when that is not the session's
+ * initiator — else `null`.
+ *
+ * Every inbound turn of an execution session is written as a `user` row, and
+ * the surface draws that row on the initiator's side with the initiator's name
+ * — correct for the initiator's own words, wrong for the two peer turns an
+ * agent-to-agent exchange puts there: the request (in the responder's session)
+ * and the answer (in the initiator's session, routing itself back as
+ * `kind=response`). In a human-run session that painted a peer agent's whole
+ * answer as the human's own message.
+ *
+ * The rule needs two facts, both already on the row, and it must not guess:
+ *
+ *   1. a display projection exists — only an agent origin has one (design 27
+ *      §5.4.5), so a row without it is the initiator speaking and stays put.
+ *      It is also what gives the bubble something readable to paint; a legacy
+ *      row that predates the projection keeps the old rendering.
+ *   2. the envelope's `from` names somebody other than the initiator. When the
+ *      initiator is a person the bubble renderer passes `null` and every agent
+ *      origin is somebody else — which is the whole point.
+ *
+ * Pure, so the rule is checkable without React; `PeerAgentBubble` is the one
+ * surface that consumes it (`MessageBubble`'s user branch).
+ */
+export function peerSpeakerId(
+  message: Pick<ChatMessage, "content" | "display">,
+  initiatorAgentId: string | null | undefined,
+): string | null {
+  if (!message.display) return null;
+  const from = INTENT_SENDER_PREFIX.exec(message.content)?.[1];
+  if (!from) return null;
+  return from === initiatorAgentId ? null : from;
 }

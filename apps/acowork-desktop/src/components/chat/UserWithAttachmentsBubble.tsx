@@ -177,6 +177,12 @@ export const UserWithAttachmentsBubble = memo(function UserWithAttachmentsBubble
   // in the owner's name, whoever wrote the words.
   const speaker: SpeakerKind = isPmDispatchTurn(userMessage) ? "agent" : speakerKind;
   const asAgentSpeech = speakerRendersMarkdown(speaker);
+  // ponytail: a PEER agent's turn that carries attachments still renders on the
+  // initiator's side under the initiator's name — `MessageBubble` hands those
+  // rows to `PeerAgentBubble`, this one does not (no live writer sends a peer
+  // answer with attachments; only an `intent_send` that stuffed `attached_items`
+  // into its params). Upgrade path: give `PeerAgentBubble` the chips row and
+  // early-return it from here too.
   // Narrowed once, so the avatar branch below has a non-null instance id.
   const senderAgent = speakerKind === "agent" ? senderAgentId : null;
   // Plan D3: this row's voice. `SpeakerBadge` decides whether there is

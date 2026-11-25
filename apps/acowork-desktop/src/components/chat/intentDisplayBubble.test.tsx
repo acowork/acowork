@@ -15,7 +15,10 @@
  *   2. the envelope stays reachable, folded, because it is the only text holding
  *      the reply coordinates;
  *   3. the skin follows the words, not the role: an Agent's markdown in the accent
- *      bubble is the "user text turned black" defect (`speakerBubble.ts`);
+ *      bubble is the "user text turned black" defect (`speakerBubble.ts`) — and
+ *      so does the SIDE: the row is the sending peer's speech, so it is drawn as
+ *      that agent's bubble on the left (`speakerBubble.peerSpeakerId` →
+ *      `PeerAgentBubble`);
  *   4. a row with no display (a human turn, or one written before the projection
  *      existed) keeps today's literal rendering, unchanged.
  */
@@ -103,10 +106,12 @@ describe("an agent-origin intent turn in the execution transcript", () => {
 
     expect(container.querySelector(".bg-chat-bubble")).not.toBeNull();
     expect(container.querySelector(".bg-chat-user")).toBeNull();
-    // Still on the initiator's side: only the skin follows the writer.
+    // And on the SENDER's side: the row is the peer's speech, so it is drawn as
+    // that agent's bubble on the left (`PeerAgentBubble`), not squeezed onto the
+    // initiator's side where it read as the initiator's own message.
     expect(
       container.querySelector<HTMLElement>(".bg-chat-bubble")!.className,
-    ).toContain("rounded-br-sm");
+    ).toContain("rounded-bl-sm");
   });
 
   it("says so when the producer cut the body", () => {
