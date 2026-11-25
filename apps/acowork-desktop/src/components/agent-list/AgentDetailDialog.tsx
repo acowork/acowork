@@ -66,7 +66,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
       <div className="relative z-10 w-full max-w-md rounded-md border border-border-outer bg-modal-surface shadow-xl">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
-          <h3 className="text-sm font-semibold">Agent Details</h3>
+          <h3 className="text-sm font-semibold">Bot Details</h3>
           <button
             ref={closeRef}
             onClick={onClose}
@@ -87,7 +87,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
 
           {error && (
             <div className="text-sm">
-              <ErrorBox message={`Failed to load agent details: ${error}`} onClose={() => setError(null)} />
+              <ErrorBox message={`Failed to load bot details: ${error}`} onClose={() => setError(null)} />
             </div>
           )}
 

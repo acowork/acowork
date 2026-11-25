@@ -1889,8 +1889,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
         <div className="flex flex-1 items-center justify-center">
           <div className="text-center">
             <Bot className="mx-auto h-12 w-12 text-text-secondary " />
-            <p className="mt-3 text-sm text-text-tertiary ">No agents available</p>
-            <p className="mt-1 text-xs text-text-tertiary ">Connect to Gateway and install the System Agent</p>
+            <p className="mt-3 text-sm text-text-tertiary ">No bots available</p>
           </div>
         </div>
       </div>
@@ -1904,8 +1903,8 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
         <div className="flex flex-1 items-center justify-center">
           <div className="text-center">
             <Bot className="mx-auto h-12 w-12 text-text-secondary " />
-            <p className="mt-3 text-sm text-text-tertiary ">Select an agent to start chatting</p>
-            <p className="mt-1 text-xs text-text-tertiary ">or install a new agent from the sidebar</p>
+            <p className="mt-3 text-sm text-text-tertiary ">Select a bot to start chatting</p>
+            <p className="mt-1 text-xs text-text-tertiary ">or install a new bot from the sidebar</p>
           </div>
         </div>
       </div>
