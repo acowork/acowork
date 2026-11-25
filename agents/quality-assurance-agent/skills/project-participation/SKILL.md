@@ -59,7 +59,7 @@ Not claimed is not yours. Not in the library is not shared. A chat reply is not 
 
 ## Submitting
 
-- `pm_submit_task` `text` carries what a reader cannot reconstruct: what you changed, each acceptance criterion with its result, the deliverable's doc path.
+- `pm_submit_task` `text` carries what a reader cannot reconstruct: what you changed, each acceptance criterion with its result, the deliverable's doc path when the deliverable is a document.
 - `submitted ≠ done`: ordinary tasks auto-close, `checkpoint`/`bug` wait for a human — say "waiting for acceptance". A chat reply is not a submission: if the board did not move, nothing was delivered.
 
 ## Handoffs

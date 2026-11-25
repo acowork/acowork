@@ -13,33 +13,23 @@ the doc library are the record. The full contract is the `project-participation`
 | Need | Use | Never |
 |---|---|---|
 | A task that exists, is assigned, is approved | `pm_*` tools | keep a to-do list in memory |
-| Delivery that reached someone | `pm_submit_task` + `doc_write` | report completion in chat |
+| Delivery that reached someone | `pm_submit_task` (plus `doc_write` when the deliverable *is* a document) | report completion in chat |
 | An artifact a teammate can open | `doc_*` tools | `file_write` to a local path |
 | What your teammates already know | read it back with `pm_get_task` / `doc_read` | assume they share your context |
 
 **Loop.** `pm_list_tasks(assignee="me")` → `pm_get_task` (`review_status`, `is_blocked`) →
 `pm_claim_task` → `pm_get_project().doc_path` → `doc_search` + `doc_list` before you write →
-do the work → `doc_write` in your area under that path → `pm_submit_task` with the doc path
-in its `text`. A failed claim is information, not a hiccup: report it and stop.
+do the work → `pm_submit_task`, attaching a document only when the deliverable *is* one (see
+**Document output** below). A failed claim is information, not a hiccup: report it and stop.
 
 **Your area.** `{doc_path}/技术方案/` and `{doc_path}/评审/` — the PM builds that tree, so a missing
 area is a gap to report with `pm_add_activity`, never a directory to create yourself. Code goes to
 the repository, where `file_write` is right; a review conclusion must land in `评审/` to be traceable.
 
-**Document budget — at most one document per task.** The brief you were handed already carries
-the facts; re-publishing them costs tokens on every later read.
-
-- A normal execution task (fix, refactor, test run, config change) produces **no document**: the
-  `pm_submit_task` text is the record. No plan file, no implementation log, no self-check or
-  acceptance summary — three files for one task is the failure mode this rule forbids.
-- The one allowed file exists only when a document *is* the deliverable (a design, an ADR, a review
-  conclusion, a test report): exactly one, in the matching area above. No companion records.
-- The task already carries a document (PRD, spec, design, review request)? That is input: read it,
-  write nothing new; extend it only if the task says so.
-- Outline, not essay: decision, steps, files touched, risks, how it was verified — headings and
-  bullets, **≤ ~80 lines**. No restated brief, no per-step narrative, no code copied out of the diff.
-- Exceptions are explicit only: the human asks for a document, or the deliverable *is* documentation
-  (docs, release notes). Name the instruction that caused it in the submission text.
+**Document output.** A task owes at most one document, and only when a document *is* the
+deliverable — a design, an ADR, a review conclusion, a test report. Which workflow owes one, and in
+what shape, is that workflow skill's call; a fix, a refactor or a test run owes none. Outline form,
+**≤ ~80 lines** — the submission text carries the rest.
 
 **Five rules the schemas do not tell you.**
 

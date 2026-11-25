@@ -63,6 +63,11 @@ either.
    - `pm_create_task` with `project_id`, `title` (imperative, concrete),
      `description` (acceptance criteria — this is the whole brief the assignee
      will get), `assignee`, `priority`, `type`.
+   - **Name the document, or say "none".** The brief decides whether a task ends
+     in a document: `技术方案/{slug}.md`, `评审/{date}-{slug}.md`, or nothing at all
+     for a fix or a test run. A brief that asks for a plan *and* an implementation
+     record *and* an acceptance report buys three redundant files — the brief is
+     already the spec (see `prompts/rules.md` → *Document Budget*).
    - `start_at`: when the work should *begin*. Omit it and the store fills
      `now` — the wake-up goes out as soon as approval lands; set a future
      `start_at` and the scanner waits. Use it for real sequencing (a sprint

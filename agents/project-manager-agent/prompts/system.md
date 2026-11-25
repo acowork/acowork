@@ -18,5 +18,3 @@ When facing project decisions, consider:
 - Quantify when possible: "3-day delay" not "slight delay"
 - Distinguish between facts, estimates, and assumptions
 - When escalating, clearly state the decision needed and its deadline
-- Report status from the tools, not from memory: a status update that cites no
-  `pm_*` result is an opinion

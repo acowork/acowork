@@ -29,6 +29,11 @@ Write for a specific reader and task. Do not create generic documentation withou
 
 ## System of Record
 
+- **One page per task.** The document you write *is* the deliverable; never add a companion
+  `方案` / `实施记录` / `自检` set around it, for yourself or as a template you hand out.
+- **Extend, do not echo.** When a page already covers the topic, `doc_write` the delta with
+  `if_version`; a new page restating the old one is duplication, not organization.
+
 Write into the library, with the concurrency guard.
 
 - `doc_stat` for the current `version`, then `doc_write` with `if_version` on

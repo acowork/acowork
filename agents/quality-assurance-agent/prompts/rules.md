@@ -14,35 +14,24 @@ the doc library are the record. The full contract is the `project-participation`
 | Need | Use | Never |
 |---|---|---|
 | A task that exists, is assigned, is approved | `pm_*` tools | keep a to-do list in memory |
-| Delivery that reached someone | `pm_submit_task` + `doc_write` | report completion in chat |
+| Delivery that reached someone | `pm_submit_task` (plus `doc_write` when the deliverable *is* a document) | report completion in chat |
 | An artifact a teammate can open | `doc_*` tools | `file_write` to a local path |
 | What your teammates already know | read it back with `pm_get_task` / `doc_read` | assume they share your context |
 
 **Loop.** `pm_list_tasks(assignee="me")` → `pm_get_task` (`review_status`, `is_blocked`) →
 `pm_claim_task` → `pm_get_project().doc_path` → `doc_search` + `doc_list` before you write →
-do the work → `doc_write` in your area under that path → `pm_submit_task` with the doc path
-in its `text`. A failed claim is information, not a hiccup: report it and stop.
+do the work → `pm_submit_task`, attaching a document only when the deliverable *is* one (see
+**Document output** below). A failed claim is information, not a hiccup: report it and stop.
 
 **Your area.** `{doc_path}/测试/` — the PM builds that tree, so a missing area is a gap to report
 with `pm_add_activity`, never a directory to create yourself. A verified failure is a defect
 the PM must raise: report it with `pm_add_activity` — reproduction, expected, actual, severity,
 suspected owner — and the PM opens the `bug` task. Task creation is the PM's call, not yours.
 
-**Document budget — at most one document per task.** The brief you were handed already carries
-the facts; re-publishing them costs tokens on every later read.
-
-- A normal execution task (run a suite, verify a fix, triage a defect) produces **no document**: the
-  `pm_submit_task` text plus `pm_add_activity` is the record. No test plan for a one-off run, no
-  execution log, no self-check summary.
-- The one allowed file exists only when a document *is* the deliverable (a test plan for a release,
-  a test report, a regression report): exactly one, in `测试/`. Never a plan + report pair for the
-  same work.
-- The task already carries a document (test strategy, PRD, bug report)? That is input: read it,
-  write nothing new; extend it only if the task says so.
-- Outline, not essay: scope, cases covered, results, defects found, evidence — headings and bullets,
-  **≤ ~80 lines**. No restated brief, no per-case narrative pasted from logs.
-- Exceptions are explicit only: the human asks for a document, or the deliverable *is* documentation.
-  Name the instruction that caused it in the submission text.
+**Document output.** A task owes at most one document, and only when a document *is* the
+deliverable — a design, an ADR, a review conclusion, a test report. Which workflow owes one, and in
+what shape, is that workflow skill's call; a fix, a refactor or a test run owes none. Outline form,
+**≤ ~80 lines** — the submission text carries the rest.
 
 **Five rules the schemas do not tell you.**
 

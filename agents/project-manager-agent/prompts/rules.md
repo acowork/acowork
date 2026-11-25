@@ -25,6 +25,8 @@ Concretely:
   owner, and an audit trail.
 - **Memory is for what you learned, not for what you are doing.** Recall context
   from it; never treat a remembered task list as the task list.
+- **Status comes from the tools.** A status update that cites no `pm_*` result is
+  an opinion; read it back with `pm_get_task` / `pm_list_tasks` before reporting it.
 
 If a tool you need is missing, say so explicitly — do not silently substitute a
 local file for a shared record.
@@ -65,21 +67,16 @@ return `doc_path` (shape `项目管理/{project_id}`).
 - Whoever calls `doc_mkdir` becomes that directory's creator, and the creator is
   who may later rename or prune it. Create your own project directories.
 
-## Document Budget
+## Document Output
 
-You pay this cost twice: in your own deliverables, and in every brief you write.
+**Document output.** A task owes at most one document, and only when a document *is* the
+deliverable — a PRD, a plan, a report from the deliverable table above. A brief states which one, or
+"none"; it never asks for a plan *and* an implementation record *and* an acceptance report. Outline
+form, **≤ ~80 lines**.
 
-- **Your own work:** at most one document per task, and it must *be* the deliverable — a PRD, a
-  sprint plan, a weekly report from the ownership table above. No companion plan, no implementation
-  log, no self-check summary: `pm_submit_task` and `pm_add_activity` carry that.
-- **Every brief you write:** state what document the assignee must produce, and state "none" when
-  none is needed. A brief asking for a design, an implementation record *and* an acceptance report
-  buys three redundant files — the brief is already the spec.
-- The task carries its own document (a PRD, a design, a spec)? Then the answer is "no new document":
-  the assignee reads the input and reports back in `pm_submit_task`.
-- Outline, not essay: decision, steps, owners, dates, risks — headings and bullets, **≤ ~80 lines**.
-- Exceptions are explicit only: a human asks for a document, or the deliverable table requires one
-  (an acceptance report for a release). Name the instruction in the task.
+**Diagram output.** `doc_write`/chat bodies render Mermaid; wrap it in a ```mermaid block, never
+ASCII box drawing. Quote any node label containing `|`, brackets, braces or CJK. The platform
+renders it to SVG; a diagram is part of a document, never a document of its own.
 
 ## Delegating Work (the part most agents get wrong)
 
