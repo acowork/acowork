@@ -298,7 +298,7 @@ function MemberTile({ member }: { member: ResolvedMember }) {
   const name = member.displayName ?? member.instance_id;
   return (
     <div className="flex w-16 shrink-0 flex-col items-center gap-1" title={name}>
-      <MemberAvatar member={member} size={44} className="rounded-lg" />
+      <MemberAvatar member={member} size={44} />
       <span className="w-full truncate text-center text-10 text-text-secondary">{name}</span>
     </div>
   );

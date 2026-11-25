@@ -101,7 +101,7 @@ async function pickBuiltinIcon() {
   // The avatar preview button is the one that wraps the 64px avatar (it is
   // the only `rounded-lg ring-1` button that is not a picker tile).
   const preview = await waitFor(() => {
-    const el = container.querySelector<HTMLButtonElement>("button.rounded-lg.ring-1");
+    const el = container.querySelector<HTMLButtonElement>("button.rounded-full.ring-1");
     if (!el) throw new Error("avatar preview button not mounted yet");
     return el;
   });

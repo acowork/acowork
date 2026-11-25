@@ -276,7 +276,7 @@ describe("ChatNoticeEventRow", () => {
     );
     expect(screen.getByText("SSE")).toBeTruthy();
     // An avatar, in the header, before the card.
-    const avatar = container.querySelector("img, span.rounded-lg, div[style*='40px']");
+    const avatar = container.querySelector("img, span.rounded-full, div[style*='40px']");
     expect(avatar).toBeTruthy();
     expect(screen.getByTestId("chat-card-author")).toBeTruthy();
     const card = screen.getByTestId("chat-card-options");

@@ -3,8 +3,10 @@
  * chat row in the sidebar.
  *
  * A group has no single face, so the row shows its members tiled into a
- * 40×40 square (the same footprint as the agent / user 40px avatar above and
- * below it, which is what makes the three lists read as one). The tile layout
+ * 40×40 square — the same footprint as the 40px agent / user avatar above and
+ * below it (which is what makes the three lists read as one), but deliberately
+ * **square**: those single avatars are circles, and a composite stays a
+ * rounded square the way a group icon does in every messenger. The tile layout
  * follows WeChat's group-icon rules:
  *
  * - ≤ 4 members  → 2×2 four-grid
@@ -69,8 +71,9 @@ export function GroupAvatarStack({
   return (
     <div
       className={cn(
-        // Footprint + rounding mirror the 40px agent / user avatar so the
-        // composite lines up with the rows above and below it.
+        // Footprint mirrors the 40px agent / user avatar so the composite
+        // lines up with the rows above and below it; the radius stays square
+        // on purpose (a group is not a face — the single avatars are circles).
         "flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg",
         "bg-surface ring-1 ring-border-strong/60",
         className,
@@ -99,9 +102,10 @@ export function GroupAvatarStack({
               key={i}
               member={member}
               size={tile}
-              // Square the tiny tiles (the default `rounded-lg` is far too
-              // round at 11–16px) and drop their per-tile ring — the gap and
-              // the container background already separate them.
+              // Square the tiny tiles (they are shards of one square group
+              // icon; a circle at 11–16px would also read as a dot) and drop
+              // their per-tile ring — the gap and the container background
+              // already separate them.
               className="!rounded-[2px] !ring-0"
             />
           );

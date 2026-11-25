@@ -17,7 +17,7 @@ function BuiltinIconAvatar({ iconId, size, className }: { iconId: string; size: 
       src={src}
       alt={iconId}
       draggable={false}
-      className={`rounded-lg object-cover ring-1 ring-border-strong/60 ${className ?? ""}`}
+      className={`rounded-full object-cover ring-1 ring-border-strong/60 ${className ?? ""}`}
       style={{ width: size, height: size }}
     />
   );
@@ -42,7 +42,7 @@ function CustomFileAvatar({
     <AuthedImage
       src={resolveUserAvatarFileUrl(path)}
       alt="User avatar"
-      className={`rounded-lg object-cover ring-1 ring-border-strong/60 ${className ?? ""}`}
+      className={`rounded-full object-cover ring-1 ring-border-strong/60 ${className ?? ""}`}
       style={{ width: size, height: size }}
       fallback={<BuiltinIconAvatar iconId={fallbackIconId} size={size} className={className} />}
     />

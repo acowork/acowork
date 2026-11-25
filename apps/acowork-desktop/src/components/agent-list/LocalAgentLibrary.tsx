@@ -299,7 +299,7 @@ function LocalAvatar({
     return (
       <div
         aria-label={name}
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-surface-hover text-sm font-semibold text-text-secondary"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-hover text-sm font-semibold text-text-secondary"
       >
         {initial}
       </div>

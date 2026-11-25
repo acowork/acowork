@@ -312,7 +312,7 @@ export function ProfileTab() {
                 if (!avatarPopupOpen) computeAvatarPopupPos();
                 setAvatarPopupOpen((v) => !v);
               }}
-              className="relative block rounded-lg ring-1 ring-border-strong/60 transition hover:ring-border-strong"
+              className="relative block rounded-full ring-1 ring-border-strong/60 transition hover:ring-border-strong"
             >
               <UserAvatar
                 size={64}
@@ -378,7 +378,7 @@ export function ProfileTab() {
                       <button
                         onClick={handleUploadClick}
                         disabled={avatarBusy}
-                        className="flex aspect-square items-center justify-center rounded-md border border-dashed border-border-strong text-text-tertiary transition-colors hover:border-border-strong hover:text-text-tertiary disabled:opacity-50 "
+                        className="flex aspect-square items-center justify-center rounded-full border border-dashed border-border-strong text-text-tertiary transition-colors hover:border-border-strong hover:text-text-tertiary disabled:opacity-50 "
                       >
                         <span className="text-lg">+</span>
                       </button>
@@ -387,7 +387,7 @@ export function ProfileTab() {
                         return (
                           <div
                             key={asset.relative_path}
-                            className={`group relative aspect-square overflow-hidden rounded-md border-2 transition-colors ${isSelected
+                            className={`group relative aspect-square overflow-hidden rounded-full border-2 transition-colors ${isSelected
                               ? "border-text"
                               : "border-transparent hover:border-border-strong"
                               }`}
@@ -433,7 +433,7 @@ export function ProfileTab() {
                               src={BUILTIN_ICONS[iconId] ?? ""}
                               alt={iconId}
                               draggable={false}
-                              className="h-12 w-12 rounded-lg object-cover"
+                              className="h-12 w-12 rounded-full object-cover"
                             />
                           </button>
                         );

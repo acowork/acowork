@@ -1165,7 +1165,7 @@ function HubAvatar({ src, initial, name }: { src: string | null; initial: string
     return (
       <div
         aria-label={name}
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-surface-hover text-sm font-semibold text-text-secondary"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-hover text-sm font-semibold text-text-secondary"
       >
         {initial}
       </div>
@@ -1177,7 +1177,7 @@ function HubAvatar({ src, initial, name }: { src: string | null; initial: string
       alt={name}
       loading="lazy"
       onError={() => setFailed(true)}
-      className="h-9 w-9 shrink-0 rounded-md object-cover"
+      className="h-9 w-9 shrink-0 rounded-full object-cover"
     />
   );
 }
