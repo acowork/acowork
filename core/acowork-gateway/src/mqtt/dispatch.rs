@@ -2068,11 +2068,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_status_payload_removes_node_records() {
-        // ADR-055 §6.13.3: an empty retained status is a removal
-        // signal — the subsystem is deregistered (the phase recomputes
-        // without the dead required subsystem) and the NodeRegistry
-        // record is dropped.
+    async fn empty_status_payload_is_presence_only_and_keeps_node_records() {
+        // A cleared retained status says "this node is not talking right
+        // now", NOT "uninstall it" (`a158c410`: a phone that could not reach
+        // the broker used to wipe the PC fleet's inventory). Nothing is
+        // deregistered and no record is dropped; the node re-announces
+        // NodeReady on its next connect.
         let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
         let mut ctx = ctx_with_registry(registry.clone());
         let node_reg = crate::mqtt::node_registry::new_shared_registry();
@@ -2090,10 +2091,13 @@ mod tests {
 
         assert_eq!(
             registry.state(&SubsystemId("node.nytb".to_string())),
-            None,
-            "empty status must deregister the node subsystem"
+            Some(crate::bootstrap::SubsystemState::Ready),
+            "a cleared status is presence only — the node subsystem stays registered"
         );
-        assert!(node_reg.read().await.get("nytb").is_none());
+        assert!(
+            node_reg.read().await.get("nytb").is_some(),
+            "a cleared status must not drop the node record"
+        );
     }
 
     #[tokio::test]
@@ -2115,18 +2119,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn node_re_announcement_after_removal_rebuilds_subsystem() {
-        // Self-heal guarantee: a node that reconnects after its records
-        // were removed re-announces NodeReady and is registered again
-        // through the normal path.
+    async fn node_re_announcement_after_a_cleared_status_keeps_the_subsystem_ready() {
+        // The clear → re-announce cycle a reconnecting node actually produces
+        // must leave it registered and ready. Since the clear is
+        // presence-only (see above) the recovery path has nothing to undo
+        // first — this pins that the reconnect still works end to end.
         let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
         let ctx = ctx_with_registry(registry.clone());
-        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Optional);
-        handle.mark_ready(None);
 
         handle_plaintext_message("acowork/nodes/nytb/status", &[], &ctx);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(registry.state(&SubsystemId("node.nytb".to_string())), None);
+        assert_eq!(
+            registry.state(&SubsystemId("node.nytb".to_string())),
+            None,
+            "a cleared status must not register a node that never announced itself"
+        );
 
         handle_plaintext_message(
             "acowork/nodes/nytb/ready",

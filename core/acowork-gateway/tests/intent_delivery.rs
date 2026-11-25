@@ -27,7 +27,7 @@ use acowork_gateway::intent::mailbox::{IntentMailbox, MailboxEntry};
 use acowork_gateway::mqtt::agent_registry::{new_shared_registry, AgentOnlineState};
 use acowork_gateway::mqtt::client::{GatewayMqttClient, MqttQoS};
 use acowork_gateway::mqtt::node_control::NodeControlClient;
-use acowork_gateway::mqtt::start_broker;
+use acowork_gateway::mqtt::{start_broker, MqttBrokerHandle};
 
 const SENDER: &str = "11111111-1111-4111-8111-111111111111";
 const TARGET: &str = "22222222-2222-4222-8222-222222222222";
@@ -120,10 +120,22 @@ async fn subscribe(
     for t in topics {
         client.subscribe(*t, QoS::AtLeastOnce).await.unwrap();
     }
+    let expected = topics.len();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (suback_tx, suback_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
+        let mut acked = 0usize;
+        let mut suback_tx = Some(suback_tx);
         loop {
             match eventloop.poll().await {
+                Ok(Event::Incoming(Incoming::SubAck(_))) => {
+                    acked += 1;
+                    if acked >= expected
+                        && let Some(tx) = suback_tx.take()
+                    {
+                        let _ = tx.send(());
+                    }
+                }
                 Ok(Event::Incoming(Incoming::Publish(p))) => {
                     let _ = tx.send((p.topic.clone(), p.payload.to_vec()));
                 }
@@ -132,22 +144,35 @@ async fn subscribe(
             }
         }
     });
+    // A subscription is real only once the broker acknowledged it: a publish
+    // that arrives before the SUBACK is a lost message. rumqttc queues both
+    // the SUBSCRIBE and a publish while disconnected, so "the call returned"
+    // proves nothing — the old readiness check published a ping and passed on
+    // the queue, which is why the first `GatewayMqttClient::connect` used to
+    // race the broker's own bind against a 2 s budget.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), suback_rx)
+            .await
+            .is_ok(),
+        "broker never acknowledged {expected} subscription(s) for {client_id}"
+    );
     (client, rx)
 }
 
-/// Wait until the broker TCP port actually accepts publishes.
-async fn wait_publish_ready(client: &AsyncClient) {
-    for _ in 0..200 {
-        if client
-            .publish("acowork/test/ready", QoS::AtLeastOnce, false, "ping")
-            .await
-            .is_ok()
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("broker never accepted a publish");
+/// Start an embedded broker and wait until the broker's own listen probe
+/// reports `Listening`.
+///
+/// `start_broker` returns before the listener binds — it supervises on its own
+/// thread — and rumqttd exposes no bind result, so readiness has to come from
+/// the handle's measured state instead of a client-side guess.
+async fn broker(port: u16) -> MqttBrokerHandle {
+    let handle = start_broker("127.0.0.1", port).expect("broker");
+    assert!(
+        handle.wait_listening(Duration::from_secs(10)).await,
+        "embedded broker on {port} never reported Listening (state: {:?})",
+        handle.state()
+    );
+    handle
 }
 
 /// A publish-only client whose eventloop is kept polling in the
@@ -165,7 +190,6 @@ async fn publisher(port: u16, client_id: &str) -> AsyncClient {
             }
         }
     });
-    wait_publish_ready(&client).await;
     client
 }
 
@@ -194,16 +218,15 @@ fn status_bytes(instance: &str, node: &str) -> Vec<u8> {
 #[tokio::test]
 async fn wake_then_deliver_end_to_end() {
     let port = 29911;
-    start_broker("127.0.0.1", port).expect("broker");
+    let _broker = broker(port).await;
 
     // Target-side subscriber: sees the delivered Intent.
-    let (probe, mut trx) = subscribe(
+    let (_probe, mut trx) = subscribe(
         port,
         "t1-target",
         &[&format!("acowork/agents/{TARGET}/sessions/control/intent")],
     )
     .await;
-    wait_publish_ready(&probe).await;
 
     // Fake node: answers every control command with `ok` and flips the
     // retained AgentStatus online — the contract acowork-node implements
@@ -372,14 +395,13 @@ type = "IntentReceive"
 #[tokio::test]
 async fn spawn_ok_without_status_flip_refuses_delivery() {
     let port = 29912;
-    start_broker("127.0.0.1", port).expect("broker");
-    let (probe, mut trx) = subscribe(
+    let _broker = broker(port).await;
+    let (_probe, mut trx) = subscribe(
         port,
         "t2-target",
         &[&format!("acowork/agents/{TARGET}/sessions/control/intent")],
     )
     .await;
-    wait_publish_ready(&probe).await;
 
     let (_nc, mut nrx) = subscribe(
         port,
@@ -575,14 +597,13 @@ fn sender_attribution_matrix() {
 #[tokio::test]
 async fn cron_trigger_uses_the_same_delivery_entry() {
     let port = 29913;
-    start_broker("127.0.0.1", port).expect("broker");
-    let (probe, mut trx) = subscribe(
+    let _broker = broker(port).await;
+    let (_probe, mut trx) = subscribe(
         port,
         "t3-target",
         &[&format!("acowork/agents/{TARGET}/sessions/control/intent")],
     )
     .await;
-    wait_publish_ready(&probe).await;
 
     let mqtt = GatewayMqttClient::new_publisher("127.0.0.1", port)
         .await
