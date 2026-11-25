@@ -21,6 +21,7 @@ const h = vi.hoisted(() => ({
   fetchGalleryIndex: vi.fn(),
   startAppInstallFromUrl: vi.fn(),
   listInstallJobs: vi.fn(),
+  uninstallApp: vi.fn(),
 }));
 
 vi.mock("../lib/apps-api", async (importActual) => ({
@@ -28,6 +29,7 @@ vi.mock("../lib/apps-api", async (importActual) => ({
   listApps: h.listApps,
   startAppInstallFromUrl: h.startAppInstallFromUrl,
   listInstallJobs: h.listInstallJobs,
+  uninstallApp: h.uninstallApp,
 }));
 vi.mock("../lib/appGallery", async (importActual) => ({
   ...(await importActual<Record<string, unknown>>()),
@@ -232,6 +234,27 @@ describe("ExtensionsView install jobs", () => {
 
     const line = await screen.findByText(/应用包格式无效/);
     expect(line.textContent).toContain("connection reset");
+  });
+
+  it("uninstalling keeps the card selected and flips it to Install", async () => {
+    // The card did not disappear from the catalog, only its installed copy
+    // did: clearing the selection left the detail pane blank.
+    h.listApps.mockResolvedValueOnce([FIGCRAFT]).mockResolvedValue([]);
+    h.fetchGalleryIndex.mockResolvedValue(installableIndex() as never);
+    render(<ExtensionsView />);
+
+    fireEvent.click(await screen.findByRole("option", { name: /FigCraft/ }));
+    // The row's Uninstall opens the confirm bar (and is replaced by it), so
+    // the second click is again the only button with that name.
+    fireEvent.click(screen.getByRole("button", { name: "extensions.uninstall" }));
+    fireEvent.click(screen.getByRole("button", { name: "extensions.uninstall" }));
+
+    await waitFor(() => expect(h.uninstallApp).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+        expect(screen.getByRole("button", { name: "extensions.install" })).toBeTruthy(),
+    );
+    expect(screen.getByRole("option", { name: /FigCraft/ }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByText("extensions.selectHint")).toBeNull();
   });
 });
 

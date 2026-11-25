@@ -434,7 +434,10 @@ export function ExtensionsView() {
             await uninstallApp(selected.installed.id, purgeData);
             setConfirmUninstall(false);
             setPurgeData(false);
-            setSelectedId(null);
+            // Stay on the card: after the reload it is a plain catalog entry,
+            // so the pane flips to its Install page instead of going blank
+            // (the card itself may be gone for a local-only upload, and then
+            // the pane falls back to the select-a-card hint on its own).
             await reloadAll();
             bumpHostedAppsEpoch();
         } catch (e) {
