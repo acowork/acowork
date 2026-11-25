@@ -72,7 +72,7 @@ const SRC = readFileSync(resolve(__dirname, "WorkspaceExplorer.tsx"), "utf8");
  *  the component. Ends past the button's own className (which is written
  *  after its onClick), so the action element is inside the window. */
 function resultRowBlock(): string {
-  const start = SRC.indexOf("matchingFiles.map(");
+  const start = SRC.indexOf("matchingRows.map(");
   expect(start, "result row block not found in WorkspaceExplorer.tsx").toBeGreaterThan(-1);
   const end = SRC.indexOf("</Tooltip>", start);
   expect(end, "result row block is not terminated").toBeGreaterThan(start);

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Search, RefreshCw, FolderOpen, FilePlus, FolderPlus, X, MessageSquarePlus, FileText, TextSearch, CaseSensitive, WholeWord } from "lucide-react";
+import { Search, RefreshCw, FolderOpen, FilePlus, FolderPlus, X, MessageSquarePlus, FileSearch, TextSearch, CaseSensitive, WholeWord } from "lucide-react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useFileTreeStore, treeKey, isReadyNode, type TreeEntry, getCachedWorkspaceRoot } from "../../stores/fileTree";
@@ -47,21 +47,33 @@ const AGENT_HOME_WORKSPACE = "__agent_home__";
  *  already carries a placeholder and a mode-dependent tooltip. */
 const SEARCH_MODES: Array<{
     mode: SearchMode;
-    Icon: typeof FileText;
+    Icon: typeof FileSearch;
     labelKey: string;
 }> = [
-    { mode: "files", Icon: FileText, labelKey: "workspace.explorer.searchFilesMode" },
+    { mode: "files", Icon: FileSearch, labelKey: "workspace.explorer.searchFilesMode" },
     { mode: "content", Icon: TextSearch, labelKey: "workspace.explorer.searchContentMode" },
 ];
 
-/** Shared look for the row's small icon toggles (mode radio + content flags):
- *  the selected state is the only thing that differs. */
-function searchToggleClass(active: boolean): string {
+/** The search row's icon buttons — the mode radio pair and the two ripgrep
+ *  flags. All four share ONE box (`h-6 w-6`) and ONE gap, because a row of
+ *  icons in different boxes / different gaps reads as "big icon, small
+ *  icon, big icon" no matter how carefully each glyph is chosen.
+ *
+ *  The selected state differs by the background chip alone. A darker text
+ *  color on top of it made the active glyph read as "bold", which is a
+ *  second, louder signal than the chip already gives — same weight as its
+ *  neighbours, background does the work.
+ *
+ *  `disabled` (the flags in file mode) greys the glyph AND drops the chip:
+ *  a switch that is ON but not applicable must not keep its accent. */
+function searchToggleClass(active: boolean, disabled = false): string {
     return cn(
-        "flex h-5 w-5 items-center justify-center rounded transition-colors",
-        active
-            ? "bg-[var(--color-accent)]/15 text-text"
-            : "text-text-tertiary hover:text-text-secondary",
+        "flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors",
+        disabled
+            ? "text-text-disabled hover:text-text-disabled"
+            : active
+              ? "bg-[var(--color-accent)]/15 text-text-secondary"
+              : "text-text-tertiary hover:text-text-secondary",
     );
 }
 
@@ -1094,7 +1106,7 @@ export function WorkspaceExplorer() {
                 selector row visually dwarfs the search row (~40px vs ~28px). */}
             <div className="relative border-b border-border-divider">
                 <div className="flex items-center gap-1.5 px-3 py-1.5 min-h-[2.5rem]">
-                    <Search className="h-3 w-3 shrink-0 text-text-tertiary" />
+                    <Search className="h-4 w-4 shrink-0 text-text-tertiary" strokeWidth={1.5} />
                     <input
                         ref={searchInputRef}
                         type="text"
@@ -1110,70 +1122,101 @@ export function WorkspaceExplorer() {
                         }
                         className="min-w-0 flex-1 bg-transparent text-xs text-text-secondary outline-none placeholder:text-text-tertiary  dark:placeholder:text-text-tertiary"
                     />
-                    {/* Mode: a radio pair, not two filters — "where is this
-                        file" and "where is this text" are different
-                        questions with different endpoints. `onMouseDown`
-                        preventDefault keeps focus in the box so switching
-                        mode does not blur the row and close the dropdown. */}
-                    <div
-                        role="radiogroup"
-                        aria-label={t("workspace.explorer.searchMode")}
-                        className="flex shrink-0 items-center"
-                    >
-                        {SEARCH_MODES.map(({ mode, Icon, labelKey }) => (
-                            <button
-                                key={mode}
-                                type="button"
-                                role="radio"
-                                aria-checked={searchMode === mode}
-                                aria-label={t(labelKey)}
-                                title={t(labelKey)}
-                                onMouseDown={(e) => e.preventDefault()}
-                                onClick={() => {
-                                    setSearchMode(mode);
-                                    searchInputRef.current?.focus();
-                                }}
-                                className={searchToggleClass(searchMode === mode)}
-                            >
-                                <Icon className="h-3 w-3" />
-                            </button>
-                        ))}
-                    </div>
-                    {/* Content-mode flags — the ripgrep switches
-                        `/workspaces/search` already accepts. Hidden in file
-                        mode: a fuzzy name search has no case/word boundary
-                        to toggle. */}
-                    {searchMode === "content" && (
-                        <div className="flex shrink-0 items-center">
-                            {[
-                                {
-                                    Icon: CaseSensitive,
-                                    labelKey: "workspace.explorer.matchCase",
-                                    on: caseSensitive,
-                                    set: setCaseSensitive,
-                                },
-                                {
-                                    Icon: WholeWord,
-                                    labelKey: "workspace.explorer.matchWholeWord",
-                                    on: wholeWord,
-                                    set: setWholeWord,
-                                },
-                            ].map(({ Icon, labelKey, on, set }) => (
+                    {/* The row's four icon controls — the mode radio pair
+                        and the two ripgrep flags — live in ONE cluster, one
+                        pixel apart.
+
+                        They were two groups before (a radiogroup and a
+                        flag pair), and the seam between them showed up as
+                        an uneven gap: the icons inside each group were
+                        tight, the gap across the seam was the row's own
+                        `gap-1.5`. Four boxes of the same size at the same
+                        distance is the whole fix — the glyphs differ in
+                        ink (a file outline is lighter than three text
+                        lines), but the boxes they sit in do not.
+
+                        `gap-px`, not `gap-1`: at 6px apart four separate
+                        buttons read as four separate buttons. Touching, they
+                        read as ONE control that happens to be split — which
+                        is what they are: a mode and two modifiers on the
+                        same search. The selected chip then reads as a
+                        segment of that control.
+
+                        The mode pair is a radio pair, not two filters —
+                        "where is this file" and "where is this text" are
+                        different questions with different endpoints.
+                        `onMouseDown` preventDefault keeps focus in the box
+                        so switching mode does not blur the row and close
+                        the dropdown. */}
+                    <div className="flex shrink-0 items-center gap-px">
+                        <div
+                            role="radiogroup"
+                            aria-label={t("workspace.explorer.searchMode")}
+                            className="flex items-center gap-px"
+                        >
+                            {SEARCH_MODES.map(({ mode, Icon, labelKey }) => (
                                 <button
-                                    key={labelKey}
+                                    key={mode}
                                     type="button"
-                                    aria-pressed={on}
+                                    role="radio"
+                                    aria-checked={searchMode === mode}
                                     aria-label={t(labelKey)}
                                     title={t(labelKey)}
                                     onMouseDown={(e) => e.preventDefault()}
-                                    onClick={() => set(!on)}
-                                    className={searchToggleClass(on)}
+                                    onClick={() => {
+                                        setSearchMode(mode);
+                                        searchInputRef.current?.focus();
+                                    }}
+                                    className={searchToggleClass(searchMode === mode)}
                                 >
-                                    <Icon className="h-3 w-3" />
+                                    {/* `strokeWidth={1.5}` — one size and one
+                                        weight for every icon in this row.
+                                        Lucide's default 2 on a 16px glyph
+                                        lands at ~1.3px of stroke and reads
+                                        heavier than its neighbours; a
+                                        thinner stroke on a smaller glyph
+                                        made the pair shout instead. 16px
+                                        at 1.5 is ~1px — legible, quiet. */}
+                                    <Icon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
                                 </button>
                             ))}
                         </div>
-                    )}
+                        {/* Ripgrep flags (`/workspaces/search`'s case /
+                            whole-word switches). They are DISABLED in file
+                            mode, not hidden: a fuzzy file-name search has
+                            no case/word boundary to toggle, so a
+                            live-looking switch would be lying. Greyed out
+                            says "not applicable here" without the row
+                            changing shape when the mode flips. */}
+                        {[
+                            {
+                                Icon: CaseSensitive,
+                                labelKey: "workspace.explorer.matchCase",
+                                on: caseSensitive,
+                                set: setCaseSensitive,
+                            },
+                            {
+                                Icon: WholeWord,
+                                labelKey: "workspace.explorer.matchWholeWord",
+                                on: wholeWord,
+                                set: setWholeWord,
+                            },
+                        ].map(({ Icon, labelKey, on, set }) => (
+                            <button
+                                key={labelKey}
+                                type="button"
+                                aria-pressed={on}
+                                aria-label={t(labelKey)}
+                                title={t(labelKey)}
+                                disabled={searchMode !== "content"}
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => set(!on)}
+                                className={searchToggleClass(on, searchMode !== "content")}
+                            >
+                                <Icon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+                            </button>
+                        ))}
+                    </div>
                     {searchQuery && (
                         <button
                             onClick={() => {
@@ -1183,7 +1226,7 @@ export function WorkspaceExplorer() {
                             className="text-10 text-text-tertiary hover:text-text-tertiary"
                             title={t("workspace.ariaLabelClearSearch")}
                         >
-                            <X className="h-3 w-3" />
+                            <X className="h-4 w-4" strokeWidth={1.5} />
                         </button>
                     )}
                 </div>
