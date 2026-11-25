@@ -9,13 +9,14 @@
  * node inside the scroll container, and call this AFTER `useStickToBottom` so
  * the center-scroll wins over the follow-to-bottom on the jump commit.
  *
- * Virtualized surfaces (render-perf L2): a row outside the viewport is not in
- * the DOM, so the `querySelector` miss is not "the window moved on" — it is
- * the normal case for a locate landing mid-window. `scrollToSeq` is the
- * fallback: the surface resolves the seq through its list handle
- * (`VirtualRowList.scrollToKey`). Only when that also reports the row absent
- * is the stamp stale. Mounted rows keep the `scrollIntoView` path so the
- * in-viewport behavior (and its scroll-event semantics) is unchanged.
+ * The list handle comes FIRST, mounted row or not (render-perf L2): a
+ * `scrollIntoView` lands against the row heights measured SO FAR, and on a
+ * window that was just replaced the rows above the target then measure in
+ * taller than their estimate and push it back out of view — the "it loaded the
+ * page but not the row" first click. The handle's key scroll re-centres across
+ * the commits that follow (`VirtualRowList`). `scrollIntoView` stays as the
+ * fallback for surfaces without a virtualized handle, and only when NEITHER
+ * path can place the row is the stamp stale.
  */
 import { useEffect, useRef, useState } from "react";
 
@@ -48,15 +49,16 @@ export function useLocateMessage(
     if (pendingLocateSeq == null) return;
     const target =
       getContainer()?.querySelector<HTMLElement>(`[data-seq="${pendingLocateSeq}"]`) ?? null;
-    if (target) {
+    if (scrollToSeq?.(pendingLocateSeq)) {
+      // Off-viewport in a virtualized window: the handle moved the pane (and
+      // keeps it centred while measurements settle); the row mounts on the
+      // next commit and paints the flash from there.
+      setHighlightSeq(pendingLocateSeq);
+      onLocate?.();
+    } else if (target) {
       setHighlightSeq(pendingLocateSeq);
       onLocate?.();
       target.scrollIntoView({ block: "center" });
-    } else if (scrollToSeq?.(pendingLocateSeq)) {
-      // Off-viewport in a virtualized window: the handle moved the pane; the
-      // row mounts on the next commit and paints the flash from there.
-      setHighlightSeq(pendingLocateSeq);
-      onLocate?.();
     } else {
       // `jumpToMessage` only stamps a row it just fetched into the window, so
       // a miss here means the window moved on (a wake reset it to the tail).

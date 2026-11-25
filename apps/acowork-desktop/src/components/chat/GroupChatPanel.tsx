@@ -931,6 +931,9 @@ export function GroupChatPanel() {
     () => {},
     win?.older.length ?? 0,
     positionAtBottom,
+    // Same rule as the 1:1 surface: a locate owns the viewport until its fade
+    // ends, so the follow is never re-pinned into the page it just loaded.
+    pendingLocateSeq != null,
   );
 
   // Merged container capture — a STABLE callback on purpose. An inline arrow is

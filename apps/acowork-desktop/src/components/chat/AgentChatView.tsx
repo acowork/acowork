@@ -786,6 +786,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     undefined,
     win?.older.length ?? 0,
     positionAtBottom,
+    // A locate owns the viewport until its fade ends: the follow must not
+    // re-pin into the page the jump just loaded (that is what buried the row
+    // the locate had centred). The store's stamp is the fact; geometry is not.
+    pendingLocateSeq != null,
   );
 
   // Merged container capture — a STABLE callback on purpose. An inline arrow is

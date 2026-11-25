@@ -84,17 +84,42 @@ export class FollowController {
   /** Last scroll offset seen by `onScroll` — the direction guard's baseline
    *  (see below). Scroll events are the only writer of this bit. */
   private lastTop = 0;
+  /** Swallow the next scroll event: it is the echo of the programmatic scroll
+   *  that follows an explicit release. */
+  private muteEcho = false;
   private onScroll = () => {
     if (!this.el) return;
+    if (this.muteEcho) {
+      // The release happened a moment ago and the viewport is about to be (or
+      // just was) scrolled by code — the locate's `scrollIntoView` /
+      // `scrollToKey`. Geometry then says "the reader is at the bottom"
+      // whenever the replaced page is short, and re-claiming the follow on
+      // that reading buries the row the locate just centred: the follow rides
+      // every later measurement commit back to the bottom, and the reader has
+      // to click the same history entry twice to get there. Intent lives in
+      // the reader's own scroll, never in the echo of ours.
+      this.muteEcho = false;
+      this.lastTop = this.el.scrollTop;
+      return;
+    }
+    const top = this.el.scrollTop;
+    const movedUp = top < this.lastTop - 1;
     const was = this.pinned;
     if (isNearBottom(this.el)) {
-      this.setPinned(true);
-      // An arrival is a SCROLL, never a programmatic re-pin: only the reader's
-      // own scroll-down clears the unread badge, so the receipt fires here and
-      // nowhere else (a `refresh`/`stickNow` re-pin or a container adopt must
-      // not fake one).
-      if (!was) this.onBecamePinned?.();
-    } else if (this.el.scrollTop < this.lastTop - 1) {
+      // Arrival means a DOWNWARD or unchanged offset. A content shrink clamps
+      // `scrollTop` UP to the new bottom, and that clamp is dispatched as a
+      // scroll event too — reading it as an arrival re-claims a follow the
+      // reader never asked for (the same trap the away-branch below guards
+      // against, in the other direction).
+      if (!movedUp) {
+        this.setPinned(true);
+        // An arrival is a SCROLL, never a programmatic re-pin: only the
+        // reader's own scroll-down clears the unread badge, so the receipt
+        // fires here and nowhere else (a `refresh`/`stickNow` re-pin or a
+        // container adopt must not fake one).
+        if (!was) this.onBecamePinned?.();
+      }
+    } else if (movedUp) {
       // Away from the bottom AND a genuine upward move: the reader left.
       // Geometry alone cannot make this call on a virtualized pane: the
       // scroll event from our own bottom-pin write can be delivered after a
@@ -110,13 +135,14 @@ export class FollowController {
       // surface's direction-guarded `handleScroll`.
       this.setPinned(false);
     }
-    this.lastTop = this.el.scrollTop;
+    this.lastTop = top;
   };
 
   /** Release the follow explicitly: the locate jump moves the viewport
    *  mid-history on purpose, and a DOWNWARD move carries no signal the
    *  direction guard may read as intent. */
   unpin(): void {
+    this.muteEcho = true;
     this.setPinned(false);
   }
 
@@ -187,13 +213,24 @@ export class FollowController {
    * Called by the screen on every content change.
    * @param forceKey identity of what is being viewed (peer id); a change
    *                 re-pins even if the user scrolled up before it.
+   * @param parked   a locate (ADR-097) owns the viewport: `jumpToMessage`
+   *                 replaced the window with a span around the hit row, and its
+   *                 row is still being scrolled to and flashed. The follow must
+   *                 then LET GO — pinning here rides the replaced window down to
+   *                 the bottom of the new page, which is exactly "it loaded the
+   *                 page but not the row I clicked". The reader never asked to
+   *                 follow this page, so `atBottom` goes false and the
+   *                 back-to-bottom affordance takes over.
    */
-  refresh(forceKey?: string | null): void {
+  refresh(forceKey?: string | null, parked = false): void {
     if (!this.el) return;
-    if (forceKey !== this.lastKey) {
-      this.lastKey = forceKey ?? null;
-      this.setPinned(true);
+    const keyChanged = forceKey !== this.lastKey;
+    if (keyChanged) this.lastKey = forceKey ?? null;
+    if (parked) {
+      this.setPinned(false);
+      return;
     }
+    if (keyChanged) this.setPinned(true);
     if (this.pinned) this.pinToBottom();
   }
 
@@ -205,6 +242,9 @@ export class FollowController {
   }
 }
 
+// ponytail: positional parameters, already six (two call sites fill a slot with
+// `undefined`). Upgrade to a single options object when a seventh argument is
+// needed — not before, that churn buys nothing today.
 export function useStickToBottom(
   deps: readonly unknown[],
   forceKey?: string | null,
@@ -226,6 +266,12 @@ export function useStickToBottom(
    *  single `scrollTop = scrollHeight` write lands short on a list whose
    *  total height is still an estimate. */
   goToBottom?: () => boolean,
+  /** True while a locate owns the viewport — the surface drives it from the
+   *  window's `pendingLocateSeq` (set by `jumpToMessage`, cleared when the
+   *  flash fades). The follow is released instead of re-pinned, see
+   *  `FollowController.refresh`. Read through a ref, so a locate that lands with
+   *  a deps change (the jump commit itself) is seen by that same layout pass. */
+  parked?: boolean,
 ): {
   ref: (el: HTMLDivElement | null) => void;
   stickNow: () => void;
@@ -254,6 +300,8 @@ export function useStickToBottom(
   // one stable wrapper across renders and always calls the latest delegate.
   const goBottomRef = useRef(goToBottom);
   goBottomRef.current = goToBottom;
+  const parkedRef = useRef(parked ?? false);
+  parkedRef.current = parked ?? false;
   ctrl.current.setGoToBottom(goToBottom ? () => goBottomRef.current!() : null);
   // Reactive follow flag: the controller reports every pinned flip into this
   // state so the arrow can appear/disappear. Defaults to pinned (a fresh view
@@ -304,7 +352,7 @@ export function useStickToBottom(
   // `useLocateMessage` (passive, declared after this hook at the call site) as
   // the last writer, so a locate jump still wins over the follow.
   useLayoutEffect(() => {
-    ctrl.current!.refresh(forceKey);
+    ctrl.current!.refresh(forceKey, parkedRef.current);
     // `deps` is the caller's trigger list — fixed length per call site.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [forceKey, ...deps]);

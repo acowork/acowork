@@ -55,6 +55,10 @@ import { decideBottomPin } from "./bottomAnchor";
  *  under-fills rather than over-fills the estimate; measurements correct it
  *  on first mount. */
 const DEFAULT_ROW_HEIGHT_PX = 64;
+/** How long a `scrollToKey` request keeps re-centring while row measurements
+ *  converge. Long enough for the commits that follow a window replacement,
+ *  short enough that it never fights a reader who scrolls away. */
+const KEY_PIN_MS = 600;
 
 /** Bottom-pin tuning — the anchor re-pins on every commit until the layout
  *  settles (measurements land). MAX is a safety valve; the release rule
@@ -218,10 +222,6 @@ export function VirtualRowList<T>({
   // reader) and true again when the prop re-arms.
   const followActiveRef = useRef(followBottom ?? false);
   const prevFollowPropRef = useRef(followBottom ?? false);
-  if ((followBottom ?? false) !== prevFollowPropRef.current) {
-    prevFollowPropRef.current = followBottom ?? false;
-    followActiveRef.current = followBottom ?? false;
-  }
 
   // ── Container width (self-measured) ──────────────────────────────
   // Copied from VirtualMessageList: setState in useLayoutEffect flushes
@@ -417,6 +417,18 @@ export function VirtualRowList<T>({
   const pinToBottomRef = useRef(false);
   const lastPinTopRef = useRef(0);
   const pinDeadlineRef = useRef(0);
+  // Mirror the follow prop into the ref the pin effect reads. Declared after the
+  // refs it touches, but still during render: React runs this before the
+  // layout effect below, so a release takes effect in the same commit.
+  if ((followBottom ?? false) !== prevFollowPropRef.current) {
+    prevFollowPropRef.current = followBottom ?? false;
+    followActiveRef.current = followBottom ?? false;
+    // A released follow must not leave the one-shot bottom anchor armed: it
+    // would spend one more commit writing the pane back to the bottom — after
+    // a locate has just centred the row — and its scroll echo then re-claims
+    // the follow it was released from.
+    if (!followActiveRef.current) pinToBottomRef.current = false;
+  }
   useLayoutEffect(() => {
     const riding = pinToBottomRef.current || followActiveRef.current;
     if (!riding) return;
@@ -440,6 +452,44 @@ export function VirtualRowList<T>({
     }
     el.scrollTop = max;
     lastPinTopRef.current = max;
+  });
+
+  // A key-scroll request that rides the commits after it, exactly like the
+  // bottom anchor above. `scrollToIndex` on a JUST-REPLACED window computes the
+  // offset from estimated row heights; the rows then measure in, the estimates
+  // shrink, and the offset lands past the row (the locate "loaded the page but
+  // not the row" on the first click, and worked on the second because the
+  // window was already there and measured). Re-running the same scroll on each
+  // commit converges instead of betting on one estimate.
+  const keyPinRef = useRef<{
+    key: string;
+    align: "start" | "center" | "end";
+    deadline: number;
+  } | null>(null);
+  // ── Key-scroll convergence ───────────────────────────────────────
+  // ponytail: bounded re-scroll (<= KEY_PIN_MS) rather than solving for the
+  // converged height analytically. Ceiling: a row that measures in slower than
+  // the deadline can still land off-centre; upgrade path is the library's
+  // `shouldAdjustScrollPositionOnItemSizeChange`, which needs the target index
+  // to be its own state.
+  useLayoutEffect(() => {
+    const req = keyPinRef.current;
+    if (!req) return;
+    const idx = itemsRef.current.findIndex((it, i) => keyOfRef.current(it, i) === req.key);
+    if (idx < 0) {
+      keyPinRef.current = null;
+      return;
+    }
+    // Re-issue on EVERY commit until the deadline. No "already in view" exit:
+    // the row is routinely in view on the commit right after a window
+    // replacement and is pushed back out ~100 ms later when the rows above it
+    // measure in taller than their estimate (markdown/code rows grow after
+    // paint). Only the deadline ends the chase.
+    if (performance.now() > req.deadline) {
+      keyPinRef.current = null;
+      return;
+    }
+    virtualizer.scrollToIndex(idx, { align: req.align });
   });
 
   // ── Imperative handle ────────────────────────────────────────────
@@ -526,6 +576,9 @@ export function VirtualRowList<T>({
         // as positioned (the locate path depends on this).
         if (!virtualizer.scrollElement) return false;
         virtualizer.scrollToIndex(idx, { align });
+        // Ride the commits that follow: on a replaced window the offsets above
+        // are still estimates, and they shrink the moment the rows measure.
+        keyPinRef.current = { key, align, deadline: performance.now() + KEY_PIN_MS };
         return true;
       },
     }),

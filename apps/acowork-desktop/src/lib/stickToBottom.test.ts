@@ -145,6 +145,41 @@ describe("FollowController", () => {
     expect(el.scrollTop).toBe(el.bottom);
   });
 
+  it("a PARKED window is released instead of pinned to the page it replaced", () => {
+    // The history-jump regression (ADR-097): a pinned reader clicks a hit and
+    // the window is REPLACED by a span around an older message. The follow
+    // cannot tell a replacement from an append, so it kept the reader "pinned"
+    // into the new page — and the list's persistent anchor then rode the pane
+    // to the BOTTOM of that page, burying the row the locate had just centred.
+    // ("It loaded the page but not the row I clicked," first click only; the
+    // second click worked because the locate had already released the follow.)
+    // A window that does not end at the newest row is parked: released here,
+    // in the replacement commit itself, so the surface's list drops its anchor
+    // in the same pass.
+    const { c, el } = bound();
+    const onPinnedChange = vi.fn();
+    c.bind(el, undefined, onPinnedChange);
+    c.refresh("peer1"); // pinned at the tail
+    c.refresh("peer1", true); // the replacement commit, still pinned
+    expect(c.pinned).toBe(false);
+    expect(onPinnedChange).toHaveBeenLastCalledWith(false);
+    expect(el.scrollTop).toBe(el.bottom); // nothing was moved by the release
+
+    el.userScrollTo(300); // the locate centres the hit
+    el.grow(400); // the new page's rows measure in
+    c.refresh("peer1", true);
+    expect(el.scrollTop).toBe(300); // later commits ride nothing
+  });
+
+  it("a parked reader gets the follow back by asking for it", () => {
+    const { c, el } = bound();
+    c.refresh("peer1");
+    c.refresh("peer1", true); // parked
+    el.userScrollTo(300);
+    c.stickNow(); // the back-to-bottom affordance
+    expect(el.scrollTop).toBe(el.bottom);
+  });
+
   it("bind(null) detaches: refresh becomes a no-op and old scrolls stop mattering", () => {
     const { c, el } = bound();
     c.refresh("peer1");
@@ -661,5 +696,53 @@ describe("useStickToBottom through a re-created callback ref", () => {
     } finally {
       layout.restore();
     }
+  });
+});
+
+/* ---------------- the locate's own scroll echo ---------------- */
+
+/*
+ * A locate releases the follow and then scrolls the viewport itself. On a pane
+ * whose replaced page is still short every offset reads "near the bottom", so
+ * the scroll event of that programmatic move arrived as an ARRIVAL and
+ * re-claimed the follow the locate had just released — the persistent anchor
+ * then rode every measurement commit back to the bottom and buried the row
+ * ("it loaded the page but not the row I clicked", first click only; the
+ * second click worked because the release was already in place).
+ */
+describe("FollowController locate-echo guard", () => {
+  it("the echo of the locate's own scroll does not re-claim the follow", () => {
+    const { c, el } = bound();
+    c.refresh("peer1"); // pinned at 700
+    el.grow(500); // the jump's page: bottom is now 1200
+    c.unpin(); // onLocate releases the follow
+    el.scrollTop = 1150; // scrollIntoView lands near the bottom of a short page
+    expect(c.pinned).toBe(false); // not an arrival: it was OUR scroll
+    c.refresh("peer1", true); // the jump's own commit, window parked
+    el.grow(300); // rows measure in taller than their estimate
+    expect(c.pinned).toBe(false);
+    expect(el.scrollTop).toBe(1150); // nothing rode the commits
+  });
+
+  it("a real scroll down after the echo still re-claims the follow", () => {
+    const { c, el } = bound();
+    c.refresh("peer1");
+    el.grow(500);
+    c.unpin();
+    el.scrollTop = 1150; // the echo, swallowed
+    el.userScrollTo(200); // the reader moves up
+    expect(c.pinned).toBe(false);
+    el.userScrollTo(el.bottom); // and back down to the newest row: an arrival
+    expect(c.pinned).toBe(true);
+  });
+
+  it("a shrink clamp does not fake an arrival for a released follow", () => {
+    const { c, el } = bound();
+    c.refresh("peer1"); // pinned at 700
+    el.userScrollTo(400); // the reader scrolls up: released
+    expect(c.pinned).toBe(false);
+    el.shrink(400); // content shrinks; the browser clamps the offset UP
+    expect(el.scrollTop).toBe(el.bottom); // the clamp landed at the bottom
+    expect(c.pinned).toBe(false); // the clamp is not the reader coming back
   });
 });
