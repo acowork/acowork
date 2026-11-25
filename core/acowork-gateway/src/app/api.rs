@@ -31,6 +31,10 @@ pub fn app_routes() -> Router<AppState> {
         .route("/api/apps", get(list_apps))
         .route("/api/apps/install", post(install_upload))
         .route("/api/apps/install-url", post(install_from_url))
+        // Both install routes above answer `202 {job_id}` and do the work in a
+        // detached task; these are the observation endpoints.
+        .route("/api/apps/install-jobs", get(list_install_jobs))
+        .route("/api/apps/install-jobs/{job_id}", get(get_install_job))
         .route("/api/apps/{id}", get(get_app).delete(delete_app))
         .route("/api/apps/{id}/enable", post(enable_app))
         .route("/api/apps/{id}/disable", post(disable_app))
@@ -361,8 +365,23 @@ async fn session_ticket(
     .into_response()
 }
 
+/// Query of `POST /api/apps/install` — the local-upload counterpart of
+/// `InstallUrlBody::hint_id`.
+#[derive(Debug, Deserialize)]
+struct InstallHintQuery {
+    #[serde(default)]
+    hint_id: Option<String>,
+}
+
+/// Accept an uploaded `.app` and answer `202 {job_id}`.
+///
+/// The upload itself stays in-request (it is a loopback copy and the Desktop
+/// already streams the file); everything after it — unpack, signature check,
+/// manifest, binaries, spawn — is the slow part and now runs as the same kind
+/// of job a gallery install uses, so both paths report progress identically.
 async fn install_upload(
     State(state): State<AppState>,
+    Query(query): Query<InstallHintQuery>,
     body: Bytes,
 ) -> impl IntoResponse {
     let Some(dir) = data_dir_async(&state).await else {
@@ -372,45 +391,95 @@ async fn install_upload(
         )
             .into_response();
     };
+    if let Some(job_id) = existing_job(&state, &query.hint_id) {
+        return job_accepted(&state, &job_id);
+    }
     let staging = match write_upload_with_limit(&dir, body.as_ref()) {
         Ok(p) => p,
         Err(e) => return install_err_response(e),
     };
-    let opts = InstallOptions {
-        allow_unsigned: allow_unsigned(&state).await,
-        origin: "upload".into(),
-    };
-    let outcome = match install_app_package(&dir, &staging, &opts) {
-        Ok(o) => o,
-        Err(e) => {
+    let total = body.len() as u64;
+    let job_id = state.app_install_jobs.create(query.hint_id.clone());
+    let task_state = state.clone();
+    let jobs = state.app_install_jobs.clone();
+    let spawned = job_id.clone();
+    tokio::spawn(async move {
+        jobs.update(&spawned, |j| {
+            j.phase = crate::app::install_jobs::InstallPhase::Install;
+            j.total_bytes = total;
+            j.received_bytes = total;
+        });
+        let allow_unsigned = allow_unsigned(&task_state).await;
+        let install_dir = dir.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let opts = InstallOptions {
+                allow_unsigned,
+                origin: "upload".into(),
+            };
+            let outcome = install_app_package(&install_dir, &staging, &opts);
             let _ = std::fs::remove_file(&staging);
-            return install_err_response(e);
+            outcome
+        })
+        .await;
+        match outcome {
+            Ok(Ok(o)) => {
+                jobs.update(&spawned, |j| {
+                    j.phase = crate::app::install_jobs::InstallPhase::Start;
+                    j.app_id = Some(o.app_id.clone());
+                });
+                reload_and_maybe_start(&task_state, &o.app_id).await;
+                jobs.finish_ok(&spawned, &o.app_id, &o.installed_version);
+            }
+            Ok(Err(e)) => jobs.finish_err(&spawned, e.code, &e.message),
+            Err(e) => jobs.finish_err(
+                &spawned,
+                "package_malformed",
+                &format!("install task: {e}"),
+            ),
         }
-    };
-    let _ = std::fs::remove_file(&staging);
-    reload_and_maybe_start(&state, &outcome.app_id).await;
-    let gw = state.gateway_state.read().await;
-    let dto = gw
-        .app_registry
-        .read()
-        .ok()
-        .and_then(|r| r.get(&outcome.app_id).cloned())
-        .map(|m| to_dto(&m, &gw));
-    Json(serde_json::json!({
-        "installed_version": outcome.installed_version,
-        "fingerprint": outcome.fingerprint,
-        "origin": outcome.origin,
-        "app": dto,
-    }))
-    .into_response()
+    });
+    job_accepted(&state, &job_id)
 }
 
+/// Body of `POST /api/apps/install-url`.
 #[derive(Debug, Deserialize)]
 struct InstallUrlBody {
     url: String,
     sha256: String,
+    /// Card id the Desktop is installing (see [`InstallJob::hint_id`]).
+    /// Display + single-flight key only; never used as the installed id.
+    #[serde(default)]
+    hint_id: Option<String>,
 }
 
+/// `InstallJob` fields the Desktop quotes in its own copy.
+fn job_accepted(state: &AppState, job_id: &str) -> axum::response::Response {
+    match state.app_install_jobs.get(job_id) {
+        Some(job) => (StatusCode::ACCEPTED, Json(job)).into_response(),
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "install job vanished" })),
+        )
+            .into_response(),
+    }
+}
+
+/// The job that already covers this card, or `None`. Single-flight: a second
+/// click (or a re-click after switching panels) must not start a second
+/// 17–77 MB download.
+fn existing_job(state: &AppState, hint_id: &Option<String>) -> Option<String> {
+    hint_id
+        .as_deref()
+        .and_then(|hint| state.app_install_jobs.running_for_hint(hint))
+        .map(|job| job.job_id)
+}
+
+/// Accept an install from a gallery / Release URL and answer immediately.
+///
+/// It used to be a single blocking request: the Desktop held a 20–60 s POST
+/// open with no progress to show, and the client's view-local spinner died the
+/// moment the user switched panels. The response is now `202` + a job id;
+/// `GET /api/apps/install-jobs/{job_id}` carries phase and byte progress.
 async fn install_from_url(
     State(state): State<AppState>,
     Json(body): Json<InstallUrlBody>,
@@ -425,97 +494,149 @@ async fn install_from_url(
         )
             .into_response();
     }
-    let Some(dir) = data_dir_async(&state).await else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({ "error": "gateway data_dir unavailable" })),
-        )
-            .into_response();
-    };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build();
-    let client = match client {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-    let bytes = match client.get(&body.url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "code": "package_malformed",
-                        "error": format!("download body: {e}")
-                    })),
-                )
-                    .into_response();
-            }
-        },
-        Ok(resp) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "code": "package_malformed",
-                    "error": format!("download HTTP {}", resp.status())
-                })),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "code": "package_malformed",
-                    "error": format!("download failed: {e}")
-                })),
-            )
-                .into_response();
-        }
-    };
-    use sha2::{Digest, Sha256};
-    let digest = format!("{:x}", Sha256::digest(&bytes));
-    if !digest.eq_ignore_ascii_case(body.sha256.trim()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "code": "package_tampered",
-                "error": "downloaded bytes do not match sha256"
-            })),
-        )
-            .into_response();
+    if let Some(job_id) = existing_job(&state, &body.hint_id) {
+        return job_accepted(&state, &job_id);
     }
-    let staging = match write_upload_with_limit(&dir, bytes.as_ref()) {
-        Ok(p) => p,
-        Err(e) => return install_err_response(e),
-    };
-    let opts = InstallOptions {
-        allow_unsigned: allow_unsigned(&state).await,
-        origin: "url".into(),
-    };
-    let outcome = match install_app_package(&dir, &staging, &opts) {
-        Ok(o) => o,
-        Err(e) => {
-            let _ = std::fs::remove_file(&staging);
-            return install_err_response(e);
+    let job_id = state.app_install_jobs.create(body.hint_id.clone());
+    let task_state = state.clone();
+    let jobs = state.app_install_jobs.clone();
+    let (url, sha256) = (body.url, body.sha256);
+    let spawned = job_id.clone();
+    tokio::spawn(async move {
+        match download_and_install(&task_state, &jobs, &spawned, &url, &sha256).await {
+            Ok((app_id, version)) => jobs.finish_ok(&spawned, &app_id, &version),
+            Err(e) => jobs.finish_err(&spawned, e.code, &e.message),
         }
+    });
+    job_accepted(&state, &job_id)
+}
+
+/// `GET /api/apps/install-jobs` — every known job, running first. The Desktop
+/// refetches this on mount, which is what makes a running install survive
+/// navigation away from the Apps panel.
+async fn list_install_jobs(State(state): State<AppState>) -> impl IntoResponse {
+    let jobs = state.app_install_jobs.list();
+    Json(serde_json::json!({ "jobs": jobs }))
+}
+
+/// `GET /api/apps/install-jobs/{job_id}` — phase, byte progress and outcome.
+async fn get_install_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> impl IntoResponse {
+    match state.app_install_jobs.get(&job_id) {
+        Some(job) => Json(job).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "install job not found" })),
+        )
+            .into_response(),
+    }
+}
+
+/// Download, verify and install one package, keeping `job_id` updated at every
+/// step. Runs detached from the request that accepted it.
+async fn download_and_install(
+    state: &AppState,
+    jobs: &crate::app::install_jobs::SharedInstallJobs,
+    job_id: &str,
+    url: &str,
+    sha256: &str,
+) -> Result<(String, String), crate::app::install::InstallError> {
+    use crate::app::install::InstallError;
+    use crate::app::install_jobs::InstallPhase;
+    use sha2::{Digest, Sha256};
+
+    let Some(dir) = data_dir_async(state).await else {
+        return Err(InstallError::new(
+            "gateway_unavailable",
+            503,
+            "gateway data_dir unavailable",
+        ));
     };
-    let _ = std::fs::remove_file(&staging);
-    reload_and_maybe_start(&state, &outcome.app_id).await;
-    Json(serde_json::json!({
-        "installed_version": outcome.installed_version,
-        "fingerprint": outcome.fingerprint,
-        "origin": outcome.origin,
-        "app_id": outcome.app_id,
-    }))
-    .into_response()
+    // No overall deadline tight enough to kill a legitimately slow download
+    // (a 77 MB package through a debug build is minutes): the job is no longer
+    // a request, so hanging is a visible stall in the byte counter rather than
+    // a hung UI. The connect timeout still fails a dead host quickly.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(900))
+        .build()
+        .map_err(|e| InstallError::new("package_malformed", 500, format!("http client: {e}")))?;
+    let mut resp = client.get(url).send().await.map_err(|e| {
+        InstallError::new("package_malformed", 400, format!("download failed: {e}"))
+    })?;
+    if !resp.status().is_success() {
+        return Err(InstallError::new(
+            "package_malformed",
+            400,
+            format!("download HTTP {}", resp.status()),
+        ));
+    }
+
+    // The package is buffered whole: `install_app_package` streams it again
+    // into its own staging copy, so a temp file here would only add a second
+    // 77 MB write. Ceiling: peak RSS grows by one package (ADR-116 limit is
+    // `MAX_APP_PACKAGE_BYTES`, 200 MB).
+    let total = resp.content_length().unwrap_or(0);
+    jobs.update(job_id, |j| {
+        j.phase = InstallPhase::Download;
+        j.total_bytes = total;
+    });
+    let mut received: u64 = 0;
+    let mut body = Vec::with_capacity(total.min(MAX_APP_PACKAGE_BYTES) as usize);
+    while let Some(chunk) = resp.chunk().await.map_err(|e| {
+        InstallError::new("package_malformed", 400, format!("download body: {e}"))
+    })? {
+        received += chunk.len() as u64;
+        if received > MAX_APP_PACKAGE_BYTES {
+            return Err(InstallError::new(
+                "package_too_large",
+                413,
+                format!(
+                    "package exceeds {} MB limit",
+                    MAX_APP_PACKAGE_BYTES / (1024 * 1024)
+                ),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+        jobs.update(job_id, |j| j.received_bytes = received);
+    }
+
+    jobs.update(job_id, |j| j.phase = InstallPhase::Verify);
+    let digest = format!("{:x}", Sha256::digest(&body));
+    if !digest.eq_ignore_ascii_case(sha256.trim()) {
+        return Err(InstallError::new(
+            "package_tampered",
+            400,
+            "downloaded bytes do not match sha256",
+        ));
+    }
+
+    jobs.update(job_id, |j| j.phase = InstallPhase::Install);
+    let allow_unsigned = allow_unsigned(state).await;
+    let install_dir = dir.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let staging = write_upload_with_limit(&install_dir, body.as_slice())?;
+        let opts = InstallOptions {
+            allow_unsigned,
+            origin: "url".into(),
+        };
+        let outcome = install_app_package(&install_dir, &staging, &opts);
+        let _ = std::fs::remove_file(&staging);
+        outcome
+    })
+    .await
+    .map_err(|e| {
+        InstallError::new("package_malformed", 500, format!("install task: {e}"))
+    })??;
+
+    jobs.update(job_id, |j| {
+        j.phase = InstallPhase::Start;
+        j.app_id = Some(outcome.app_id.clone());
+    });
+    reload_and_maybe_start(state, &outcome.app_id).await;
+    Ok((outcome.app_id, outcome.installed_version))
 }
 
 async fn get_versions(

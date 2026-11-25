@@ -113,6 +113,10 @@ pub struct AppState {
     /// ADR-116: in-memory HMAC key for app webview session tickets. Separate
     /// from the preview key so the two capability domains cannot cross-verify.
     pub app_session_secret: crate::app::ticket::SharedAppSessionSecret,
+    /// ADR-116: running/just-finished app installs. In-memory by design — a
+    /// restart forgets them and the Desktop offers Install again, which is the
+    /// honest state (nothing survives to resume a half-downloaded package).
+    pub app_install_jobs: crate::app::install_jobs::SharedInstallJobs,
 }
 
 impl AppState {
@@ -144,6 +148,7 @@ impl AppState {
                 crate::http::workspace_preview::PreviewTicketSecret::random(),
             ),
             app_session_secret: Arc::new(crate::app::ticket::AppSessionSecret::random()),
+            app_install_jobs: crate::app::install_jobs::InstallJobs::new_shared(),
         }
     }
 }

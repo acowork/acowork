@@ -30,7 +30,7 @@ pub struct InstallError {
 }
 
 impl InstallError {
-    fn new(code: &'static str, http: u16, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, http: u16, message: impl Into<String>) -> Self {
         Self {
             code,
             http,

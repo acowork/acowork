@@ -12,10 +12,14 @@
 //!   project into the same process table.
 //! - `proxy` — the only cross-boundary HTTP channel.
 //! - `api` / `platform` — discovery and the narrow App → Platform surface.
+//! - `install_jobs` — async install jobs: an install request answers
+//!   `202 {job_id}` and the client polls byte progress instead of holding a
+//!   minute-long request open.
 //! - `ticket` — capability tickets for the sandboxed webview.
 
 pub mod api;
 pub mod install;
+pub mod install_jobs;
 pub mod mcp_proxy;
 pub mod platform;
 pub mod proxy;
