@@ -80,6 +80,47 @@ pub struct DownloadModelRequest {
     pub variant: Option<String>,
 }
 
+/// Request for adding a user-defined LOCAL ONNX model.
+///
+/// Mirrors the fields of one `embedding_models.json` entry that the embed
+/// service actually needs to download + load a model: where the files live
+/// on HuggingFace, how many dimensions they produce, and which pooling the
+/// ONNX graph expects. `onnx_variants` is deliberately absent — a custom
+/// entry has exactly one graph, so `onnx_file` is used for every variant
+/// (see `ModelRegistry::resolve_variant`).
+#[derive(Debug, Deserialize)]
+pub struct AddEmbeddingModelRequest {
+    /// Model id, also the on-disk model directory name under `models_dir`.
+    pub id: String,
+    /// Display name shown in the harness list.
+    pub name: String,
+    /// Optional one-line description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Embedding vector dimension the graph emits.
+    pub dimension: usize,
+    /// Maximum input tokens. Defaults to 512.
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+    /// Supported language codes (free-form, display only).
+    #[serde(default)]
+    pub languages: Vec<String>,
+    /// HuggingFace repository, `owner/name` (e.g. `Xenova/bge-small-zh-v1.5`).
+    pub hf_repo: String,
+    /// Pooling the graph needs. Defaults to `cls`.
+    #[serde(default)]
+    pub pooling_strategy: acowork_core::protocol::PoolingStrategy,
+    /// Output shape of the graph. Defaults to `hidden_states`.
+    #[serde(default)]
+    pub onnx_output_kind: acowork_core::protocol::OnnxOutputKind,
+    /// Path of the ONNX graph inside the HF repo. Defaults to `onnx/model.onnx`.
+    #[serde(default)]
+    pub onnx_file: Option<String>,
+    /// Path of the tokenizer inside the HF repo. Defaults to `tokenizer.json`.
+    #[serde(default)]
+    pub tokenizer_file: Option<String>,
+}
+
 /// Request for model selection.
 #[derive(Debug, Deserialize)]
 pub struct SelectModelRequest {
@@ -210,6 +251,177 @@ pub async fn list_embedding_models(State(state): State<AppState>) -> impl IntoRe
         models,
         active_model_id,
         service_running,
+    })
+    .into_response()
+}
+
+/// POST /api/embedding-models — add a user-defined local ONNX model.
+///
+/// Appends an entry to `{data_dir}/embedding_models.json` (the user-editable
+/// copy the embed service reads) and to the in-memory resource cache, so the
+/// model shows up in the harness list immediately. The embed process loads the
+/// registry once at startup, so it is told to reload — without that the
+/// download button would 404 on a model that is right there in the list.
+///
+/// ponytail: no matching DELETE. A user entry is indistinguishable from a
+/// catalog one (`bundled` is false for both), so a delete endpoint could remove
+/// a built-in model. Ceiling: a mistyped custom entry stays in the list until
+/// the user edits `embedding_models.json` by hand. Upgrade path: add a
+/// `custom: bool` to `EmbeddingModelEntry` and let DELETE refuse non-custom
+/// entries. Per-model file deletion already works.
+pub async fn add_embedding_model(
+    State(state): State<AppState>,
+    Json(req): Json<AddEmbeddingModelRequest>,
+) -> impl IntoResponse {
+    let id = req.id.trim().to_string();
+    let name = req.name.trim().to_string();
+    let hf_repo = req.hf_repo.trim().trim_end_matches('/').to_string();
+    let onnx_file = req
+        .onnx_file
+        .as_deref()
+        .unwrap_or("onnx/model.onnx")
+        .trim()
+        .to_string();
+    let tokenizer_file = req
+        .tokenizer_file
+        .as_deref()
+        .unwrap_or("tokenizer.json")
+        .trim()
+        .to_string();
+
+    let bad_request = |message: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(EmbeddingModelActionResponse {
+                model_id: id.clone(),
+                status: "error".to_string(),
+                message,
+            }),
+        )
+            .into_response()
+    };
+
+    // The id becomes the model directory name under `models_dir`, so keep it
+    // to a filename-safe set rather than trusting the caller.
+    if id.is_empty() {
+        return bad_request("id must not be empty".to_string());
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return bad_request(format!(
+            "id '{id}' may only contain letters, digits, '.', '_' and '-'"
+        ));
+    }
+    if name.is_empty() {
+        return bad_request("name must not be empty".to_string());
+    }
+    // HuggingFace repo ids are exactly `owner/name`; a full URL or a bare name
+    // would produce a file URL nobody can resolve.
+    let repo_parts: Vec<&str> = hf_repo.split('/').collect();
+    if repo_parts.len() != 2
+        || repo_parts.iter().any(|p| p.trim().is_empty())
+        || hf_repo.contains(char::is_whitespace)
+    {
+        return bad_request(format!(
+            "hf_repo must look like 'owner/name', got '{hf_repo}'"
+        ));
+    }
+    if req.dimension == 0 {
+        return bad_request("dimension must be greater than 0".to_string());
+    }
+    if onnx_file.is_empty() || tokenizer_file.is_empty() {
+        return bad_request("onnx_file and tokenizer_file must not be empty".to_string());
+    }
+
+    let mut gw = state.gateway_state.write().await;
+    let data_dir = match gw.config.as_ref() {
+        Some(config) => config.data_dir.clone(),
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(EmbeddingModelActionResponse {
+                    model_id: id.clone(),
+                    status: "error".to_string(),
+                    message: "Gateway config not initialized".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    // Edit the FILE, not the startup cache. The catalog is user-editable on
+    // disk, so the cache can be older than what the user has; writing the
+    // cache back would silently revert a hand edit. Reading the file here also
+    // refreshes the cache below with whatever the user added by hand.
+    let mut list = crate::resource_cache::load_embedding_models(std::path::Path::new(&data_dir));
+    if list.models.iter().any(|m| m.id == id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(EmbeddingModelActionResponse {
+                model_id: id.clone(),
+                status: "error".to_string(),
+                message: format!("Model '{id}' already exists in the catalog"),
+            }),
+        )
+            .into_response();
+    }
+
+    list.models.push(acowork_core::protocol::EmbeddingModelEntry {
+        id: id.clone(),
+        name,
+        description: req.description.filter(|d| !d.trim().is_empty()),
+        dimension: req.dimension,
+        max_tokens: req.max_tokens.unwrap_or(512),
+        // Unknown before the download; the list hides a 0 MB size.
+        size_mb: 0,
+        languages: req.languages,
+        hf_repo,
+        pooling_strategy: req.pooling_strategy,
+        onnx_output_kind: req.onnx_output_kind,
+        onnx_file,
+        tokenizer_file,
+        onnx_variants: None,
+        external_data_files: Default::default(),
+        bundled: false,
+        recommended: false,
+    });
+    list.version = list.version.wrapping_add(1);
+
+    if let Err(message) = crate::resource_cache::save_embedding_models(
+        std::path::Path::new(&data_dir),
+        &list,
+    ) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(EmbeddingModelActionResponse {
+                model_id: id.clone(),
+                status: "error".to_string(),
+                message,
+            }),
+        )
+            .into_response();
+    }
+    gw.resource_cache.embedding_models = list;
+    let embed_port = gw.embed_process.as_ref().map(|process| process.port);
+    drop(gw);
+
+    // Best effort: a failed reload leaves the list correct and only means the
+    // embed process needs a restart before this model can download.
+    if let Some(port) = embed_port
+        && let Err(e) = embed::reload_embed_models(port).await
+    {
+        tracing::warn!(model_id = %id, error = %e, "Embed registry reload failed; restart the embed service to use the new model");
+    }
+
+    if let Some(trigger) = state.mqtt_publisher_trigger.as_ref() {
+        trigger.trigger();
+    }
+
+    Json(EmbeddingModelActionResponse {
+        model_id: id,
+        status: "added".to_string(),
+        message: "Custom local embedding model added".to_string(),
     })
     .into_response()
 }
@@ -1295,7 +1507,10 @@ pub async fn start_migration(
 /// Build the embedding models API router.
 pub fn embedding_routes() -> Router<AppState> {
     Router::new()
-        .route("/api/embedding-models", get(list_embedding_models))
+        .route(
+            "/api/embedding-models",
+            get(list_embedding_models).post(add_embedding_model),
+        )
         .route("/api/embedding-models/test", post(test_embedding_model))
         .route("/api/embedding-models/{id}/download", post(download_model))
         .route("/api/embedding-models/{id}/select", post(select_model))
@@ -1819,6 +2034,221 @@ mod tests {
     fn json_pretty(v: &serde_json::Value) -> String {
         serde_json::to_string(v).unwrap_or_else(|_| "<unprintable>".to_string())
     }
+
+    /// Build an `AppState` whose data dir holds a seeded `embedding_models.json`.
+    ///
+    /// Shared by the add-model tests: they all need the on-disk file and the
+    /// in-memory cache to start out agreeing, which is the invariant the
+    /// handler has to preserve.
+    async fn state_with_catalog(
+        label: &str,
+        models: Vec<acowork_core::protocol::EmbeddingModelEntry>,
+        version: u64,
+    ) -> (crate::http::routes::AppState, std::path::PathBuf) {
+        let dir = crate::test_support::unique_temp_dir(format!(
+            "acowork-test-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let list = acowork_core::protocol::EmbeddingModelsFile {
+            version,
+            models,
+        };
+        std::fs::write(
+            dir.join("embedding_models.json"),
+            serde_json::to_string(&list).unwrap(),
+        )
+        .unwrap();
+
+        let mut gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        gw_state.config = Some(crate::config::GatewayConfig {
+            data_dir: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        });
+        gw_state.resource_cache = crate::resource_cache::ResourceCache {
+            embedding_models: list,
+            ..gw_state.resource_cache
+        };
+        let state = crate::http::routes::AppState::new(
+            Arc::new(tokio::sync::RwLock::new(gw_state)),
+            Arc::new(crate::http::auth::HttpAuth::new(false)),
+        );
+        (state, dir)
+    }
+
+    fn sample_entry(id: &str) -> acowork_core::protocol::EmbeddingModelEntry {
+        acowork_core::protocol::EmbeddingModelEntry {
+            id: id.to_string(),
+            name: "BGE".to_string(),
+            description: None,
+            dimension: 512,
+            max_tokens: 512,
+            size_mb: 90,
+            languages: vec![],
+            hf_repo: "onnx-community/bge-small-zh-v1.5-ONNX".to_string(),
+            pooling_strategy: Default::default(),
+            onnx_output_kind: Default::default(),
+            onnx_file: "onnx/model.onnx".to_string(),
+            tokenizer_file: "tokenizer.json".to_string(),
+            onnx_variants: None,
+            external_data_files: Default::default(),
+            bundled: false,
+            recommended: true,
+        }
+    }
+
+    async fn post_model(
+        state: crate::http::routes::AppState,
+        body: serde_json::Value,
+    ) -> axum::http::StatusCode {
+        super::embedding_routes()
+            .with_state(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/embedding-models")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// POST /api/embedding-models must persist a user-defined local model into
+    /// `{data_dir}/embedding_models.json` AND put it in the in-memory cache the
+    /// list endpoint reads — those two drifting apart is the whole failure
+    /// mode (model in the UI, 404 from the embed service).
+    ///
+    /// No embed process is attached here, so the registry-reload call is
+    /// skipped; the file + cache are what survive a Gateway restart.
+    #[tokio::test]
+    async fn add_local_embedding_model_persists_the_entry() {
+        let (state, dir) = state_with_catalog("add-embedding-model", vec![], 7).await;
+
+        // The user hand-edits the catalog after the Gateway started: the file
+        // gains an entry the in-memory cache has never seen. The add must
+        // build on the FILE, not on the stale cache, or that entry is lost.
+        let hand_edited = acowork_core::protocol::EmbeddingModelsFile {
+            version: 7,
+            models: vec![sample_entry("hand-added")],
+        };
+        std::fs::write(
+            dir.join("embedding_models.json"),
+            serde_json::to_string(&hand_edited).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            state
+                .gateway_state
+                .read()
+                .await
+                .resource_cache
+                .embedding_models
+                .models
+                .is_empty(),
+            "precondition: the cache is stale"
+        );
+
+        let status = post_model(
+            state.clone(),
+            serde_json::json!({
+                "id": "custom-bge",
+                "name": "Custom BGE",
+                "hf_repo": "onnx-community/bge-small-zh-v1.5-ONNX",
+                "dimension": 512,
+                "pooling_strategy": "mean",
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+
+        // Cache first — that is what the list endpoint serves.
+        let gw = state.gateway_state.read().await;
+        let cached = gw
+            .resource_cache
+            .embedding_models
+            .models
+            .iter()
+            .find(|m| m.id == "custom-bge")
+            .expect("entry must be in the resource cache");
+        assert_eq!(cached.dimension, 512);
+        assert_eq!(cached.max_tokens, 512, "max_tokens defaults to 512");
+        // Omitted file paths fall back to the standard HF layout.
+        assert_eq!(cached.onnx_file, "onnx/model.onnx");
+        assert_eq!(cached.tokenizer_file, "tokenizer.json");
+        assert_eq!(gw.resource_cache.embedding_models.version, 8);
+        assert_eq!(
+            gw.resource_cache.embedding_models.models.len(),
+            2,
+            "the cache is refreshed from the file, so the hand-added entry shows up too"
+        );
+        drop(gw);
+
+        // And on disk, so it survives a restart — with the hand-edited entry
+        // still there.
+        let raw = std::fs::read_to_string(dir.join("embedding_models.json")).unwrap();
+        let saved: acowork_core::protocol::EmbeddingModelsFile =
+            serde_json::from_str(&raw).unwrap();
+        assert_eq!(saved.version, 8);
+        let ids: Vec<&str> = saved.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["hand-added", "custom-bge"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Input validation: the id becomes the model directory name, and
+    /// `hf_repo` must be `owner/name` (a pasted URL is the frontend's job to
+    /// strip — the server refuses it rather than build an unresolvable URL).
+    #[tokio::test]
+    async fn add_local_embedding_model_rejects_bad_input() {
+        let (state, dir) =
+            state_with_catalog("add-embedding-model-bad", vec![sample_entry("bge")], 1).await;
+        let base = serde_json::json!({
+            "id": "custom-x",
+            "name": "X",
+            "hf_repo": "owner/repo",
+            "dimension": 384,
+        });
+        let with = |key: &str, value: serde_json::Value| {
+            let mut body = base.clone();
+            body[key] = value;
+            body
+        };
+
+        assert_eq!(
+            post_model(state.clone(), with("id", "bge".into())).await,
+            axum::http::StatusCode::CONFLICT,
+            "duplicate of a catalog id"
+        );
+        assert_eq!(
+            post_model(state.clone(), with("id", "../escape".into())).await,
+            axum::http::StatusCode::BAD_REQUEST,
+            "a path-ish id must not reach the filesystem"
+        );
+        assert_eq!(
+            post_model(
+                state.clone(),
+                with("hf_repo", "https://huggingface.co/owner/repo".into())
+            )
+            .await,
+            axum::http::StatusCode::BAD_REQUEST,
+            "a full URL is not a repo id"
+        );
+        assert_eq!(
+            post_model(state.clone(), with("dimension", 0.into())).await,
+            axum::http::StatusCode::BAD_REQUEST
+        );
+
+        // Nothing was written for any of the rejected requests.
+        let raw = std::fs::read_to_string(dir.join("embedding_models.json")).unwrap();
+        let saved: acowork_core::protocol::EmbeddingModelsFile =
+            serde_json::from_str(&raw).unwrap();
+        assert_eq!(saved.models.len(), 1);
+        assert_eq!(saved.version, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
-
-

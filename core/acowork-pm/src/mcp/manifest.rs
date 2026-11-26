@@ -22,7 +22,11 @@
 //!
 //! - **自动注入 actor**：从 MCP 客户端 ID（`X-MCP-Actor` header）注入 `created_by` / `assignee`
 //! - **精简响应**：仅返回 LLM 需要的字段（无 metadata、空 description 字段省略）
-//! - **批量友好**：列表接口默认 `limit=20`，避免一次性返回大量数据撑爆上下文
+//! - **批量友好**：所有列表接口一行最多 20 条（`acowork_core::mcp_page::MAX_PAGE`，
+//!   不可上调），响应统一带 `total/offset/limit/returned/has_more`，被截断时
+//!   额外带 `truncated` + `notice` —— 静默截断会被 LLM 读成"就这么多"
+//! - **列表只回摘要**：正文（任务 description / 提交 result / 活动 text）只走
+//!   单条读取工具，列表里出现大字段就是上下文炸弹
 //!
 //! ## Schema and implementation must be reconciled (the cause of defect D2)
 //!
@@ -42,7 +46,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
   "tools": [
     {
       "name": "pm_list_projects",
-      "description": "List all projects. Returns summary: id, title, status, task counts, and `doc_path` (the project's document-library directory, design 32 §5.5).",
+      "description": "List projects, one page at a time. Returns summary rows: id, title, status, task counts, and `doc_path` (the project's document-library directory, design 32 §5.5). Envelope: {total, offset, limit, returned, has_more, truncated?, notice?, projects[]} — a page is at most 20 rows (10 by default), and `notice` tells you the offset to resume from when there are more.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -50,7 +54,9 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "type": "boolean",
             "description": "Include archived/completed projects (default: false)",
             "default": false
-          }
+          },
+          "offset": { "type": "integer", "minimum": 0, "default": 0 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 10 }
         }
       }
     },
@@ -82,7 +88,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_list_tasks",
-      "description": "The one task query. `project_id` given = inside that project; omitted = across every project, which then REQUIRES at least one narrowing filter (status / assignee / review_status / type / query / parent_task_id / only_roots / only_blocked) and caps `limit` at 50. `assignee` also accepts the sentinel \"me\" (resolved from your own MCP identity — you never need to know your instance id). Rows carry the parent link as `parent_id` (the create/update input is named `parent_task_id`). Returns an envelope, not an array: {total, offset, limit, returned, has_more, tasks[]} — `has_more` is how you know paging is left, since a bare limit hides everything past it. `review_status=pending` is the approval backlog (who is waiting on a human); `order_by`: created_at (default, newest first) | updated_at | due_at (soonest first) | priority (highest first).",
+      "description": "The one task query, returning SUMMARIES. `project_id` given = inside that project; omitted = across every project, which then REQUIRES at least one narrowing filter (status / assignee / review_status / type / query / parent_task_id / only_roots / only_blocked). A page is at most 20 rows (10 by default) in either mode. Each row carries id / project_id / title / type / status / review_status / priority / assignee(+assignee_name) / created_by(+created_by_name) / due_at / depth / parent_id / is_blocked / blocked_by / created_at / updated_at — deliberately NOT the description, the submission result, attachments or depends_on, so a 50-row page stays small; call pm_get_task for a task's full record. `assignee` also accepts the sentinel \"me\" (resolved from your own MCP identity — you never need to know your instance id). Rows carry the parent link as `parent_id` (the create/update input is named `parent_task_id`). Returns an envelope, not an array: {total, offset, limit, returned, has_more, truncated?, notice?, tasks[]} — `has_more` is how you know paging is left, and when the page was capped the response also carries `truncated: true` plus a `notice` naming the offset to resume from. A bare limit silently hides everything past it; this envelope does not. `review_status=pending` is the approval backlog (who is waiting on a human); `order_by`: created_at (default, newest first) | updated_at | due_at (soonest first) | priority (highest first).",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -117,13 +123,13 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "description": "RFC3339 delta filter: only tasks whose updated_at is at or after this instant (\"what changed since my last read\"). Covers task-record rewrites (edits, status, submit/review, attachments); reparent moves and activity comments do not change updated_at and are NOT in this window. Composes with every other filter; an unparseable value returns bad_request."
           },
           "offset": { "type": "integer", "minimum": 0, "default": 0 },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+          "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 10 }
         }
       }
     },
     {
       "name": "pm_get_task",
-      "description": "Get task details including dependency status and depth. `is_blocked` / `blocked_by` are OMITTED when the task is not blocked — absence means unblocked, not unknown.",
+      "description": "Full record of ONE task: description, the last submission result (text + doc_refs + submitted_by/at), attachments, depends_on, dispatch state, plus derived dependency status and depth. `is_blocked` / `blocked_by` are OMITTED when the task is not blocked — absence means unblocked, not unknown.",
       "inputSchema": {
         "type": "object",
         "required": ["task_id"],
@@ -266,7 +272,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_list_agents",
-      "description": "Find the `instance_id` values that `assignee` accepts (ADR-073: a UUID instance id, never a package id like com.acowork.foo). TWO MODES. With `project_id`: returns that project's agent members — the set you may actually assign work to, because the store rejects every other assignee (`assignee_not_project_member`) and the dispatch scanner can only wake an installed agent instance. Omit `project_id`: returns every agent installed on this machine — the set to *invite*, which is wider than any one project's assignable set; use it before pm_add_project_member. Human accounts that belong to the project are NOT listed as assignable (they are reachable through pm_get_project's roster, and assigning them is a Desktop-side action); when any exist the result carries `human_member_count`. `online` is ADR-085 liveness as the Gateway reports it and is informational only: dispatching to an offline agent works, the Gateway starts the target when the intent is delivered. `null` means the directory did not report it, NOT that the agent is down. `name` is the instance's own name (e.g. `SSE.Kevin`) — what a human calls this agent, what the agent calls itself, and the ONLY field that distinguishes several installs of one package; `package_name` (e.g. `SSE`), `agent_id` and `role` are package-level and identical across them. `query` filters on instance name / package_name / role / agent_id, so it drops any row whose metadata is unavailable — omit it to get the complete set. Returns 503 `directory_unavailable` ONLY in the no-project mode when the directory has not finished its first refresh: that is NOT an empty roster, retry shortly instead of concluding there is nobody to dispatch to.",
+      "description": "Find the `instance_id` values that `assignee` accepts (ADR-073: a UUID instance id, never a package id like com.acowork.foo). TWO MODES. With `project_id`: returns that project's agent members — the set you may actually assign work to, because the store rejects every other assignee (`assignee_not_project_member`) and the dispatch scanner can only wake an installed agent instance. Omit `project_id`: returns every agent installed on this machine — the set to *invite*, which is wider than any one project's assignable set; use it before pm_add_project_member. Human accounts that belong to the project are NOT listed as assignable (they are reachable through pm_get_project's roster, and assigning them is a Desktop-side action); when any exist the result carries `human_member_count`. `online` is ADR-085 liveness as the Gateway reports it and is informational only: dispatching to an offline agent works, the Gateway starts the target when the intent is delivered. `null` means the directory did not report it, NOT that the agent is down. `name` is the instance's own name (e.g. `SSE.Kevin`) — what a human calls this agent, what the agent calls itself, and the ONLY field that distinguishes several installs of one package; `package_name` (e.g. `SSE`), `agent_id` and `role` are package-level and identical across them. `query` filters on instance name / package_name / role / agent_id, so it drops any row whose metadata is unavailable — omit it to get the complete set. A page is at most 20 rows (10 by default); the response is an envelope with `total` / `offset` / `returned` / `has_more`, and `truncated` + `notice` (naming the offset to resume from) when the page was capped — a capped roster is NOT the whole roster. Returns 503 `directory_unavailable` ONLY in the no-project mode when the directory has not finished its first refresh: that is NOT an empty roster, retry shortly instead of concluding there is nobody to dispatch to.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -279,7 +285,8 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "type": "string",
             "description": "Case-insensitive substring over the instance name / package_name / role / agent_id. Use it on a large directory instead of paging; it drops rows without directory metadata."
           },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+          "offset": { "type": "integer", "minimum": 0, "default": 0 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 10 }
         }
       }
     },
@@ -318,13 +325,14 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_list_activity",
-      "description": "Read a task's activity stream (submissions, reviews, comments), oldest first. pm_get_task only carries the LAST submission in `result`; the history lives here. Returns the most recent `limit` entries and sets `truncated: true` when older ones were left out — do not treat a truncated page as the whole history.",
+      "description": "Read a task's activity stream (submissions, reviews, comments), oldest first. pm_get_task only carries the LAST submission in `result`; the history lives here. Paging walks BACKWARD from the newest entry: `offset` is how many of the newest entries to skip, a page is at most 20 entries (10 by default), and `truncated` + `notice` say how to read the older ones — do not treat a truncated page as the whole history. Each entry's `text` is cut at 500 characters (flagged `text_truncated` + `text_total_chars` when it happened); the full text of a submission is `pm_get_task().result.text`.",
       "inputSchema": {
         "type": "object",
         "required": ["task_id"],
         "properties": {
           "task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+          "offset": { "type": "integer", "minimum": 0, "default": 0 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 10 }
         }
       }
     },
@@ -362,6 +370,39 @@ pub fn manifest_tools() -> Vec<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+
+    /// 结构闸（§9.3 的护栏）：**任何声明了 `limit` 的工具，都必须是分页形状**
+    /// —— 同时声明 `offset`，且 `limit.maximum` 不超过 `MAX_PAGE`。
+    ///
+    /// 为什么是闸而不是注释：新加一个列表工具时，"记得写 offset、记得封顶"
+    /// 靠人记必然漂移（本 bug 就是这么来的：`pm_list_tasks` 曾经能返回 100 行
+    /// 全量记录）。这条断言把契约钉在 manifest 上，漏了就直接红。
+    #[test]
+    fn every_limited_tool_is_paginated_and_capped() {
+        let v: serde_json::Value = serde_json::from_str(super::PM_TOOL_MANIFEST).unwrap();
+        for tool in v["tools"].as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            let props = tool["inputSchema"]["properties"].as_object().unwrap();
+            let Some(limit) = props.get("limit") else {
+                continue;
+            };
+            assert!(
+                props.contains_key("offset"),
+                "`{name}` takes a limit but cannot resume: declare `offset`"
+            );
+            assert_eq!(
+                limit["maximum"].as_u64(),
+                Some(acowork_core::mcp_page::MAX_PAGE as u64),
+                "`{name}` must cap a page at MAX_PAGE ({}) in its schema",
+                acowork_core::mcp_page::MAX_PAGE
+            );
+            assert_eq!(
+                limit["default"].as_u64(),
+                Some(acowork_core::mcp_page::DEFAULT_PAGE as u64),
+                "`{name}` manifest default must stay in sync with DEFAULT_PAGE"
+            );
+        }
+    }
 
     /// Plan §7 G7: the `type` enum must be **one set across the three
     /// surfaces** (create / update / list-filter) and equal to what the

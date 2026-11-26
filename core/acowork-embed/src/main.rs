@@ -72,7 +72,8 @@ async fn main() {
 
     let state = Arc::new(AppState {
         model: tokio::sync::RwLock::new(None),
-        registry,
+        registry: tokio::sync::RwLock::new(registry),
+        registry_dir: data_dir,
         downloader,
         download_status: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         download_progress: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -119,7 +120,8 @@ async fn bootstrap_default_model(state: Arc<AppState>, model_id: String) {
         "Model not available at startup. Auto-downloading recommended model..."
     );
 
-    let Some(entry) = state.registry.get(&model_id).cloned() else {
+    let registry = state.registry().await;
+    let Some(entry) = registry.get(&model_id).cloned() else {
         state.event_bus.publish_state(BusState::Error {
             message: format!("Model '{model_id}' not found in registry"),
         });
@@ -129,22 +131,20 @@ async fn bootstrap_default_model(state: Arc<AppState>, model_id: String) {
     // Resolve the ONNX file and its external-data weights together; an
     // unresolvable variant is a registry bug, so fail loudly instead of
     // downloading a graph whose weights are missing.
-    let (onnx_file, external_data_files) = match state
-        .registry
-        .resolve_variant(&model_id, &state.onnx_variant)
-    {
-        Some(resolved) => resolved,
-        None => {
-            let supported = state.registry.variants(&model_id).join(", ");
-            state.event_bus.publish_state(BusState::Error {
-                message: format!(
-                    "Unknown ONNX variant '{}' for model '{}' (supported: {supported})",
-                    state.onnx_variant, model_id
-                ),
-            });
-            return;
-        }
-    };
+    let (onnx_file, external_data_files) =
+        match registry.resolve_variant(&model_id, &state.onnx_variant) {
+            Some(resolved) => resolved,
+            None => {
+                let supported = registry.variants(&model_id).join(", ");
+                state.event_bus.publish_state(BusState::Error {
+                    message: format!(
+                        "Unknown ONNX variant '{}' for model '{}' (supported: {supported})",
+                        state.onnx_variant, model_id
+                    ),
+                });
+                return;
+            }
+        };
     let progress = Arc::new(DownloadProgress::new());
     let cancel_flag = std::sync::atomic::AtomicBool::new(false);
 
@@ -239,7 +239,7 @@ async fn bootstrap_default_model(state: Arc<AppState>, model_id: String) {
 }
 
 async fn load_model_into_state(state: Arc<AppState>, model_id: String) {
-    let registry = state.registry.clone();
+    let registry = state.registry().await;
     let models_dir = state.models_dir.clone();
     let model_id_for_load = model_id.clone();
     let load_result = tokio::task::spawn_blocking(move || {

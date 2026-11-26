@@ -88,6 +88,15 @@ pub struct LibraryIndex {
     /// ancestor that sets one; no ancestor sets one = public (design §9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acl: Option<Vec<Ace>>,
+    /// Library icon reference. Only meaningful on top-level nodes (a
+    /// *library*, see [`DirMeta::icon`]); nested directories leave it
+    /// `None`. The value is an opaque UI key — the builtin icon id
+    /// (`icon-07`) today, a custom asset path once uploads land.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Free-text library description. Same top-level-only scope as `icon`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 impl LibraryIndex {
@@ -100,6 +109,8 @@ impl LibraryIndex {
             schema_version: default_schema_version(),
             creator: None,
             acl: None,
+            icon: None,
+            description: None,
         }
     }
 }
@@ -164,6 +175,35 @@ pub struct DirMeta {
     /// and patches this entry so trees stay fresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acl: Option<Vec<Ace>>,
+    /// Library icon reference — display cache, canonical copy on the dir's
+    /// own `library.json`. Only top-level entries (a *library*) carry one;
+    /// a nested directory leaves it `None`. See [`LibraryIndex::icon`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Library description — display cache, same scope as `icon`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl DirMeta {
+    /// Build the parent-side entry for a directory (the `dirs[]` element).
+    pub fn new(
+        dir_id: DirId,
+        name: String,
+        updated_at: DateTime<Utc>,
+        creator: Option<String>,
+    ) -> Self {
+        Self {
+            dir_id,
+            name,
+            updated_at,
+            deleted: false,
+            creator,
+            acl: None,
+            icon: None,
+            description: None,
+        }
+    }
 }
 
 // ── Import source ─────────────────────────────────────────────────────────
@@ -339,6 +379,37 @@ mod tests {
     }
 
     #[test]
+    fn library_metadata_roundtrips_and_is_optional() {
+        let now = fixed_now();
+        let mut idx = LibraryIndex {
+            dir_id: "dir-2001".into(),
+            parent: Some(ROOT_DIR_ID.into()),
+            files: vec![],
+            dirs: vec![],
+            schema_version: 1,
+            creator: Some("u-alice".into()),
+            acl: None,
+            icon: Some("icon-07".into()),
+            description: Some("工程文档".into()),
+        };
+        let json = serde_json::to_string(&idx).unwrap();
+        let back: LibraryIndex = serde_json::from_str(&json).unwrap();
+        assert_eq!(idx, back);
+        assert!(json.contains("\"icon\":\"icon-07\""), "{json}");
+
+        // Pre-library indexes (no icon/description keys) still deserialize.
+        idx.icon = None;
+        idx.description = None;
+        let json = serde_json::to_string(&idx).unwrap();
+        assert!(!json.contains("icon"), "None icon must be omitted: {json}");
+        let back: LibraryIndex = serde_json::from_str(&json).unwrap();
+        assert_eq!(idx, back);
+
+        let entry = DirMeta::new("dir-2001".into(), "研发".into(), now, Some("u-alice".into()));
+        assert!(entry.icon.is_none() && entry.description.is_none());
+    }
+
+    #[test]
     fn library_index_full_matches_design_example() {
         let now = fixed_now();
         let idx = LibraryIndex {
@@ -353,17 +424,17 @@ mod tests {
                 }),
                 now,
             )],
-            dirs: vec![DirMeta {
-                dir_id: "dir-2002".into(),
-                name: "项目A".into(),
-                updated_at: now,
-                deleted: false,
-                creator: None,
-                acl: None,
-            }],
+            dirs: vec![DirMeta::new(
+                "dir-2002".into(),
+                "项目A".into(),
+                now,
+                None,
+            )],
             schema_version: 1,
             creator: None,
             acl: None,
+            icon: None,
+            description: None,
         };
         let json = serde_json::to_string(&idx).unwrap();
         let back: LibraryIndex = serde_json::from_str(&json).unwrap();

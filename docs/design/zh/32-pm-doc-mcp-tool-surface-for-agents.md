@@ -302,11 +302,77 @@ Product / QA / SSE / Architect 四个原生 Bot **只参与、不管理**项目�
 
 ---
 
+## 9. 返回体量与分页策略（v1.11）
+
+### 9.1 问题：工具结果是上下文预算，不是页面
+
+一次 `pm_list_tasks(limit=50)` 直接把 agent 的上下文压到压缩触发线。根因不是"50 条太多"，而是**每条都是全量 `TaskResponse`**：`description` 上限 20000 字符，`result.text`（上一次提交的正文）同样 20000 字符——50 条就是上千 KB。同一类问题在 Doc 侧更极端：`doc_read` 一次回全文，而文档上限是 MB 级；`doc_list` 上限 500 条；`pm_list_activity` 的 `Submitted` 条目带着完整提交正文。
+
+列表工具回答的是"有哪些、什么状态、卡在谁身上"，不是"把库导出来"。
+
+### 9.2 规则（PM 与 Doc 共用一份实现）
+
+单一事实来源：`acowork_core::mcp_page`（`MAX_PAGE` / `MAX_TEXT_CHUNK` / `page_limit` / `paginate` / `text_chunk`）。
+
+| 规则 | 内容 |
+|---|---|
+| R1 页大小 | 所有列表工具一页 **≤ 20 条**（`MAX_PAGE`，**不可上调**——能被要 500 条的工具，迟早会被要 500 条），**默认 10 条**（`DEFAULT_PAGE`：缺省 `limit` 时不花满整个窗口，要更多 LLM 自己翻页 / 显式要，上限仍 20）。单文档正文一页 **≤ 20000 字符**（`MAX_TEXT_CHUNK`，`doc_read` 默认即满窗） |
+| R2 统一信封 | `{total, offset, limit, returned, has_more, truncated?, notice?, <items>}`。`total` 未知（排序检索）时为 `null`，此时满页即视为截断 |
+| R3 截断必须说出来 | 被截断时必带 `truncated: true` + `notice`（含下一个 `offset`）。**静默截断被 LLM 读成"就这么多"**，比不返回更糟 |
+| R4 列表只回摘要 | 大字段（任务 `description`、提交 `result`、活动 `text`）不出现在列表行里；要正文去单条读工具 |
+| R5 摘要用白名单 | 给 `Task` 等结构新增大字段时，列表默认**不会**跟着变大 |
+
+### 9.3 逐工具审视结果
+
+**PM（`core/acowork-pm/src/mcp/`）**
+
+| 工具 | 原状态 | 处置 |
+|---|---|---|
+| `pm_list_tasks` | 每行全量 `TaskResponse`：`description` ≤20k + `result.text` ≤20k；`limit` 项目内上限 100 / 跨项目 50 | 行改为**摘要白名单**（id / project_id / title / type / status / review_status / priority / assignee(+`assignee_name`) / created_by(+`created_by_name`) / due_at / depth / parent_id / is_blocked / blocked_by / created_at / updated_at）；`limit` 默认 10 / 上限 20。agent 字段只回**显示名**（如 `"SSE.Kevin"`）：裸 UUID 在相邻 `assignee`/`created_by`，包级 `agent_id`/`role` 走 `pm_list_agents`，反查名走 `pm_list_agents(query=<name>)`（实例名在同一包多份安装里唯一） |
+| `pm_list_projects` | **裸数组**、无分页、无上限 | 改统一信封 `projects[]` + `offset`/`limit`（默认 10 / 上限 20）——裸数组既不能翻页也不能说明自己被截断 |
+| `pm_list_agents` | 默认 50、无 `offset`、`limit` 可要 200 | 统一信封 `agents[]` + `offset`，默认 10 / 上限 20；`total` 改为**过滤后**统计（原先在 `query` 过滤前算，截断时总数是错的） |
+| `pm_list_activity` | 每条 `text` 全文（提交可达 20k）× 20 条；无 `offset` | 每条正文截 500 字符 + `text_truncated`/`text_total_chars`（全文在 `pm_get_task().result.text`）；支持 `offset`（**从最新往回翻**），默认 10 / 上限 20 |
+| `pm_get_task` | 单条全量 | **保留**：这是详情工具，正文与提交结果只在这里 |
+| `pm_get_project` | 任务计数分拆 + 成员名单（每成员 7 个小字段） | 保留：体量由团队规模决定，不构成风险 |
+| `pm_create_project` / `pm_create_task` / `pm_update_task` / `pm_claim_task` / `pm_submit_task` / `pm_add_activity` / `pm_update_project` / `pm_add_project_member` | 单对象写回 | 保留：调用方刚写的就是它读到的 |
+
+**Doc（`core/acowork-doc/src/mcp/`）**
+
+| 工具 | 原状态 | 处置 |
+|---|---|---|
+| `doc_read` | 一次返回全文，文档上限 MB 级 | 正文按**字符窗口**返回（≤20000，`offset` 可续读），附 `content_chars` / `offset` / `limit`，截断时 `truncated` + `notice`。字符偏移而非字节：UTF-8 字节切片会在多字节字符中间 panic |
+| `doc_list` | 默认 100、上限 500 | 统一信封 `items[]`，默认 10 / 上限 20 |
+| `doc_search` | 上限 100、无 `offset` | 统一信封 `hits[]` + `offset`，默认 10 / 上限 20；`total: null`（检索服务只答"前 N 条"） |
+| `doc_list_requests` | 默认 50、上限 200、无 `offset` | 统一信封 + `offset`，默认 10 / 上限 20 |
+| `doc_list_trash` | 默认 50、上限 200、无 `offset` | 统一信封 + `offset`，默认 10 / 上限 20 |
+| `doc_stat` / `doc_write` / `doc_move` / `doc_remove` / `doc_mkdir` / `doc_rmdir` / `doc_restore` / `doc_check_request` | 元数据或单对象 | 保留：最大的字段是 `path` / `name` |
+
+### 9.4 结构闸：靠断言，不靠记性
+
+策略写在 `mcp_page` 里只是"有地方写"，不会阻止下一个人新加一个不分页的列表工具。所以两个 manifest 测试模块各有一条**结构闸**（`every_limited_tool_is_paginated_and_capped`）：遍历 manifest，**任何声明了 `limit` 的工具**必须
+
+1. 同时声明 `offset`（否则分页不可续读）；
+2. `limit.maximum == MAX_PAGE`（唯一例外 `doc_read`：正文窗口，上限 `MAX_TEXT_CHUNK`）；
+3. `limit.default` 与代码默认一致——列表工具 `== DEFAULT_PAGE`、`doc_read` `== MAX_TEXT_CHUNK`（默认值只由 `mcp_page` 定，manifest 漂移就红）。
+
+没有按工具名做启发式判断——"声明了 limit 就是分页形状"是这个工具面的不变式，漏了就红。默认值同理只由 `mcp_page::page_limit` / `text_limit` 决定，handler 不再各自写 `#[serde(default = ...)]` 常量（两处默认值就是下一次漂移的种子）。
+
+### 9.5 兼容性
+
+- **REST 面不变**：Desktop / 原生面板走 REST，不读 MCP 返回形状。
+- **MCP 面的破坏性变化**（agent 侧按 manifest 自适应，无外部解析方）：
+  1. `pm_list_projects` 由裸数组改为信封（`projects[]`）；
+  2. 各列表的 `limit` 上限统一收紧到 20（原先 50/100/200/500 不等）；
+  3. `doc_read` 对超长文档可能截断（原先永远全文）。
+
+每个列表工具的 manifest description 都写明了信封形状、页大小与 `notice` 的用法——**契约写在工具说明里，而不是只写在这份文档里**：文档会过期，manifest 是 agent 唯一看得到的地方。
+
 ## 10. 变更记录
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v1.0 | 2026-07-08 | 首版定稿：机制 M1–M7、工具面（PM 12→14 + 3 别名 / Doc 9→12）、缺陷 D1–D6、§8 决策全部关闭 |
 | v1.1 | 2026-07-08 | P0 实施期新增 **D7**（成员闸 / 目录存在性校验 / 派工投递目标三层不一致：人类账号可被存为 assignee 却永远派不出去）与 **Q7**（`pm_list_agents` 两种模式的失败语义不对称；`online` 是信息不是闸门）。据此：roster 模式只列 bot 成员 + `human_member_count` 显式上报；不做 bot→human 派工。 |
-| v1.2 | 2026-07-08 | P1 T1-1：`pm_list_tasks` 收敛为唯一任务查询——`project_id` 可选（省略 = 跨项目，须至少一个过滤条件 + 有限 `limit`）、新增 `parent_task_id`/`type`/`review_status`/`query`/`order_by`/`offset`、`assignee` 接受哨兵 `"me"`（服务端按 actor 解析，bot 无需知道自己的 instance id）；返回统一为 `{total,count,tasks,truncated,next_offset}` 信封。`TaskIndex` 随之携带 `type`/`parent_task_id`，全部过滤走内存索引、不做逐项目扫描。 || v1.3 | 2026-07-08 | P1 T1-2：`pm_update_task` 吸收 `parent_task_id`（三态：省略=不动、`null`=提升为根、给 id=改父），结构移动仍走 store 的 reparent 路径（含防环），字段写入与移动在同一调用内完成。`pm_reparent_task` 待 T1-4 转 deprecated 别名。实施期发现：MCP 的任务投影**不含 `children` 字段**——子树只能由 `pm_list_tasks(parent_task_id=…)` 读出，已在测试与本文注明，避免后续误以为可读。 || v1.4 | 2026-07-08 | P1 T1-3：新增 `pm_update_project`（改名 / 描述 / 归档 / 完成），授权沿用 `Project::can_govern`（与 `PATCH /projects/:id` 同一规则，不新建模型）；`status=completed` 触发设计 27 §2.1 T2-a 的任务上下文收尾。为此把 `close_task_contexts` / `provisioner` 从依赖 `ApiState` 改为依赖 `&Option<(String, Option<String>)>`，MCP 面与大 REST 面共用同一实现（同 P0 的 `sync_group_chat` 手法）。空调用（无可改字段）显式报错而非静默 200。工具数 16→17。 || v1.5 | 2026-07-08 | P1 T1-4：`pm_check_task` / `pm_list_my_tasks` / `pm_reparent_task` 转为 **deprecated 别名**——参数翻译后调用**同一个** handler，故返回**逐字节相同**的 JSON（只差两次写入必然不同的 `updated_at`），等价测试按此断言。**旧形状明确废弃**：`pm_check_task` 的扁平评审摘要、`pm_list_my_tasks` 的裸数组、`pm_reparent_task` 的 `{ok:true}` 均不再返回；`pm_check_task` 连带不再单独要求 actor（与 `pm_get_task` 同权限）。manifest 加 `version: 0.2.0`，三个别名 description 前缀 `DEPRECATED — use …`。工具数仍为 17（14 主 + 3 别名）。 || v1.6 | 2026-07-08 | P1 T1-6：状态机转移表上移到 `TaskStatus::legal_successors()` 作为单一事实来源，`validate_transition` 与错误消息同读一张表——`InvalidStateTransition` 现在带 `allowed` 字段，消息形如 `invalid state transition for task t-x: in_progress → done; from in_progress you may go to: pending, submitted, cancelled`；终态（`cancelled`）报 `(none — terminal status)` 而非空列表。理由：bot 无法靠重试猜出状态机，第一次报错就得告诉它合法去向。 || v1.7 | 2026-07-08 | P1 T1-5：21 §4 的 Mermaid 状态机与 `legal_successors()` **逐格核对一致**（含易漏的 `rejected → cancelled`）；21 §6 的工具表**删除**，改为指向本文与 manifest 单一事实来源，只保留三条面向 bot 的不变式——复制出的第二份清单必然漂移（迁移前已缺 `type`/`depends_on`/`only_blocked`，并把别名写成"仅创建者可查"）。**P1 收口**：14 主工具 + 3 别名 = 17。 || v1.8 | 2026-07-08 | P2 完成（Doc 面 9→13）：新增 `doc_list_requests`（默认 `pending` 队列，可按文档过滤，`status=all` 取消过滤）、`doc_list_trash`、`doc_restore`（与 REST 同 `check_trashed` 编辑权；**无 purge**）、`doc_rmdir`。**`doc_rmdir` 语义刻意与 REST 不同**：`DELETE /dirs/{id}` 是级联进回收站，而 bot 面只允许删**空目录**、绝不级联——一个路径写错就把整套信息架构扫走，代价与收益不成比例；非空时报出文档数与子目录数。实施期发现：MCP 测试辅助 `raw()` 每次调用新建临时库，**跨调用状态不存在**（此前测试全是单调用形状），故新增 `shared_router()` / `call_shared()` 才能测多步场景（建目录→列表→删除→恢复）。**未做**：`doc_move` 的目录跨父级移动与 `doc_get_acl`/`doc_set_acl`——`DirMeta` 无 `parent` 字段（父子关系即物理嵌套），跨父移动要整体搬迁子树，属独立特性；ACL 面按设计优先级最低。 || v1.9 | 2026-07-08 | P3 完成：两个 bot 的 `prompts/system.md` 增加工作区契约（pm_*/doc_* 是系统记录，memory 不是）；14 个 skill 各增 `System of Record` 段（PM 侧要求"分解完成=任务已建在服务里"，Doc 侧要求 `if_version`/`pending_review`/trash 语义）；`tool_deps` 校正（`file_write`→`doc_write`、`file_read`→`doc_read`，`document-collection` 保留 `file_read`；伪依赖 `network` → `http_request`/`web_fetch`）；**两个 manifest 补推荐对应 hosted MCP**（PM bot 加 `doc`、Doc bot 加 `pm`）——否则 skill 声明了工具但 server 不存在。范围外的 4 个 bot 已回退，未改。 |
+| v1.2 | 2026-07-08 | P1 T1-1：`pm_list_tasks` 收敛为唯一任务查询——`project_id` 可选（省略 = 跨项目，须至少一个过滤条件 + 有限 `limit`）、新增 `parent_task_id`/`type`/`review_status`/`query`/`order_by`/`offset`、`assignee` 接受哨兵 `"me"`（服务端按 actor 解析，bot 无需知道自己的 instance id）；返回统一为 `{total,count,tasks,truncated,next_offset}` 信封。`TaskIndex` 随之携带 `type`/`parent_task_id`，全部过滤走内存索引、不做逐项目扫描。 || v1.3 | 2026-07-08 | P1 T1-2：`pm_update_task` 吸收 `parent_task_id`（三态：省略=不动、`null`=提升为根、给 id=改父），结构移动仍走 store 的 reparent 路径（含防环），字段写入与移动在同一调用内完成。`pm_reparent_task` 待 T1-4 转 deprecated 别名。实施期发现：MCP 的任务投影**不含 `children` 字段**——子树只能由 `pm_list_tasks(parent_task_id=…)` 读出，已在测试与本文注明，避免后续误以为可读。 || v1.4 | 2026-07-08 | P1 T1-3：新增 `pm_update_project`（改名 / 描述 / 归档 / 完成），授权沿用 `Project::can_govern`（与 `PATCH /projects/:id` 同一规则，不新建模型）；`status=completed` 触发设计 27 §2.1 T2-a 的任务上下文收尾。为此把 `close_task_contexts` / `provisioner` 从依赖 `ApiState` 改为依赖 `&Option<(String, Option<String>)>`，MCP 面与大 REST 面共用同一实现（同 P0 的 `sync_group_chat` 手法）。空调用（无可改字段）显式报错而非静默 200。工具数 16→17。 || v1.5 | 2026-07-08 | P1 T1-4：`pm_check_task` / `pm_list_my_tasks` / `pm_reparent_task` 转为 **deprecated 别名**——参数翻译后调用**同一个** handler，故返回**逐字节相同**的 JSON（只差两次写入必然不同的 `updated_at`），等价测试按此断言。**旧形状明确废弃**：`pm_check_task` 的扁平评审摘要、`pm_list_my_tasks` 的裸数组、`pm_reparent_task` 的 `{ok:true}` 均不再返回；`pm_check_task` 连带不再单独要求 actor（与 `pm_get_task` 同权限）。manifest 加 `version: 0.2.0`，三个别名 description 前缀 `DEPRECATED — use …`。工具数仍为 17（14 主 + 3 别名）。 || v1.6 | 2026-07-08 | P1 T1-6：状态机转移表上移到 `TaskStatus::legal_successors()` 作为单一事实来源，`validate_transition` 与错误消息同读一张表——`InvalidStateTransition` 现在带 `allowed` 字段，消息形如 `invalid state transition for task t-x: in_progress → done; from in_progress you may go to: pending, submitted, cancelled`；终态（`cancelled`）报 `(none — terminal status)` 而非空列表。理由：bot 无法靠重试猜出状态机，第一次报错就得告诉它合法去向。 || v1.7 | 2026-07-08 | P1 T1-5：21 §4 的 Mermaid 状态机与 `legal_successors()` **逐格核对一致**（含易漏的 `rejected → cancelled`）；21 §6 的工具表**删除**，改为指向本文与 manifest 单一事实来源，只保留三条面向 bot 的不变式——复制出的第二份清单必然漂移（迁移前已缺 `type`/`depends_on`/`only_blocked`，并把别名写成"仅创建者可查"）。**P1 收口**：14 主工具 + 3 别名 = 17。 || v1.8 | 2026-07-08 | P2 完成（Doc 面 9→13）：新增 `doc_list_requests`（默认 `pending` 队列，可按文档过滤，`status=all` 取消过滤）、`doc_list_trash`、`doc_restore`（与 REST 同 `check_trashed` 编辑权；**无 purge**）、`doc_rmdir`。**`doc_rmdir` 语义刻意与 REST 不同**：`DELETE /dirs/{id}` 是级联进回收站，而 bot 面只允许删**空目录**、绝不级联——一个路径写错就把整套信息架构扫走，代价与收益不成比例；非空时报出文档数与子目录数。实施期发现：MCP 测试辅助 `raw()` 每次调用新建临时库，**跨调用状态不存在**（此前测试全是单调用形状），故新增 `shared_router()` / `call_shared()` 才能测多步场景（建目录→列表→删除→恢复）。**未做**：`doc_move` 的目录跨父级移动与 `doc_get_acl`/`doc_set_acl`——`DirMeta` 无 `parent` 字段（父子关系即物理嵌套），跨父移动要整体搬迁子树，属独立特性；ACL 面按设计优先级最低。 || v1.11 | 2026-11-26 | 新增 §9「返回体量与分页策略」：一次 `pm_list_tasks(limit=50)` 触发上下文压缩，根因是列表行携带全量 `TaskResponse`（`description` 与 `result.text` 各 ≤20000 字符/条）。据此 PM/Doc 统一策略（`acowork_core::mcp_page`）：列表一页 ≤20 条且不可上调、统一信封 `{total,offset,limit,returned,has_more,truncated?,notice?,items}`、截断必须显式说明、列表行只回摘要（大字段走 `pm_get_task`）、文档正文按 ≤20000 字符窗口分块（`doc_read` 的 `offset` 续读）。逐工具处置见 §9.3。破坏性变化：`pm_list_projects` 裸数组→信封、各列表 `limit` 上限统一 20、`doc_read` 超长文档会截断。 | || v1.12 | 2026-11-26 | §9 细化两条：**默认页 10**（`DEFAULT_PAGE`，缺省 `limit` 不花满窗口，上限仍 `MAX_PAGE`=20；`doc_read` 默认即满窗 `MAX_TEXT_CHUNK`）；**agent 字段只回显示名**（`agent_name_value`：列表行与单条工具统一把 `assignee_meta`/`created_by_meta` 收缩为 `assignee_name`/`created_by_name` 标量，如 `"SSE.Kevin"`）——裸 UUID 在相邻 `assignee`/`created_by`，包级 `agent_id`/`role` 走 `pm_list_agents`，名反查走 `pm_list_agents(query=<name>)`（实例名同一包多份安装里唯一）。单条全量工具（`pm_get_task` 等）一并跟随，口径只留一份。结构闸同步钉 `limit.default == DEFAULT_PAGE`（`doc_read` 钉 `MAX_TEXT_CHUNK`）。破坏性变化：`assignee_name`/`created_by_name` 取代 `*_meta` 对象；缺省列表页从 20 缩��� 10。 |
+| v1.9 | 2026-07-08 | P3 完成：两个 bot 的 `prompts/system.md` 增加工作区契约（pm_*/doc_* 是系统记录，memory 不是）；14 个 skill 各增 `System of Record` 段（PM 侧要求"分解完成=任务已建在服务里"，Doc 侧要求 `if_version`/`pending_review`/trash 语义）；`tool_deps` 校正（`file_write`→`doc_write`、`file_read`→`doc_read`，`document-collection` 保留 `file_read`；伪依赖 `network` → `http_request`/`web_fetch`）；**两个 manifest 补推荐对应 hosted MCP**（PM bot 加 `doc`、Doc bot 加 `pm`）——否则 skill 声明了工具但 server 不存在。范围外的 4 个 bot 已回退，未改。 |
 | v1.10 | 2026-11-11 | 新增 §6.3「其余原生 Bot：参与契约」（Product / QA / SSE / Architect 只参与不管理，边界由 manifest 白名单强制，完整机制指向计划 §3–§4）；§5.5 封闭词表受控修订：补 5 个参与方 area（计划 §6 / 决策 D-2，树由 PM `project-setup` 一次建好、参与方只写文件），并注名代码侧单一事实来源 `acowork_core::doc_layout`（5 个 area 常量 + `project_doc_area`）。另：本文缺 en 版本（`docs/design/en/` 从 31 跳到 33）——独立缺口，见计划 §10。 |

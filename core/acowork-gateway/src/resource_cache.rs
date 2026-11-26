@@ -192,7 +192,12 @@ fn load_mcp_list(data_dir: &Path) -> McpListFile {
 
 
 
-fn load_embedding_models(data_dir: &Path) -> EmbeddingModelsFile {
+/// Read the embedding model catalog from `{data_dir}/embedding_models.json`.
+///
+/// `pub(crate)` because adding a model must edit the file, not the startup
+/// cache: the catalog is user-editable on disk, so a cached copy may be stale
+/// and writing it back would silently revert a hand edit.
+pub(crate) fn load_embedding_models(data_dir: &Path) -> EmbeddingModelsFile {
     let path = embedding_models_path(data_dir);
 
     // 1. data_dir is the user-editable copy (always wins when present).

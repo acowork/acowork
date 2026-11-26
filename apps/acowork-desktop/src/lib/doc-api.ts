@@ -14,6 +14,7 @@ import type {
   ApproveResult,
   CreateDirInput,
   CreateDocInput,
+  CreateLibraryInput,
   DirMeta,
   DocMeta,
   DocRead,
@@ -25,6 +26,7 @@ import type {
   SearchHit,
   TrashEntry,
   UpdateDocInput,
+  UpdateLibraryInput,
   UpdateRequest,
 } from "./doc-types";
 
@@ -112,6 +114,32 @@ export function checkHealth(): Promise<boolean> {
   })
     .then((res) => res.ok)
     .catch(() => false);
+}
+
+// ── 文档库（根目录的直接子节点）──────────────────────────────────────
+
+/** `GET /api/doc/libraries` — 当前用户可见的文档库列表 */
+export function listLibraries(): Promise<DirMeta[]> {
+  return request<{ libraries: DirMeta[] }>("/libraries").then((r) => r.libraries);
+}
+
+/** `POST /api/doc/libraries` — 新建文档库（图标/描述/成员/群主一次收齐） */
+export function createLibrary(input: CreateLibraryInput): Promise<DirMeta> {
+  return request<DirMeta>("/libraries", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** `PATCH /api/doc/libraries/:dir_id` — 改文档库元数据（缺省字段不动，null 清空） */
+export function updateLibrary(
+  dirId: string,
+  input: UpdateLibraryInput,
+): Promise<DirMeta> {
+  return request<DirMeta>(`/libraries/${encodeURIComponent(dirId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
 }
 
 // ── 目录树 ────────────────────────────────────────────────────────────

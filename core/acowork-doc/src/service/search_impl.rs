@@ -189,6 +189,9 @@ mod tests {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "项目A".into(),
                 creator: None,
+            
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();

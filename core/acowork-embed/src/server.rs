@@ -34,7 +34,14 @@ pub struct AppState {
     /// Currently loaded model (None if no model loaded yet).
     pub model: RwLock<Option<Arc<EmbeddingModel>>>,
     /// Model registry.
-    pub registry: ModelRegistry,
+    ///
+    /// Behind a lock because the Gateway can add a user-defined local model at
+    /// runtime (`POST /api/embedding-models`) and then ask this process to
+    /// re-read the file — a plain field would pin the catalog from startup and
+    /// reject the new model on download.
+    pub registry: RwLock<ModelRegistry>,
+    /// Directory `embedding_models.json` was loaded from; the reload source.
+    pub registry_dir: std::path::PathBuf,
     /// Model downloader.
     pub downloader: Downloader,
     /// Download status per model.
@@ -57,6 +64,23 @@ pub struct AppState {
     /// state transitions; the gateway subscribes to learn which model
     /// is loaded and to detect a stuck embed process.
     pub event_bus: EventBus<BusState>,
+}
+
+impl AppState {
+    /// Snapshot of the model registry.
+    ///
+    /// Cloned per request (a handful of entries): a borrow from the lock
+    /// guard would have to live across `await` points in the handlers —
+    /// and the guard must not be held while a registry reload waits for the
+    /// write lock.
+    pub async fn registry(&self) -> ModelRegistry {
+        self.registry.read().await.clone()
+    }
+
+    /// Whether the registry knows this model id (existence checks only).
+    pub async fn has_model(&self, model_id: &str) -> bool {
+        self.registry.read().await.get(model_id).is_some()
+    }
 }
 
 // ── OpenAI API types ────────────────────────────────────────────────────
@@ -332,7 +356,8 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoRespons
     let current_id = model_guard.as_ref().map(|m| m.model_id().to_string());
     drop(model_guard);
 
-    let models = state.registry.models();
+    let registry = state.registry().await;
+    let models = registry.models();
     let data: Vec<ModelEntry> = models
         .iter()
         .map(|m| ModelEntry {
@@ -363,14 +388,14 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoRespons
 
 /// GET /health — Health check.
 pub async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let registry = state.registry().await;
     let model_guard = state.model.read().await;
     let model_info = model_guard.as_ref().map(|m| ModelStatusInfo {
         id: m.model_id().to_string(),
         dimension: m.dimension(),
         pooling: format!(
             "{:?}",
-            state
-                .registry
+            registry
                 .get(m.model_id())
                 .map(|e| &e.pooling_strategy)
                 .unwrap_or(&crate::registry::PoolingStrategy::Cls)
@@ -396,7 +421,8 @@ pub async fn load_model(
     State(state): State<Arc<AppState>>,
     Path(model_id): Path<String>,
 ) -> impl IntoResponse {
-    let entry = match state.registry.get(&model_id) {
+    let registry = state.registry().await;
+    let entry = match registry.get(&model_id) {
         Some(e) => e.clone(),
         None => {
             return (
@@ -513,7 +539,8 @@ pub async fn download_model(
     Path(model_id): Path<String>,
     Json(req): Json<DownloadRequest>,
 ) -> impl IntoResponse {
-    let entry = match state.registry.get(&model_id) {
+    let registry = state.registry().await;
+    let entry = match registry.get(&model_id) {
         Some(e) => e.clone(),
         None => {
             return (
@@ -547,11 +574,10 @@ pub async fn download_model(
     // An unknown variant must be rejected, not silently downgraded to
     // `onnx_file` — that would drop the `*.onnx_data` files and produce a
     // model that downloads cleanly and then fails to load.
-    let (onnx_file, external_data_files) = match state.registry.resolve_variant(&model_id, &variant)
-    {
+    let (onnx_file, external_data_files) = match registry.resolve_variant(&model_id, &variant) {
         Some(resolved) => resolved,
         None => {
-            let supported = state.registry.variants(&model_id).join(", ");
+            let supported = registry.variants(&model_id).join(", ");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -650,7 +676,7 @@ pub async fn cancel_download(
     Path(model_id): Path<String>,
 ) -> impl IntoResponse {
     // Verify model exists in registry
-    if state.registry.get(&model_id).is_none() {
+    if !state.has_model(&model_id).await {
         return (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -697,7 +723,8 @@ pub async fn model_status(
     State(state): State<Arc<AppState>>,
     Path(model_id): Path<String>,
 ) -> impl IntoResponse {
-    let entry = match state.registry.get(&model_id) {
+    let registry = state.registry().await;
+    let entry = match registry.get(&model_id) {
         Some(e) => e,
         None => {
             return (
@@ -764,13 +791,33 @@ pub async fn model_status(
     .into_response()
 }
 
+/// POST /models/reload — re-read `embedding_models.json` from disk.
+///
+/// The Gateway writes a user-added local model into that file and calls this.
+/// Without it the process would only ever know the catalog it started with,
+/// and the new model's download would 404 on a registry entry that exists on
+/// disk. Reloading beats restarting: a restart drops the loaded model and
+/// interrupts an in-flight embedding pass.
+pub async fn reload_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let reloaded = ModelRegistry::load(&state.registry_dir);
+    let model_count = reloaded.models().len();
+    *state.registry.write().await = reloaded;
+    tracing::info!(model_count, "Model registry reloaded from disk");
+    Json(serde_json::json!({
+        "status": "reloaded",
+        "model_count": model_count,
+    }))
+    .into_response()
+}
+
 /// GET /models — Extended model list with status (non-OpenAI).
 pub async fn list_models_detail(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let model_guard = state.model.read().await;
     let loaded_id = model_guard.as_ref().map(|m| m.model_id().to_string());
     drop(model_guard);
 
-    let models = state.registry.models();
+    let registry = state.registry().await;
+    let models = registry.models();
     let mut infos = Vec::with_capacity(models.len());
     for entry in models {
         let status = if loaded_id.as_deref() == Some(entry.id.as_str()) {
@@ -814,7 +861,7 @@ pub async fn delete_model(
     Path(model_id): Path<String>,
 ) -> impl IntoResponse {
     // Verify model exists in registry
-    if state.registry.get(&model_id).is_none() {
+    if !state.has_model(&model_id).await {
         return (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -1002,6 +1049,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/events", get(events))
         // Management endpoints
         .route("/models", get(list_models_detail))
+        .route("/models/reload", post(reload_registry))
         .route("/models/{id}/load", post(load_model))
         .route("/models/{id}/download", post(download_model))
         .route("/models/{id}/cancel-download", post(cancel_download))
@@ -1030,7 +1078,8 @@ mod tests {
         let event_bus = EventBus::new(16);
         let state = Arc::new(AppState {
             model: RwLock::new(None),
-            registry: ModelRegistry::load(dir.path()),
+            registry: RwLock::new(ModelRegistry::load(dir.path())),
+            registry_dir: dir.path().to_path_buf(),
             downloader: Downloader::new(dir.path(), vec![]),
             download_status: RwLock::new(Default::default()),
             download_progress: RwLock::new(Default::default()),
@@ -1061,6 +1110,78 @@ mod tests {
         assert!(
             drained.is_ok(),
             "SSE stream must terminate after shutdown is requested"
+        );
+    }
+/// Regression test: a model added to `embedding_models.json` after the
+    /// process started must become usable via `POST /models/reload`.
+    ///
+    /// The Gateway's add-model endpoint writes the file and then calls this —
+    /// without it, the model is listed in the harness but every download 404s
+    /// with "not found in registry", because the registry was loaded once at
+    /// startup.
+    #[tokio::test]
+    async fn reload_picks_up_a_model_added_after_startup() {
+        use tower::util::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("embedding_models.json"),
+            r#"{"version": 1, "models": []}"#,
+        )
+        .unwrap();
+        let state = Arc::new(AppState {
+            model: RwLock::new(None),
+            registry: RwLock::new(ModelRegistry::load(dir.path())),
+            registry_dir: dir.path().to_path_buf(),
+            downloader: Downloader::new(dir.path(), vec![]),
+            download_status: RwLock::new(Default::default()),
+            download_progress: RwLock::new(Default::default()),
+            shutdown: Shutdown::new(),
+            models_dir: dir.path().to_path_buf(),
+            onnx_variant: "fp32".to_string(),
+            default_model: None,
+            download_cancel_flags: RwLock::new(Default::default()),
+            event_bus: EventBus::new(4),
+        });
+        assert!(state.registry().await.get("custom-model").is_none());
+
+        // What the Gateway does: append the entry, write the file, then reload.
+        std::fs::write(
+            dir.path().join("embedding_models.json"),
+            r#"{"version": 2, "models": [{
+                "id": "custom-model",
+                "name": "Custom",
+                "dimension": 384,
+                "max_tokens": 512,
+                "size_mb": 0,
+                "hf_repo": "owner/custom-onnx",
+                "pooling_strategy": "mean",
+                "onnx_file": "onnx/model.onnx",
+                "tokenizer_file": "tokenizer.json"
+            }]}"#,
+        )
+        .unwrap();
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/models/reload")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let registry = state.registry().await;
+        let entry = registry.get("custom-model").expect("reloaded entry");
+        assert_eq!(entry.dimension, 384);
+        assert_eq!(
+            registry.resolve_variant("custom-model", "fp32"),
+            Some(("onnx/model.onnx".to_string(), vec![])),
+            "a custom entry has no variant map, so fp32 must resolve to onnx_file"
         );
     }
 }

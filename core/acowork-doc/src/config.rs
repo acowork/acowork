@@ -157,8 +157,20 @@ impl DocConfig {
 mod tests {
     use super::*;
 
+    /// `default_data_dir()` reads process-global env vars, and
+    /// `app_data_dir_env_wins_over_legacy` mutates them. Cargo runs tests in
+    /// parallel threads, so without a lock that test's `set_var` window lands
+    /// inside this test's `DocConfig::default()` and the data-dir assertion
+    /// flakes. One lock around every test that reads or writes those vars.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn defaults_are_sane() {
+        let _g = env_guard();
         let cfg = DocConfig::default();
         assert!(cfg.enabled);
         assert_eq!(cfg.port, 18081);
@@ -204,6 +216,7 @@ mod tests {
 
     #[test]
     fn app_data_dir_env_wins_over_legacy() {
+        let _g = env_guard();
         // Hosted-app clones must not share ~/.acowork/acowork-doc with the
         // built-in instance. ACOWORK_APP_DATA_DIR is the supervisor contract.
         let prev_app = std::env::var_os("ACOWORK_APP_DATA_DIR");

@@ -34,6 +34,7 @@ import {
 import { cn } from "../../lib/utils";
 import { boardPageBounds, boardPageSlice } from "../../lib/pm-board-settings";
 import { COUNT_BADGE_BASE_CN } from "../../components/common/sidebarCountBadge";
+import { STATUS_PILL_CLASS } from "./taskListLabels";
 import type { PmTaskResponse, TaskStatus } from "../../lib/pm-types";
 
 interface KanbanColumnProps {
@@ -151,6 +152,10 @@ export function KanbanColumn({
     getItemKey: (index) => flatRows[index].task.id,
   });
 
+  // 列头计数胶囊穿状态色 —— 与列表模式的状态胶囊同一套 token（STATUS_PILL_CLASS），
+  // 四列一眼看出是哪种状态；白字靠 `--color-pill-*` 的加深档。
+  const countBadge = cn(COUNT_BADGE_BASE_CN, STATUS_PILL_CLASS[status], "text-white");
+
   return (
     <section
       ref={setNodeRef}
@@ -196,14 +201,7 @@ export function KanbanColumn({
             <h3 className="min-w-0 flex-1 truncate text-11 font-medium text-text-secondary ">
               {t(i18nKey)}
             </h3>
-            <span
-              className={cn(
-                COUNT_BADGE_BASE_CN,
-                status === "submitted"
-                  ? "bg-warning-surface-hover text-warning-quiet"
-                  : "bg-surface-hover text-text-secondary ",
-              )}
-            >
+            <span className={countBadge}>
               {tasks.length}
             </span>
           </button>
@@ -212,14 +210,7 @@ export function KanbanColumn({
             <h3 className="min-w-0 flex-1 truncate text-11 font-medium text-text-secondary ">
               {t(i18nKey)}
             </h3>
-            <span
-              className={cn(
-                COUNT_BADGE_BASE_CN,
-                status === "submitted"
-                  ? "bg-warning-surface-hover text-warning-quiet"
-                  : "bg-surface-hover text-text-secondary ",
-              )}
-            >
+            <span className={countBadge}>
               {tasks.length}
             </span>
           </>

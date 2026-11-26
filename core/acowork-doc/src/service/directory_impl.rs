@@ -7,8 +7,10 @@ use chrono::{DateTime, Utc};
 use tokio::fs;
 
 use crate::error::{DocError, Result};
-use crate::path::{validate_doc_name, validate_dir_id};
-use crate::service::directory::{CreateDirectoryInput, DirectoryService};
+use crate::path::{validate_doc_name, validate_dir_id, validate_library_description, validate_library_icon};
+use crate::service::directory::{
+    CreateDirectoryInput, DirectoryService, UpdateDirectoryMeta,
+};
 use crate::store::library::LibraryStore;
 use crate::store::trash::TrashStore;
 use crate::types::{
@@ -50,6 +52,26 @@ impl DirectoryService for LibraryDirectoryService {
     async fn create(&self, input: CreateDirectoryInput) -> Result<DirMeta> {
         validate_dir_id(&input.parent_dir_id)?;
         validate_doc_name(&input.name)?;
+        if let Some(icon) = input.icon.as_deref() {
+            validate_library_icon(icon)?;
+        }
+        if let Some(description) = input.description.as_deref() {
+            validate_library_description(description)?;
+        }
+        // Icon / description are library-only metadata: a nested directory
+        // accepting them would be a second, contradictory meaning for the
+        // same fields.
+        let is_library = input.parent_dir_id == ROOT_DIR_ID;
+        let (icon, description) = if is_library {
+            (input.icon.clone(), input.description.clone())
+        } else {
+            if input.icon.is_some() || input.description.is_some() {
+                return Err(DocError::BadRequest(String::from(
+                    "icon/description are only valid on top-level libraries",
+                )));
+            }
+            (None, None)
+        };
         let mut parent_idx = self.store.load(&input.parent_dir_id).await?;
         if parent_idx.dirs.iter().any(|d| !d.deleted && d.name == input.name) {
             return Err(DocError::NameConflict(input.name));
@@ -67,43 +89,37 @@ impl DirectoryService for LibraryDirectoryService {
             // Design §9: creator lives on the directory's own index.
             creator: input.creator.clone(),
             acl: None,
+            icon: icon.clone(),
+            description: description.clone(),
         };
         self.store.save(&fresh).await?;
         // Patch parent.
         let now = self.now();
-        parent_idx.dirs.push(DirMeta {
-            dir_id: dir_id.clone(),
-            name: input.name.clone(),
-            updated_at: now,
-            deleted: false,
+        let mut entry = DirMeta::new(
+            dir_id.clone(),
+            input.name.clone(),
+            now,
             // Design §9 display cache mirrored on the parent entry so tree
             // responses carry ACL state without extra per-child loads.
-            creator: input.creator.clone(),
-            acl: None,
-        });
+            input.creator.clone(),
+        );
+        entry.icon = icon;
+        entry.description = description;
+        parent_idx.dirs.push(entry.clone());
         self.store.save(&parent_idx).await?;
         crate::mqtt_publisher::notify_tree_changed(vec![input.parent_dir_id]);
-        Ok(DirMeta {
-            dir_id,
-            name: input.name,
-            updated_at: now,
-            deleted: false,
-            creator: input.creator,
-            acl: None,
-        })
+        Ok(entry)
     }
 
     async fn read(&self, dir_id: &str) -> Result<DirMeta> {
         validate_dir_id(dir_id)?;
         if dir_id == ROOT_DIR_ID {
-            return Ok(DirMeta {
-                dir_id: ROOT_DIR_ID.to_string(),
-                name: ROOT_DIR_ID.to_string(),
-                updated_at: self.now(),
-                deleted: false,
-                creator: None,
-                acl: None,
-            });
+            return Ok(DirMeta::new(
+                ROOT_DIR_ID.to_string(),
+                ROOT_DIR_ID.to_string(),
+                self.now(),
+                None,
+            ));
         }
         // Load the directory's own `library.json` to find its `parent`
         // (avoids reverse-engineering parent from the filesystem path,
@@ -154,13 +170,50 @@ impl DirectoryService for LibraryDirectoryService {
                 "cannot rename root directory",
             )));
         }
-        let dir_path = self.store.dir_path(dir_id)?;
-        let _ = dir_path; // parent_id comes from the index, not the filesystem
-        let self_idx = self.store.load(dir_id).await?;
+        self.update_meta(
+            dir_id,
+            UpdateDirectoryMeta {
+                name: Some(new_name.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    async fn update_meta(
+        &self,
+        dir_id: &str,
+        patch: UpdateDirectoryMeta,
+    ) -> Result<DirMeta> {
+        validate_dir_id(dir_id)?;
+        if dir_id == ROOT_DIR_ID {
+            return Err(DocError::BadRequest(String::from(
+                "cannot modify root directory metadata",
+            )));
+        }
+        if let Some(name) = patch.name.as_deref() {
+            validate_doc_name(name)?;
+        }
+        if let Some(Some(icon)) = &patch.icon {
+            validate_library_icon(icon)?;
+        }
+        if let Some(Some(description)) = &patch.description {
+            validate_library_description(description)?;
+        }
+        let mut self_idx = self.store.load(dir_id).await?;
         let parent_id = self_idx
             .parent
             .clone()
             .unwrap_or_else(|| ROOT_DIR_ID.to_string());
+        // Library-only fields (icon / description / owner) exist on
+        // top-level nodes; a nested directory must not grow them.
+        if parent_id != ROOT_DIR_ID
+            && (patch.icon.is_some() || patch.description.is_some() || patch.owner.is_some())
+        {
+            return Err(DocError::BadRequest(String::from(
+                "icon/description/owner are only valid on top-level libraries",
+            )));
+        }
         let mut parent_idx = self.store.load(&parent_id).await?;
         let exists = parent_idx
             .dirs
@@ -169,12 +222,14 @@ impl DirectoryService for LibraryDirectoryService {
         if !exists {
             return Err(DocError::DirNotFound(dir_id.to_string()));
         }
-        let dup = parent_idx
-            .dirs
-            .iter()
-            .any(|d| d.dir_id != dir_id && !d.deleted && d.name == new_name);
-        if dup {
-            return Err(DocError::NameConflict(new_name.into()));
+        if let Some(name) = patch.name.as_deref() {
+            let dup = parent_idx
+                .dirs
+                .iter()
+                .any(|d| d.dir_id != dir_id && !d.deleted && d.name == name);
+            if dup {
+                return Err(DocError::NameConflict(name.into()));
+            }
         }
         // Now we can take a mut borrow safely.
         let entry = parent_idx
@@ -182,13 +237,44 @@ impl DirectoryService for LibraryDirectoryService {
             .iter_mut()
             .find(|d| d.dir_id == dir_id && !d.deleted)
             .expect("checked exists above");
-        if entry.name == new_name {
+        let mut changed = false;
+        if let Some(name) = patch.name
+            && entry.name != name
+        {
+            entry.name = name;
+            changed = true;
+        }
+        if let Some(icon) = patch.icon
+            && entry.icon != icon
+        {
+            entry.icon = icon.clone();
+            self_idx.icon = icon;
+            changed = true;
+        }
+        if let Some(description) = patch.description
+            && entry.description != description
+        {
+            entry.description = description.clone();
+            self_idx.description = description;
+            changed = true;
+        }
+        if let Some(owner) = patch.owner
+            && entry.creator.as_deref() != Some(owner.as_str())
+        {
+            entry.creator = Some(owner.clone());
+            self_idx.creator = Some(owner);
+            changed = true;
+        }
+        if !changed {
             return Ok(entry.clone());
         }
-        entry.name = new_name.to_string();
         entry.updated_at = self.now();
         let updated = entry.clone();
         self.store.save(&parent_idx).await?;
+        // The canonical copy of icon / description / creator lives on the
+        // node's own index; write both so a later tree read and a later
+        // permissions read cannot disagree.
+        self.store.save(&self_idx).await?;
         crate::mqtt_publisher::notify_tree_changed(vec![parent_id]);
         Ok(updated)
     }
@@ -398,6 +484,8 @@ mod tests {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "A".into(),
                 creator: None,
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();
@@ -417,6 +505,8 @@ mod tests {
             parent_dir_id: ROOT_DIR_ID.into(),
             name: "dup".into(),
             creator: None,
+            icon: None,
+            description: None,
         })
         .await
         .unwrap();
@@ -425,6 +515,8 @@ mod tests {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "dup".into(),
                 creator: None,
+                icon: None,
+                description: None,
             })
             .await
             .unwrap_err();
@@ -441,6 +533,8 @@ mod tests {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "x".into(),
                 creator: None,
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();
@@ -456,6 +550,8 @@ mod tests {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "A".into(),
                 creator: None,
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();
@@ -493,6 +589,8 @@ mod tests {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "old".into(),
                 creator: None,
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();
@@ -517,6 +615,8 @@ mod tests {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "研发".into(),
                 creator: None,
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();
@@ -526,6 +626,8 @@ mod tests {
                 parent_dir_id: a.dir_id.clone(),
                 name: "会议".into(),
                 creator: None,
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();
@@ -543,6 +645,8 @@ mod tests {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "孤儿".into(),
                 creator: None,
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();
@@ -564,6 +668,8 @@ mod tests {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "bye".into(),
                 creator: None,
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();

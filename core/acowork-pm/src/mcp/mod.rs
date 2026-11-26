@@ -2437,9 +2437,9 @@ mod tests {
         );
     }
 
-    /// e2e：所有任务/项目返回都附 `assignee_meta` / `created_by_meta`，
+    /// e2e：所有任务/项目返回都附 `assignee_name` / `created_by_name`，
     /// 让 LLM 在 `pm_list_tasks` / `pm_list_projects` 等列表接口中能用
-    /// `*_meta.name` 识别谁是谁（不需要反查 members）。
+    /// `*_name` 直接识别谁是谁（不需要反查 members；包级细节走 pm_list_agents）。
     ///
     /// 覆盖的接口：`pm_list_projects` / `pm_list_tasks` / `pm_get_task`
     /// / `pm_create_project`。
@@ -2470,14 +2470,9 @@ mod tests {
             .await
             .unwrap();
 
-        // pm_create_project 返回值带 created_by_meta
+        // pm_create_project 返回值带 created_by_name（裸 UUID 在 created_by，name 给人看）
         assert_eq!(proj["created_by"], creator);
-        assert_eq!(proj["created_by_meta"]["instance_id"], creator);
-        assert_eq!(
-            proj["created_by_meta"]["agent_id"],
-            "com.acowork.senior-engineer"
-        );
-        assert_eq!(proj["created_by_meta"]["name"], "Senior Engineer");
+        assert_eq!(proj["created_by_name"], "Senior Engineer");
 
         let v = call_tool(
             &router,
@@ -2490,15 +2485,14 @@ mod tests {
         let task = tool_text(&v);
         let tid = task["id"].as_str().unwrap().to_string();
 
-        // pm_create_task 返回值带 assignee_meta + created_by_meta
+        // pm_create_task 返回值带 assignee_name + created_by_name
+        // （裸 UUID 在 assignee / created_by，meta 只给"这是谁"，不含 UUID/包名）
         assert_eq!(task["assignee"], worker);
-        assert_eq!(task["assignee_meta"]["instance_id"], worker);
-        assert_eq!(task["assignee_meta"]["agent_id"], "com.acowork.architect");
-        assert_eq!(task["assignee_meta"]["name"], "Architect");
+        assert_eq!(task["assignee_name"], "Architect");
         assert_eq!(task["created_by"], creator);
-        assert_eq!(task["created_by_meta"]["name"], "Senior Engineer");
+        assert_eq!(task["created_by_name"], "Senior Engineer");
 
-        // pm_get_task 同样带 _meta
+        // pm_get_task 同样带 *_name
         let v = call_tool(
             &router,
             Some(creator),
@@ -2508,10 +2502,10 @@ mod tests {
         )
         .await;
         let t = tool_text(&v);
-        assert_eq!(t["assignee_meta"]["name"], "Architect");
-        assert_eq!(t["created_by_meta"]["name"], "Senior Engineer");
+        assert_eq!(t["assignee_name"], "Architect");
+        assert_eq!(t["created_by_name"], "Senior Engineer");
 
-        // pm_list_tasks：每条都带 _meta
+        // pm_list_tasks：每条都带 *_name
         let v = call_tool(
             &router,
             Some(creator),
@@ -2526,23 +2520,23 @@ mod tests {
             .expect("list_tasks returns an envelope")
             .clone();
         assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0]["assignee_meta"]["name"], "Architect");
-        assert_eq!(tasks[0]["created_by_meta"]["name"], "Senior Engineer");
+        assert_eq!(tasks[0]["assignee_name"], "Architect");
+        assert_eq!(tasks[0]["created_by_name"], "Senior Engineer");
         // 同时原 String 字段保留不变（前端 join agentStore 用）
         assert_eq!(tasks[0]["assignee"], worker);
         assert_eq!(tasks[0]["created_by"], creator);
 
-        // pm_list_projects：每个 project 带 created_by_meta
+        // pm_list_projects：每个 project 带 created_by_name
         let v = call_tool(&router, Some(creator), 104, "pm_list_projects", json!({})).await;
         let list_projects_text = tool_text(&v);
-        let projs = list_projects_text.as_array().unwrap();
+        let projs = list_projects_text["projects"].as_array().unwrap();
         assert!(
             projs
                 .iter()
-                .any(|p| p["created_by_meta"]["name"] == "Senior Engineer")
+                .any(|p| p["created_by_name"] == "Senior Engineer")
         );
 
-        // pm_list_tasks(assignee="me")（worker 自查）：assignee_meta 是自己，created_by_meta 是 creator
+        // pm_list_tasks(assignee="me")（worker 自查）：assignee_name 是自己，created_by_name 是 creator
         let v = call_tool(
             &router,
             Some(worker),
@@ -2555,10 +2549,10 @@ mod tests {
         let my = my_text["tasks"].as_array().unwrap();
         assert_eq!(my.len(), 1);
         assert_eq!(my[0]["assignee"], worker);
-        assert_eq!(my[0]["assignee_meta"]["name"], "Architect");
-        assert_eq!(my[0]["created_by_meta"]["name"], "Senior Engineer");
+        assert_eq!(my[0]["assignee_name"], "Architect");
+        assert_eq!(my[0]["created_by_name"], "Senior Engineer");
 
-        // pm_get_task（creator 自查）：带 created_by_meta
+        // pm_get_task（creator 自查）：带 created_by_name
         let v = call_tool(
             &router,
             Some(creator),
@@ -2569,10 +2563,10 @@ mod tests {
         .await;
         let ct = tool_text(&v);
         assert_eq!(ct["created_by"], creator);
-        assert_eq!(ct["created_by_meta"]["name"], "Senior Engineer");
+        assert_eq!(ct["created_by_name"], "Senior Engineer");
     }
 
-    /// e2e：未在 agent_dir 里的 instance_id / `"human"` 创建者 → `_meta` 为 null，
+    /// e2e：未在 agent_dir 里的 instance_id / `"human"` 创建者 → `*_name` 为 null，
     /// 不阻塞返回。LLM 拿到 null 时知道元信息暂不可用但仍能拿到 raw ID。
     ///
     /// 用 `MapAgentDirectory` 注入"存在但无元信息"的代理（`agent_exists`
@@ -2594,7 +2588,7 @@ mod tests {
         }
         let (router, store) = test_router_store_with_dir(Arc::new(ExistsButNoMetaDirectory)).await;
 
-        // 人类创建（actor = "human"）：created_by_meta 应该为 null
+        // 人类创建（actor = "human"）：created_by_name 应该为 null
         let v = call_tool(
             &router,
             Some("human"),
@@ -2606,14 +2600,14 @@ mod tests {
         let proj = tool_text(&v);
         let pid_str = proj["id"].as_str().unwrap().to_string();
         let pid: ProjectId = pid_str.parse().unwrap();
-        assert!(proj["created_by_meta"].is_null(), "human creator → null");
+        assert!(proj["created_by_name"].is_null(), "human creator → null");
         // 加 ghost 为成员（assignee 必须是成员）
         store
             .add_project_member(&pid, ghost, crate::types::MemberKind::Agent)
             .await
             .unwrap();
 
-        // 已知存在但元信息为 null 的 instance → assignee_meta 也为 null
+        // 已知存在但显示名为 null 的 instance → assignee_name 也为 null
         let v = call_tool(
             &router,
             Some("human"),
@@ -2624,12 +2618,12 @@ mod tests {
         .await;
         let task = tool_text(&v);
         assert_eq!(task["assignee"], ghost);
-        assert!(task["assignee_meta"].is_null(), "no meta → null");
-        // created_by_meta 仍是 null（"human" 不在 agent_dir）
-        assert!(task["created_by_meta"].is_null());
+        assert!(task["assignee_name"].is_null(), "no meta → null");
+        // created_by_name 仍是 null（"human" 不在 agent_dir）
+        assert!(task["created_by_name"].is_null());
     }
 
-    /// e2e：`"human"` 保留创建者哨兵短路——`lookup_agent_meta` / 批量查询
+    /// e2e：`"human"` 保留创建者哨兵短路——agent 名称查表 / 批量查询
     /// 对 `"human"` **不发起**任何 `agent_info` 查询（否则每次项目列表/详情
     /// 都会对 Gateway 白打一次 `/api/agents/human`）。
     ///
@@ -2676,7 +2670,7 @@ mod tests {
         .await;
         let proj = tool_text(&v);
         let pid_str = proj["id"].as_str().unwrap().to_string();
-        assert!(proj["created_by_meta"].is_null());
+        assert!(proj["created_by_name"].is_null());
         assert!(
             queried.lock().unwrap().is_empty(),
             "human create_project → no agent lookup"
@@ -2702,7 +2696,7 @@ mod tests {
         )
         .await;
         let task = tool_text(&v);
-        assert!(task["created_by_meta"].is_null());
+        assert!(task["created_by_name"].is_null());
         {
             let q = queried.lock().unwrap();
             assert_eq!(
@@ -2943,7 +2937,7 @@ mod tests {
         // include_archived=false（默认）：归档项目不出现
         let v = call_tool(&router, None, 77, "pm_list_projects", json!({})).await;
         let projs = tool_text(&v);
-        let titles: Vec<&str> = projs
+        let titles: Vec<&str> = projs["projects"]
             .as_array()
             .unwrap()
             .iter()
@@ -2965,7 +2959,7 @@ mod tests {
         .await;
         let projs = tool_text(&v);
         assert!(
-            projs
+            projs["projects"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -3126,7 +3120,7 @@ mod tests {
         )
         .await;
         let got = tool_text(&v);
-        assert_eq!(got["count"], 1, "role substring should match one: {got}");
+        assert_eq!(got["returned"], 1, "role substring should match one: {got}");
         assert_eq!(
             got["agents"][0]["instance_id"],
             "11111111-1111-4111-8111-111111111111"
@@ -3222,7 +3216,7 @@ mod tests {
         .await;
         let got_q = tool_text(&v);
         assert_eq!(
-            got_q["count"], 1,
+            got_q["returned"], 1,
             "the instance name is searchable: {got_q}"
         );
         assert_eq!(got_q["agents"][0]["instance_id"], kevin);
@@ -3326,7 +3320,7 @@ mod tests {
         .await;
         let got = tool_text(&v);
         assert_eq!(got["mode"], "project_members", "{got}");
-        assert_eq!(got["count"], 2, "owner + invited engineer: {got}");
+        assert_eq!(got["returned"], 2, "owner + invited engineer: {got}");
         let ids: Vec<&str> = got["agents"]
             .as_array()
             .unwrap()
@@ -3391,7 +3385,7 @@ mod tests {
         assert!(v["error"].is_null(), "roster mode must not 503: {v}");
         let got = tool_text(&v);
         assert_eq!(got["directory_available"], false, "{got}");
-        assert_eq!(got["count"], 1, "{got}");
+        assert_eq!(got["returned"], 1, "{got}");
         assert!(
             got["agents"][0]["instance_id"].is_string(),
             "the id is still usable even with no metadata: {got}"
@@ -3847,7 +3841,7 @@ mod tests {
         //    human anywhere in this test.
         let v = call_tool(&router, Some("pm-inst"), 2, "pm_list_projects", json!({})).await;
         let projects = tool_text(&v);
-        let pid = projects
+        let pid = projects["projects"]
             .as_array()
             .unwrap()
             .iter()
@@ -3883,7 +3877,7 @@ mod tests {
         .await;
         let found = tool_text(&v);
         assert_eq!(
-            found["count"], 1,
+            found["returned"], 1,
             "role query should find the engineer: {found}"
         );
         let target = found["agents"][0]["instance_id"]
@@ -4032,7 +4026,7 @@ mod tests {
 
         let v = call_tool(&router, Some("pm-a"), 3, "pm_list_projects", json!({})).await;
         let listed = tool_text(&v);
-        let row = listed
+        let row = listed["projects"]
             .as_array()
             .unwrap()
             .iter()
@@ -4091,6 +4085,198 @@ mod tests {
         )
         .await;
         assert_eq!(v["error"]["code"].as_i64(), None, "filtered: {v}");
+    }
+
+    /// 统一分页策略：一行最多 20 条，`limit` 上调无效，被截断时响应用
+    /// `truncated` + `notice` 明说"还有下一页、从哪个 offset 继续"。
+    /// 静默截断会被 LLM 当成"就这么多"。
+    #[tokio::test]
+    async fn list_projects_pages_at_twenty_and_says_so() {
+        let (router, store) = test_router_and_store().await;
+        let actor = "pager";
+        for i in 0..25 {
+            let v = call_tool(
+                &router,
+                Some(actor),
+                i,
+                "pm_create_project",
+                json!({ "title": format!("P{i}") }),
+            )
+            .await;
+            assert!(v["error"].is_null(), "create project {i}: {v}");
+        }
+        let _ = &store;
+
+        // 调用方要 50 条：仍然只有 20 条，而且明说被截断。
+        let v = call_tool(
+            &router,
+            Some(actor),
+            100,
+            "pm_list_projects",
+            json!({ "limit": 50 }),
+        )
+        .await;
+        let first = tool_text(&v);
+        assert_eq!(first["total"], 25);
+        assert_eq!(first["limit"], 20, "limit must be capped at 20: {first}");
+        assert_eq!(first["returned"], 20);
+        assert_eq!(first["has_more"], true);
+        assert_eq!(first["truncated"], true);
+        assert!(
+            first["notice"].as_str().unwrap().contains("offset=20"),
+            "the notice must say where to resume: {first}"
+        );
+
+        // 第二页：剩下的 5 条，不再标记截断。
+        let v = call_tool(
+            &router,
+            Some(actor),
+            101,
+            "pm_list_projects",
+            json!({ "offset": 20 }),
+        )
+        .await;
+        let second = tool_text(&v);
+        assert_eq!(second["returned"], 5);
+        assert_eq!(second["has_more"], false);
+        assert!(second.get("truncated").is_none(), "{second}");
+    }
+
+    /// 活动流里的 `Submitted` 条目带着完整提交记录：列表只回 500 字符片段
+    /// 并标记截断，全文仍在 `pm_get_task().result.text`。
+    #[tokio::test]
+    async fn list_activity_snippets_long_text() {
+        let (router, store) = test_router_and_store().await;
+        let actor = "activity-eng";
+        let pid = project_with_owner(&router, actor, "Activity").await;
+        let tid = create_task(
+            &router,
+            actor,
+            2,
+            json!({ "project_id": pid, "title": "t", "assignee": actor }),
+        )
+        .await;
+        approve_task(&store, &tid).await;
+        call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_submit_task",
+            json!({ "task_id": tid, "text": "R".repeat(5_000) }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "submit: {v}");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            5,
+            "pm_list_activity",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        let acts = tool_text(&v);
+        let submitted = acts["activity"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["kind"] == "submitted")
+            .expect("the submission is in the stream")
+            .clone();
+        assert_eq!(submitted["text"].as_str().unwrap().chars().count(), 500);
+        assert_eq!(submitted["text_truncated"], true);
+        assert_eq!(submitted["text_total_chars"], 5_000);
+    }
+
+    /// 回归：一次 `limit=50` 的 `pm_list_tasks` 曾把每条任务的 `description`
+    /// 和上一次 submit 的 `result.text`（各 ≤20000 字符）一起回给调用方，
+    /// 直接把 agent 的上下文压爆。列表只回摘要，全量只走 `pm_get_task`。
+    #[tokio::test]
+    async fn list_tasks_returns_summaries_not_full_records() {
+        let (router, store) = test_router_and_store().await;
+        let actor = "summary-eng";
+        let pid = project_with_owner(&router, actor, "Summary").await;
+        let tid = create_task(
+            &router,
+            actor,
+            2,
+            json!({
+                "project_id": pid,
+                "title": "long",
+                "assignee": actor,
+                "description": "D".repeat(20_000),
+            }),
+        )
+        .await;
+        approve_task(&store, &tid).await;
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "claim: {v}");
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_submit_task",
+            json!({ "task_id": tid, "text": "R".repeat(20_000) }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "submit: {v}");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            5,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "limit": 50 }),
+        )
+        .await;
+        let list = tool_text(&v);
+        let rows = list["tasks"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["title"], "long");
+        assert_eq!(rows[0]["status"], "submitted");
+        assert_eq!(rows[0]["assignee"], actor);
+        assert_eq!(rows[0]["project_id"], pid);
+        for heavy in ["description", "result", "attachments", "depends_on"] {
+            assert!(
+                rows[0].get(heavy).is_none(),
+                "a list row must not carry `{heavy}`: {}",
+                rows[0]
+            );
+        }
+        // 摘要行的大小上限：40000 字符的正文曾让一行就超过 40KB。
+        assert!(
+            list.to_string().len() < 4096,
+            "list response bloat: {} bytes",
+            list.to_string().len()
+        );
+
+        // 全量记录仍在 get_task 里（否则这一刀就是丢数据）。
+        let v = call_tool(
+            &router,
+            Some(actor),
+            6,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        let full = tool_text(&v);
+        assert_eq!(full["description"].as_str().unwrap().len(), 20_000);
+        assert_eq!(full["result"]["text"].as_str().unwrap().len(), 20_000);
     }
 
     #[tokio::test]

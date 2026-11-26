@@ -696,6 +696,9 @@ mod tests {
                 parent_dir_id: crate::types::ROOT_DIR_ID.into(),
                 name: "项目A".into(),
                 creator: None,
+            
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();
@@ -727,6 +730,9 @@ mod tests {
                 parent_dir_id: crate::types::ROOT_DIR_ID.into(),
                 name: "归档".into(),
                 creator: None,
+            
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();
@@ -784,6 +790,9 @@ mod tests {
                 parent_dir_id: crate::types::ROOT_DIR_ID.into(),
                 name: "归档".into(),
                 creator: None,
+            
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();
@@ -830,6 +839,9 @@ mod tests {
                 parent_dir_id: crate::types::ROOT_DIR_ID.into(),
                 name: "归档".into(),
                 creator: None,
+            
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();

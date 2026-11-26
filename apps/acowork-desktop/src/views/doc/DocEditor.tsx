@@ -21,6 +21,7 @@ import { Check, Columns2, Eye, FileText, Loader2, Pencil, RefreshCw, Save, Spark
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import { useTranslation } from "../../i18n/useTranslation";
+import { LibraryLanding } from "./LibraryLanding";
 import { useDocEditorStore } from "../../stores/doc/editorStore";
 import { useDocHealthStore } from "../../stores/doc/healthStore";
 import { useAgentStore } from "../../stores/agentStore";
@@ -199,14 +200,10 @@ export function DocEditor() {
 
   const [savedTick, setSavedTick] = useState(0);
 
-  // 空状态
+  // 空状态：根层语义是「文档库」之后，落地页改成库卡片网格
+  // （LibraryLanding），而不是一句「请选择文档」。
   if (!doc && !loading) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 text-text-tertiary">
-        <FileText className="h-8 w-8 opacity-40" aria-hidden />
-        <p className="text-xs">{t("doc.editorEmpty")}</p>
-      </div>
-    );
+    return <LibraryLanding />;
   }
 
   if (loading && !doc) {

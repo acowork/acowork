@@ -478,6 +478,8 @@ mod tests {
                 parent_dir_id: parent.into(),
                 name: name.into(),
                 creator: creator.map(str::to_string),
+                icon: None,
+                description: None,
             })
             .await
             .unwrap()

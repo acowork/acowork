@@ -104,6 +104,12 @@ describe("状态胶囊", () => {
     const rows = read("views/pm/TaskListRows.tsx");
     expect(rows).toMatch(/rounded-full[^"]*text-white/);
   });
+
+  it("看板列头的计数胶囊穿同一套状态色，不再单独在 submitted 上开小灶", () => {
+    const column = read("views/pm/KanbanColumn.tsx");
+    expect(column).toContain("STATUS_PILL_CLASS[status]");
+    expect(column).not.toContain("bg-warning-surface-hover");
+  });
 });
 
 describe("右上角「新建任务」", () => {

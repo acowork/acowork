@@ -2843,6 +2843,31 @@ export interface EmbeddingModelActionResponse {
   message: string;
 }
 
+/**
+ * Request body for POST /api/embedding-models — add a user-defined LOCAL
+ * ONNX model. Mirrors the `embedding_models.json` fields the embed service
+ * needs to download + load the graph.
+ */
+export interface AddLocalEmbeddingModelRequest {
+  id: string;
+  name: string;
+  description?: string;
+  dimension: number;
+  /** Defaults to 512 server-side. */
+  max_tokens?: number;
+  languages?: string[];
+  /** HuggingFace repository, `owner/name`. */
+  hf_repo: string;
+  /** "cls" | "mean" | "last_token" — defaults to "cls". */
+  pooling_strategy?: string;
+  /** "hidden_states" | "already_pooled" — defaults to "hidden_states". */
+  onnx_output_kind?: string;
+  /** Path inside the repo; defaults to "onnx/model.onnx". */
+  onnx_file?: string;
+  /** Path inside the repo; defaults to "tokenizer.json". */
+  tokenizer_file?: string;
+}
+
 /** Response from GET /api/embedding-models/{id}/status */
 export interface EmbeddingModelStatusResponse {
   model_id: string;

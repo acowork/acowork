@@ -51,7 +51,7 @@ pub const DOC_TOOL_MANIFEST: &str = r#"{
   "tools": [
     {
       "name": "doc_list",
-      "description": "List documents and sub-directories under a directory path (root when omitted). Returns id, name, kind and version for each entry.",
+      "description": "List documents and sub-directories under a directory path (root when omitted). Returns id, name, kind and version for each entry, one page at a time: the envelope carries {total, offset, limit, returned, has_more, truncated?, notice?, items[]}, a page is at most 20 entries (10 by default), and `notice` names the offset to resume from when the directory has more.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -66,13 +66,13 @@ pub const DOC_TOOL_MANIFEST: &str = r#"{
             "default": ""
           },
           "offset": { "type": "integer", "minimum": 0, "default": 0 },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 }
+          "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 10 }
         }
       }
     },
     {
       "name": "doc_read",
-      "description": "Read a shared document's full Markdown content with its version and metadata. Accepts a doc_id or a path like \"研发/纪要.md\".",
+      "description": "Read a shared document's Markdown content with its version and metadata. Accepts a doc_id or a path like \"研发/纪要.md\". The body comes back in a character window of at most 20000 characters (a document may be megabytes); `content_chars` is the document's total length, and when the window cut it short `truncated: true` plus a `notice` names the `offset` to continue from.",
       "inputSchema": {
         "type": "object",
         "required": ["ref"],
@@ -80,6 +80,19 @@ pub const DOC_TOOL_MANIFEST: &str = r#"{
           "ref": {
             "type": "string",
             "description": "doc_id (doc-xxxx) or relative path ending in .md"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Start character offset (0-based): continue where a truncated read stopped."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20000,
+            "default": 20000,
+            "description": "Characters to return, capped at 20000."
           }
         }
       }
@@ -188,13 +201,14 @@ pub const DOC_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "doc_search",
-      "description": "Cross-directory keyword search over document titles and bodies. Title matches rank above content matches.",
+      "description": "Cross-directory keyword search over document titles and bodies. Title matches rank above content matches. Returns at most 20 hits per page (10 by default; envelope: total is null — search cannot count its matches — with offset / limit / returned / has_more / truncated? / notice? / hits[]); page with `offset`, or narrow the keyword.",
       "inputSchema": {
         "type": "object",
         "required": ["keyword"],
         "properties": {
           "keyword": { "type": "string", "minLength": 1 },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+          "offset": { "type": "integer", "minimum": 0, "default": 0 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 10 }
         }
       }
     },
@@ -215,7 +229,7 @@ pub const DOC_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "doc_list_requests",
-      "description": "List review requests — the answer to \"what did I submit that is still waiting?\". doc_check_request needs a request_id, and that id only exists in the write response; if your context was compacted the pending change would otherwise be unreachable and unrevertible. Defaults to the pending queue. Use this at the start of a session to find changes waiting on a human, and before re-submitting work you are unsure about.",
+      "description": "List review requests — the answer to \"what did I submit that is still waiting?\". doc_check_request needs a request_id, and that id only exists in the write response; if your context was compacted the pending change would otherwise be unreachable and unrevertible. Defaults to the pending queue. Use this at the start of a session to find changes waiting on a human, and before re-submitting work you are unsure about. One page is at most 20 entries (10 by default); the envelope reports total / has_more / truncated? / notice?.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -229,17 +243,19 @@ pub const DOC_TOOL_MANIFEST: &str = r#"{
             "type": "string",
             "description": "Restrict to one document: a doc_id (doc-xxxx) or a library path ending in .md."
           },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+          "offset": { "type": "integer", "minimum": 0, "default": 0 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 10 }
         }
       }
     },
     {
       "name": "doc_list_trash",
-      "description": "List deleted documents that can still be restored, each with the trash_id needed by doc_restore. doc_remove only moves a document to the trash — use this and doc_restore to undo a deletion instead of rewriting the file.",
+      "description": "List deleted documents that can still be restored, each with the trash_id needed by doc_restore. doc_remove only moves a document to the trash — use this and doc_restore to undo a deletion instead of rewriting the file. One page is at most 20 entries (10 by default); the envelope reports total / has_more / truncated? / notice?.",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+          "offset": { "type": "integer", "minimum": 0, "default": 0 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 10 }
         }
       }
     },
@@ -285,6 +301,42 @@ pub fn manifest_tools() -> Vec<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 结构闸：声明了 `limit` 的工具必须是分页形状——同时声明 `offset`，
+    /// 且上限不超过 `MAX_PAGE`（唯一的例外是 `doc_read`：它不是列表，
+    /// 是正文窗口，上限是 `MAX_TEXT_CHUNK`）。
+    ///
+    /// 靠人记住"新工具要分页"必然漂移；钉在 manifest 上，漏了直接红。
+    #[test]
+    fn every_limited_tool_is_paginated_and_capped() {
+        use acowork_core::mcp_page::{DEFAULT_PAGE, MAX_PAGE, MAX_TEXT_CHUNK};
+        for tool in manifest_tools() {
+            let name = tool["name"].as_str().unwrap();
+            let props = tool["inputSchema"]["properties"].as_object().unwrap();
+            let Some(limit) = props.get("limit") else {
+                continue;
+            };
+            assert!(
+                props.contains_key("offset"),
+                "`{name}` takes a limit but cannot resume: declare `offset`"
+            );
+            let (cap, default) = if name == "doc_read" {
+                (MAX_TEXT_CHUNK, MAX_TEXT_CHUNK)
+            } else {
+                (MAX_PAGE, DEFAULT_PAGE)
+            };
+            assert_eq!(
+                limit["maximum"].as_u64(),
+                Some(cap as u64),
+                "`{name}` must cap at {cap} in its schema"
+            );
+            assert_eq!(
+                limit["default"].as_u64(),
+                Some(default as u64),
+                "`{name}` default must stay in sync with the code default ({default})"
+            );
+        }
+    }
 
     #[test]
     fn manifest_parses_to_expected_tool_count() {

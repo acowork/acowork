@@ -22,6 +22,7 @@ import type {
   CloudEmbeddingProvidersResponse,
   SelectCloudEmbeddingResponse,
   AddCloudEmbeddingProviderRequest,
+  AddLocalEmbeddingModelRequest,
   UpdateCloudEmbeddingProviderRequest,
   CloudEmbeddingProviderResponse,
   AgentLspEndpointResponse,
@@ -335,6 +336,28 @@ export async function fetchEmbeddingModelStatus(
   const resp = await fetch(`${gatewayUrl}/api/embedding-models/${modelId}/status`);
   if (!resp.ok) throw new Error(`Failed to fetch status: ${resp.status}`);
   return resp.json();
+}
+
+/** Add a user-defined local ONNX embedding model.
+ *
+ *  Persists the entry into `{data_dir}/embedding_models.json` (the copy the
+ *  embed service reads), refreshes the Gateway's cache, and asks the embed
+ *  process to re-read the registry so the model can be downloaded right away.
+ */
+export async function addLocalEmbeddingModel(
+  payload: AddLocalEmbeddingModelRequest,
+  gatewayUrl = getGatewayUrl(),
+): Promise<EmbeddingModelActionResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-models`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error((data as EmbeddingModelActionResponse).message ?? `Add model failed: ${resp.status}`);
+  }
+  return data as EmbeddingModelActionResponse;
 }
 
 /** Delete a downloaded embedding model's files */

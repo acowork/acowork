@@ -74,6 +74,7 @@ pub mod intent;
 pub mod logging;
 pub mod lsp;
 pub mod manifest;
+pub mod mcp_page;
 pub mod memory;
 pub mod message_ref;
 pub mod model_caps;
