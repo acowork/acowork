@@ -24,6 +24,20 @@ const BUILTIN_APP_ICONS: Record<string, string> = {
     doc: docAppIcon,
 };
 
+/**
+ * The four document apps the Apps home recommends — preview + edit for
+ * docx / sheet / pptx / pdf, the most-used set. Order is display order.
+ */
+export const RECOMMENDED_APP_IDS = ["wordcraft", "gridcraft", "deckcraft", "pdfcraft"];
+
+/** Recommended cards in catalog order, skipping ids the catalog does not have. */
+export function recommendedCards(cards: GalleryCard[]): GalleryCard[] {
+    const byId = new Map(cards.map((c) => [c.id, c]));
+    return RECOMMENDED_APP_IDS.map((id) => byId.get(id)).filter(
+        (c): c is GalleryCard => !!c,
+    );
+}
+
 /** Cloudflare Pages site (see ACoworkAppGallery docs/deploy.md). */
 export const DEFAULT_APP_GALLERY_INDEX_URL =
     "https://gallery.acowork.ai/data/index.json";

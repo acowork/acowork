@@ -10,6 +10,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ExternalLink, Loader2, Search } from "lucide-react";
 import { CAPSULE_PANE_CN } from "../components/common/capsule";
+import { OverlayScrollbar } from "../components/common/OverlayScrollbar";
 import { RemoteArtwork } from "../components/common/RemoteArtwork";
 import { SplitHandle } from "../components/common/SplitHandle";
 import { StyledInput } from "../components/common/StyledInput";
@@ -20,6 +21,8 @@ import {
     galleryAttributionLinks,
     mergeGalleryCards,
     readCachedGalleryIndex,
+    recommendedCards,
+    RECOMMENDED_APP_IDS,
     type GalleryAttributionKind,
     type GalleryCard,
     type InstallBadge,
@@ -302,6 +305,18 @@ export function ExtensionsView() {
     );
     const selected = visible.find((c) => c.id === selectedId) ?? cards.find((c) => c.id === selectedId) ?? null;
 
+    // Home state (nothing selected): the recommended document apps. Derived
+    // from `cards`, so icon / version / install state come from the same merge
+    // the list uses — no second lookup, and no second truth.
+    const recommended = useMemo(() => recommendedCards(cards), [cards]);
+    /** Recommended but not installed AND actually downloadable. */
+    const installable = recommended.filter(
+        (c) => !c.installed && c.gallery?.package?.url && c.gallery?.package?.sha256,
+    );
+    const missingAny = recommended.some((c) => !c.installed);
+    const allRecommendedInstalled =
+        recommended.length === RECOMMENDED_APP_IDS.length && !missingAny;
+
     // Running jobs by card id. A finished job drops out immediately: the card
     // then shows its real badge again ( Installed / Update ), because the
     // install either landed or errored — see the completion effect below.
@@ -313,6 +328,8 @@ export function ExtensionsView() {
         return map;
     }, [jobs]);
     const selectedJob = selected ? jobsByCard.get(selected.id) : undefined;
+    /** One of the recommended-missing apps already has a job running here. */
+    const batchActive = installable.some((c) => jobsByCard.has(c.id));
     const polling = useMemo(() => jobs.some(installJobActive), [jobs]);
 
     // Reattach on entry: the Gateway, not this component, knows what is
@@ -409,6 +426,28 @@ export function ExtensionsView() {
             setJobs((prev) => upsertJob(prev, job));
         } catch (e) {
             setActionError(installErrorMessage(e));
+        }
+    };
+
+    /**
+     * One click installs every recommended app that is missing — never the ones
+     * already there. Each POST only ACCEPTS the work, so the Gateway ends up
+     * with N jobs running side by side and the tiles show their own progress.
+     * The Gateway already refuses a duplicate job per card, so a double click
+     * cannot start a second download; `ponytail:` the downloads do run
+     * concurrently (17–77 MB each) — serialise them here if bandwidth ever
+     * matters.
+     */
+    const onInstallRecommended = async () => {
+        setActionError(null);
+        for (const card of installable) {
+            const pkg = card.gallery!.package!;
+            try {
+                const job = await startAppInstallFromUrl(pkg.url, pkg.sha256, card.id);
+                setJobs((prev) => upsertJob(prev, job));
+            } catch (e) {
+                setActionError(installErrorMessage(e));
+            }
         }
     };
 
@@ -889,8 +928,150 @@ export function ExtensionsView() {
                         </div>
                     </div>
                 ) : (
-                    <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
-                        {t("extensions.selectHint")}
+                    /* Home state. It used to be a one-line "select an app"
+                       placeholder, which read as a blank panel on entry —
+                       what a first-time user needs here is the four document
+                       apps and one button that installs whichever are
+                       missing, not an instruction to pick something. */
+                    <div className="flex h-full min-h-0 flex-col">
+                        <div className="shrink-0 border-b border-border-divider px-5 py-4">
+                            <div className="text-base font-medium text-text-primary">
+                                {t("extensions.recommendedTitle")}
+                            </div>
+                            <div className="mt-0.5 text-xs text-text-tertiary">
+                                {t("extensions.recommendedSubtitle")}
+                            </div>
+                        </div>
+
+                        <OverlayScrollbar fill="flex" className="px-5 py-4">
+                            <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
+                                {recommended.map((card) => {
+                                    const job = jobsByCard.get(card.id);
+                                    const installed = card.installed;
+                                    const downloadable =
+                                        !!card.gallery?.package?.url &&
+                                        !!card.gallery?.package?.sha256;
+                                    return (
+                                        <div
+                                            key={card.id}
+                                            className="rounded-lg border border-border-divider bg-page-bg/40 p-3"
+                                        >
+                                            <div className="flex gap-3">
+                                                <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border-divider bg-nav-surface">
+                                                    {card.icon ? (
+                                                        <RemoteArtwork
+                                                            src={card.icon}
+                                                            className="h-full w-full object-cover"
+                                                            fallback={null}
+                                                        />
+                                                    ) : (
+                                                        <span className="text-sm font-medium text-text-tertiary">
+                                                            {card.name.slice(0, 1).toUpperCase()}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="truncate text-[12px] font-medium text-text-primary">
+                                                            {card.name}
+                                                        </span>
+                                                        <span
+                                                            role="img"
+                                                            title={t(statusLabelKey(installed))}
+                                                            aria-label={t(statusLabelKey(installed))}
+                                                            className={cn(
+                                                                "h-1.5 w-1.5 shrink-0 rounded-full",
+                                                                statusDot(installed),
+                                                            )}
+                                                        />
+                                                    </div>
+                                                    <div className="mt-0.5 line-clamp-2 text-[11px] text-text-tertiary">
+                                                        {card.summary}
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div className="mt-2">
+                                                {job ? (
+                                                    <InstallProgress job={job} />
+                                                ) : installed ? (
+                                                    <div className="flex items-center gap-2">
+                                                        <span
+                                                            className={cn(
+                                                                "rounded px-1.5 py-0.5 text-[10px]",
+                                                                badgeClass(card.badge),
+                                                            )}
+                                                        >
+                                                            {badgeLabel(card.badge)}
+                                                        </span>
+                                                        <button
+                                                            type="button"
+                                                            disabled={
+                                                                !installed.enabled ||
+                                                                installed.status !== "ready"
+                                                            }
+                                                            onClick={() => openInstalled(installed)}
+                                                            className="rounded-md btn-accent px-2.5 py-1 text-[11px] text-white disabled:opacity-50"
+                                                        >
+                                                            {t("extensions.open")}
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <span
+                                                        className={cn(
+                                                            "rounded px-1.5 py-0.5 text-[10px]",
+                                                            badgeClass(
+                                                                downloadable
+                                                                    ? "available"
+                                                                    : "catalog_only",
+                                                            ),
+                                                        )}
+                                                    >
+                                                        {downloadable
+                                                            ? t("extensions.statusNotInstalled")
+                                                            : t("extensions.recommendedNoPackage")}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </OverlayScrollbar>
+
+                        <div className="shrink-0 px-5 pb-5">
+                            {installable.length > 0 ? (
+                                <button
+                                    type="button"
+                                    disabled={busy || batchActive}
+                                    onClick={() => void onInstallRecommended()}
+                                    className="rounded-md btn-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
+                                >
+                                    {batchActive
+                                        ? t("extensions.installing")
+                                        : t("extensions.recommendedInstallAll", {
+                                              count: installable.length,
+                                          })}
+                                </button>
+                            ) : allRecommendedInstalled ? (
+                                <div className="text-xs text-text-tertiary">
+                                    {t("extensions.recommendedAllInstalled")}
+                                </div>
+                            ) : recommended.length < RECOMMENDED_APP_IDS.length ? (
+                                /* Part of the catalog is missing (offline, or an
+                                   id was retired): say so instead of leaving the
+                                   panel with no action and no reason. */
+                                <div className="text-xs text-text-tertiary">
+                                    {t("extensions.galleryUnavailable")}
+                                </div>
+                            ) : null}
+                            {/* The detail pane's error line only renders once a
+                                card is selected; a batch started from here has
+                                no selection, so it needs its own. */}
+                            {actionError && (
+                                <div className="mt-2 text-xs text-danger-text">{actionError}</div>
+                            )}
+                        </div>
                     </div>
                 )}
             </div>
