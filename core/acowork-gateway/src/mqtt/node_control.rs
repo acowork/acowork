@@ -458,14 +458,7 @@ impl NodeControlClient {
     pub fn check_install_reply(agent_id: &str, event: &NodeEvent) -> Result<(), NodeControlError> {
         match event.status.as_str() {
             "ok" | "in_progress" => Ok(()),
-            "error" | "not_implemented" => Err(NodeControlError::CommandFailed {
-                agent_id: agent_id.to_string(),
-                message: event.message.clone(),
-            }),
-            other => Err(NodeControlError::CommandFailed {
-                agent_id: agent_id.to_string(),
-                message: format!("unexpected status '{}': {}", other, event.message),
-            }),
+            _ => Err(reply_failure(agent_id, event)),
         }
     }
 
@@ -475,15 +468,31 @@ impl NodeControlClient {
     pub fn check_reply(agent_id: &str, event: &NodeEvent) -> Result<(), NodeControlError> {
         match event.status.as_str() {
             "ok" => Ok(()),
-            "error" | "not_implemented" => Err(NodeControlError::CommandFailed {
-                agent_id: agent_id.to_string(),
-                message: event.message.clone(),
-            }),
-            other => Err(NodeControlError::CommandFailed {
-                agent_id: agent_id.to_string(),
-                message: format!("unexpected status '{}': {}", other, event.message),
-            }),
+            _ => Err(reply_failure(agent_id, event)),
         }
+    }
+}
+
+/// Failure for a non-success `NodeEvent` reply.
+///
+/// `not_implemented` is not a failed command — it is a node capability gap: the
+/// control plane is a contract, not a mandatory method set, and a port may
+/// implement a subset (ADR-AND-003 AndroidNode shipped without the publish
+/// pair). Forwarding the node's bare phrase left the operator staring at
+/// "unknown or unsupported control command" with nothing to act on, so say what
+/// it means and what to do.
+fn reply_failure(agent_id: &str, event: &NodeEvent) -> NodeControlError {
+    let message = match event.status.as_str() {
+        "not_implemented" => format!(
+            "the node hosting '{agent_id}' does not implement this command ('{}') — update the node service",
+            event.message
+        ),
+        "error" => event.message.clone(),
+        other => format!("unexpected status '{}': {}", other, event.message),
+    };
+    NodeControlError::CommandFailed {
+        agent_id: agent_id.to_string(),
+        message,
     }
 }
 
@@ -592,5 +601,33 @@ mod tests {
             result_json: None,
         };
         assert!(NodeControlClient::check_reply("a", &ev).is_err());
+    }
+
+    /// A node that does not implement the command is a capability gap, not a
+    /// failed command: the surfaced message must name that and the fix, not just
+    /// echo the node's phrasing.
+    #[test]
+    fn not_implemented_says_the_node_lacks_the_command() {
+        let ev = NodeEvent {
+            node_id: "local".to_string(),
+            request_id: "r".to_string(),
+            status: "not_implemented".to_string(),
+            message: "unknown or unsupported control command".to_string(),
+            result_json: None,
+        };
+        let err = NodeControlClient::check_reply("inst-1", &ev).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("does not implement this command"), "{text}");
+        assert!(text.contains("update the node service"), "{text}");
+        // A real error stays verbatim — no capability wording bolted onto it.
+        let failure = reply_failure(
+            "inst-1",
+            &NodeEvent {
+                status: "error".to_string(),
+                message: "agent not installed".to_string(),
+                ..ev
+            },
+        );
+        assert_eq!(failure.to_string(), "Node command failed for 'inst-1': agent not installed");
     }
 }
