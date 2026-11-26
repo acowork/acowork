@@ -47,13 +47,25 @@ vi.mock("../../i18n/useTranslation", () => ({
 
 /** The seam the real column would rather not offer in jsdom (it needs a pdf.js
  *  document): record what the viewer handed it and render a marker instead. */
-const column = vi.hoisted(() => ({ props: null as Record<string, unknown> | null }));
-vi.mock("./PdfColumnViewer", () => ({
-  PdfColumnViewer: (props: Record<string, unknown>) => {
-    column.props = props;
-    return <div data-testid="pdf-column" />;
-  },
+const column = vi.hoisted(() => ({
+  props: null as Record<string, unknown> | null,
+  mounts: 0,
 }));
+vi.mock("./PdfColumnViewer", async () => {
+  const { useEffect } = await import("react");
+  return {
+    PdfColumnViewer: (props: Record<string, unknown>) => {
+      column.props = props;
+      // Counts MOUNTS, not renders: the viewer keys the column on its byte
+      // version, so a spurious re-read shows up here as a remount — which is
+      // what the user sees as the preview reloading.
+      useEffect(() => {
+        column.mounts += 1;
+      }, []);
+      return <div data-testid="pdf-column" />;
+    },
+  };
+});
 
 import PdfViewer from "./PdfViewer";
 
@@ -86,6 +98,7 @@ beforeEach(() => {
   h.openExternal.mockClear();
   h.toast.mockClear();
   column.props = null;
+  column.mounts = 0;
   objectUrlSeq = 0;
   createObjectURLMock.mockClear();
   revokeObjectURLMock.mockClear();
@@ -171,6 +184,28 @@ describe("PdfViewer external mode (converted Office document)", () => {
     expect(h.hookState.blobUrl).toBe("blob:gw/report.pdf");
     unmount();
     expect(revokeObjectURLMock).toHaveBeenCalledWith("blob:external/1");
+  });
+
+  it("a parent re-render with the same bytes does not re-open the document", async () => {
+    // The regression: `external` is built inline by OfficePdfViewer, so a
+    // parent re-render (the doc view polls its health every 30 s) handed the
+    // viewer a new object with the SAME bytes. While the read effect depended
+    // on that object's identity it re-read, bumped the column's key and
+    // re-opened the document — the periodic loading flicker.
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 2]);
+    const retry = vi.fn();
+    const { rerender } = render(
+      <PdfViewer {...converted} external={{ state: "ready", bytes, retry }} />,
+    );
+    await waitFor(() => expect(screen.getByTestId("pdf-column")).toBeTruthy());
+    const mounts = column.mounts;
+    const urls = createObjectURLMock.mock.calls.length;
+    rerender(<PdfViewer {...converted} external={{ state: "ready", bytes, retry }} />);
+    // Let the read effect's promise settle: the remount it would cause happens
+    // in a `.then`, so a synchronous assertion would miss it.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(column.mounts).toBe(mounts);
+    expect(createObjectURLMock).toHaveBeenCalledTimes(urls);
   });
 
   it("shows the loading state without a column while converting", () => {

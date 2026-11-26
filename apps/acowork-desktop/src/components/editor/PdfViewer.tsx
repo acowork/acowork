@@ -157,16 +157,30 @@ export default function PdfViewer(props: PdfViewerProps) {
     // Read the PDF behind the preview, from whichever source fed it. Every
     // path is same-origin (`blob:` of our own object URL), so this never
     // leaves the machine and never re-authorises anything.
+    //
+    // The dependency is the BYTES, not the `external` object. Callers build
+    // that object inline (`OfficePdfViewer` does), so depending on it made
+    // every re-render of a parent look like a new document: the read effect
+    // below re-ran, bumped `bytesVersion` and re-opened the column — the
+    // "Office preview reloads every 30 s" flicker, since the doc view
+    // re-renders on its health poll. The array identity is what actually
+    // says "different document".
+    const externalBytes = external?.state === "ready" ? (external.bytes ?? null) : null;
+    // In external mode the feed is off, so its fields must not be read at all:
+    // `state.blobUrl` still flips from null to the object URL one tick after
+    // mount, which would re-run the read below and re-open the document it had
+    // just opened.
+    const feedBlob = external ? null : state.blob;
+    const feedUrl = external ? null : state.blobUrl;
     const readBytes = useCallback(async (): Promise<Uint8Array | null> => {
-        const direct = external?.state === "ready" ? (external.bytes ?? null) : null;
-        if (direct && direct.length > 0) return direct;
-        if (state.blob) return new Uint8Array(await state.blob.arrayBuffer());
-        if (state.blobUrl) {
-            const response = await fetch(state.blobUrl);
+        if (externalBytes && externalBytes.length > 0) return externalBytes;
+        if (feedBlob) return new Uint8Array(await feedBlob.arrayBuffer());
+        if (feedUrl) {
+            const response = await fetch(feedUrl);
             return new Uint8Array(await response.arrayBuffer());
         }
         return null;
-    }, [external, state.blob, state.blobUrl]);
+    }, [externalBytes, feedBlob, feedUrl]);
 
     // Framing is a prop on the surface that is already showing the document, so
     // entering it cannot move the user: no read, no remount, no second renderer.
