@@ -117,19 +117,20 @@ afterEach(() => {
 
 describe("AgentSetupTab — a pick survives the panel's mount read", () => {
   it("keeps the picked custom avatar when the older avatar-config read lands afterwards", async () => {
-    // The mount read stays in flight until the test releases it.
+    // Both requests are held open, so the stale read lands after the pick
+    // has been committed — the moment the old code reverted it.
     let releaseRead: (cfg: AvatarConfigResponse) => void = () => {};
     fetchAvatarConfig.mockReturnValue(
       new Promise<AvatarConfigResponse>((resolve) => {
         releaseRead = resolve;
       }),
     );
-    updateAvatarConfig.mockResolvedValue({
-      agent_id: INSTANCE,
-      avatar: PICKED,
-      name: "SSE.Kevin",
-      source: "config",
-    });
+    let releasePut: (cfg: AvatarConfigResponse) => void = () => {};
+    updateAvatarConfig.mockReturnValue(
+      new Promise<AvatarConfigResponse>((resolve) => {
+        releasePut = resolve;
+      }),
+    );
 
     const { container } = render(<AgentSetupTab />);
     const preview = await waitFor(() => {
@@ -140,10 +141,15 @@ describe("AgentSetupTab — a pick survives the panel's mount read", () => {
     fireEvent.click(preview);
     fireEvent.click(await screen.findByAltText(PICKED));
 
-    // The pick landed: the header paints the custom avatar...
+    // The pick's own answer lands: the header paints the custom avatar and
+    // drops the seeded builtin icon.
+    releasePut({ agent_id: INSTANCE, avatar: PICKED, name: "SSE.Kevin", source: "config" });
     await waitFor(() => expect(container.querySelector(`img[alt="${INSTANCE}"]`)).not.toBeNull());
+    expect(container.querySelector(`img[alt="icon-03"]`)).toBeNull();
 
-    // ...and the pre-pick answer arriving now must not undo it.
+    // The pre-pick answer arriving now is stale by construction — it must
+    // not put the old identity back (that is the reported "the pick did
+    // nothing").
     releaseRead({
       agent_id: INSTANCE,
       builtin_avatar: "icon-03",
@@ -151,8 +157,9 @@ describe("AgentSetupTab — a pick survives the panel's mount read", () => {
       source: "manifest",
     });
     await new Promise((r) => setTimeout(r, 0));
-
+    expect(container.querySelector(`img[alt="icon-03"]`)).toBeNull();
     expect(container.querySelector(`img[alt="${INSTANCE}"]`)).not.toBeNull();
+
     // Reopening the picker agrees with the header: the picked tile is the
     // one marked selected.
     fireEvent.click(preview);
