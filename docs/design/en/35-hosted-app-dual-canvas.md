@@ -205,7 +205,13 @@ tab, and the Desktop only writes the path it opened.
 
 ## 7. Theme and locale
 
-`AppFrame` `postMessage`s on load / `ready` and when the light/dark class changes. The adapter injects the listener; each app keeps its own light/dark command, so the adapter only carries the mapping:
+`AppFrame` `postMessage`s on load / `ready`, when the light/dark class changes, and when **`<html lang>` changes**. The adapter injects the listener; each app keeps its own light/dark command, so the adapter only carries the mapping:
+
+`locale` is the interface's active language, read from `<html lang>` — and that attribute has **one writer**, the i18n module (once at startup from the detected language, then on every `languageChanged`). It used to be only the hard-coded `lang="zh-CN"` in `index.html`, which nobody rewrote: switching the interface to English still told every hosted app `zh-CN`. The host also sends a standalone message for an adapter that listens for locale alone:
+
+```json
+{ "channel": "acowork", "type": "locale", "locale": "zh-CN" }
+```
 
 | App | Command |
 |---|---|

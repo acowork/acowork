@@ -203,10 +203,16 @@ DOC / PM 不要改成「先写 workspace 再上传」。它们的产物就是库
 
 ## 7. 主题与语言
 
-`AppFrame` 在 load / `ready` 以及 **light/dark class 变化**时 `postMessage`：
+`AppFrame` 在 load / `ready`、**light/dark class 变化**、以及 **`<html lang>` 变化**时 `postMessage`：
 
 ```json
 { "channel": "acowork", "type": "theme", "theme": "light|dark", "accent": "#…", "locale": "zh-CN" }
+```
+
+`locale` 就是界面当前语言，取值来自 `<html lang>`——**该属性由 i18n 模块单点写入**（启动时按检测到的语言写一次，`languageChanged` 时再写）。它曾经只是 `index.html` 里写死的 `lang="zh-CN"`，没人改过：界面切到英文，三方 app 收到的仍是 `zh-CN`。宿主同时补发一条独立消息给只监听语言的 adapter：
+
+```json
+{ "channel": "acowork", "type": "locale", "locale": "zh-CN" }
 ```
 
 Adapter 注入脚本监听，映射到应用自己的主题命令，adapter 只承载映射表：

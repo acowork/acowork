@@ -155,11 +155,11 @@ export function AppFrame({
             getComputedStyle(root).getPropertyValue("--color-accent").trim() || "#3b82f6";
         // settingsStore only toggles `.dark` on <html>; there is no `.light`.
         const theme = root.classList.contains("dark") ? "dark" : "light";
-        const locale =
-            root.lang ||
-            document.documentElement.getAttribute("lang") ||
-            navigator.language ||
-            "en";
+        // The shell's `<html lang>` IS the interface's language — the i18n
+        // module owns that attribute — and it is the locale a hosted app must
+        // render in. The OS locale is only a fallback for a shell that never
+        // said one.
+        const locale = root.lang || navigator.language || "en";
         const key = `${theme}|${accent}|${locale}`;
         if (lastThemeKeyRef.current === key) return;
         lastThemeKeyRef.current = key;

@@ -174,6 +174,44 @@ describe("AppFrame", () => {
         });
     });
 
+    it("posts the interface language, and re-posts it when the language changes", async () => {
+        const posted: Array<Record<string, unknown>> = [];
+        const originalLang = document.documentElement.getAttribute("lang");
+        document.documentElement.setAttribute("lang", "ja");
+        try {
+            render(<AppFrame app={makeApp("pm")} />);
+            const frame = await waitFor(() => {
+                const el = document.querySelector("iframe");
+                expect(el).not.toBeNull();
+                return el as HTMLIFrameElement;
+            });
+            Object.defineProperty(frame, "contentWindow", {
+                configurable: true,
+                value: {
+                    postMessage: (data: Record<string, unknown>) => {
+                        posted.push(data);
+                    },
+                },
+            });
+
+            frame.dispatchEvent(new Event("load"));
+            // Both forms carry it: the theme message for an adapter that maps
+            // one message, the standalone one for an adapter that only listens
+            // for locale. Either way the value is the interface's language.
+            expect(posted.some((p) => p.type === "theme" && p.locale === "ja")).toBe(true);
+            expect(posted.some((p) => p.type === "locale" && p.locale === "ja")).toBe(true);
+
+            posted.length = 0;
+            document.documentElement.setAttribute("lang", "en");
+            await waitFor(() => {
+                expect(posted.some((p) => p.type === "locale" && p.locale === "en")).toBe(true);
+            });
+        } finally {
+            if (originalLang === null) document.documentElement.removeAttribute("lang");
+            else document.documentElement.setAttribute("lang", originalLang);
+        }
+    });
+
 
     it("hands the document over only after the bridge says hello, and stops once it is acked", async () => {
         vi.useFakeTimers();

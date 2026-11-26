@@ -101,6 +101,25 @@ function runRuntimeI18nLint(): void {
 
 runRuntimeI18nLint();
 
+/**
+ * The document's own statement of the shell's language.
+ *
+ * `<html lang>` is what the hosted-app bridge reads to tell a third-party app
+ * which locale to render in (ADR-121 §7). It was a static `lang="zh-CN"` in
+ * `index.html` and nothing ever rewrote it, so a user who switched the
+ * interface to English still had the app told "zh-CN": the interface's
+ * language never reached the app.
+ *
+ * The i18n module is the single writer of that attribute — it applies the
+ * active language at startup and on every change, and nothing else writes it.
+ */
+export function applyDocumentLanguage(lng: string): void {
+    if (typeof document === "undefined") return;
+    const root = document.documentElement;
+    if (!root || root.getAttribute("lang") === lng) return;
+    root.setAttribute("lang", lng);
+}
+
 // Detect initial language: localStorage > navigator > fallback
 function detectLanguage(): string {
     const stored = readPref(STORAGE_KEY);
@@ -117,6 +136,9 @@ function detectLanguage(): string {
 
 const initialLang = detectLanguage();
 log.debug("[i18n] Detected initial language:", initialLang);
+// The shell states its language in `<html lang>`; the hosted-app bridge reads
+// it from there, so it must be true before the first app frame mounts.
+applyDocumentLanguage(initialLang);
 
 i18n
     .use(initReactI18next)
@@ -136,6 +158,9 @@ i18n
 i18n.on("languageChanged", (lng) => {
     log.debug("[i18n] Language changed to:", lng);
     writePref(STORAGE_KEY, lng);
+    // The interface's language is the app's language: a third-party app that
+    // renders in the shell's locale must be told the new one right away.
+    applyDocumentLanguage(lng);
 });
 
 // A login that does not reload the page must also re-apply the new account's
