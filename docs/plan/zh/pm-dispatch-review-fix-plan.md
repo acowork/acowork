@@ -34,15 +34,15 @@
 
 design 27 决策 29 已明文警告此陷阱：「未声明的 meta 键会被 serde 静默丢弃，症状是投影写成功而盘上没那一项」。旧代码的 `project_id` 同样从未声明、一直被丢弃（本次移除是 no-op 清理，无害）。
 
-### 2.2 阻塞 #2（安全）：`assignment_brief` 提取无来源门控 → 对等 agent 可注入系统提示词
+### 2.2 阻塞 #2（安全）：`assignment_brief` 提取无来源门控 → 对等 bot 可注入系统提示词
 
 | 环节 | 事实 | 位置 |
 |------|------|------|
-| 注入面 | `intent_send` 的 params 是调用方 agent 的任意 JSON，原样透传 | [intent_send.rs:149](../../../core/acowork-runtime/src/tools/builtin/intent_send.rs#L149)、[intent_api.rs:1013](../../../core/acowork-gateway/src/http/intent_api.rs#L1013) |
+| 注入面 | `intent_send` 的 params 是调用方 bot 的任意 JSON，原样透传 | [intent_send.rs:149](../../../core/acowork-runtime/src/tools/builtin/intent_send.rs#L149)、[intent_api.rs:1013](../../../core/acowork-gateway/src/http/intent_api.rs#L1013) |
 | 提取 | Runtime 对**所有 kind** 无条件提取 `params.assignment_brief` | [gateway_loop.rs:1459](../../../core/acowork-runtime/src/startup/gateway_loop.rs#L1459) |
 | 生效 | 非空即 `set_task_brief` → 注入 Block A `## Task Assignment`，**会话级持久** | [session_task.rs:1383](../../../core/acowork-runtime/src/agent/session/session_task.rs#L1383) |
 
-后果：任何有 `intent:send` 权限的 agent 可把任意指令文本放进目标 agent 的系统提示词信任槽位——从「对等消息内容」提权为「持久系统级指令」，绕过 responder 角色的一切约束。与 design 27 v2.6「指令永不信任客户端」原则相悖。
+后果：任何有 `intent:send` 权限的 bot 可把任意指令文本放进目标 bot 的系统提示词信任槽位——从「对等消息内容」提权为「持久系统级指令」，绕过 responder 角色的一切约束。与 design 27 v2.6「指令永不信任客户端」原则相悖。
 
 ### 2.3 必修 #3：扫描器重试 × 预算语义冲突 → 重复行刷屏 + 任务永久饿死
 
@@ -52,7 +52,7 @@ design 27 决策 29 已明文警告此陷阱：「未声明的 meta 键会被 se
 | 失败也计预算 | `wake_and_deliver` 投递前 `mb.record()`，失败投递同样计入会话预算（默认 6、持久化、永不回收） | [delivery.rs:175](../../../core/acowork-gateway/src/intent/delivery.rs#L175)、[mailbox.rs:159](../../../core/acowork-gateway/src/intent/mailbox.rs#L159) |
 | 无限重试 | 扫描器失败后平面 60s 重试，无上限、无退避递增 | [dispatch.rs:147](../../../core/acowork-pm/src/dispatch.rs#L147) |
 
-后果：agent 已安装但不可达（节点下线、唤醒失败）时，约 6 分钟内群聊刷入最多 6 条重复派发行；随后预算耗尽，**该任务永久无法派发（agent 恢复也没用）**；扫描器继续每 60s 空转告警。旧事件钩子一次性触发不存在此问题——这是扫描器引入的回归。
+后果：bot 已安装但不可达（节点下线、唤醒失败）时，约 6 分钟内群聊刷入最多 6 条重复派发行；随后预算耗尽，**该任务永久无法派发（bot 恢复也没用）**；扫描器继续每 60s 空转告警。旧事件钩子一次性触发不存在此问题——这是扫描器引入的回归。
 
 ### 2.4 应修项
 
@@ -86,7 +86,7 @@ design 27 决策 29 已明文警告此陷阱：「未声明的 meta 键会被 se
 | 项 | 内容 |
 |---|---|
 | 核心改动 | 提取逻辑抽成纯函数放 [intent_turn.rs](../../../core/acowork-runtime/src/agent/intent_turn.rs)：`extract_assignment_brief(origin: TurnOrigin, params: &Value) -> String`——**仅 `PmTask` 返回内容，其余 origin 恒空**；[gateway_loop.rs:1459](../../../core/acowork-runtime/src/startup/gateway_loop.rs#L1459) 改为调用它 |
-| 纵深防御（推荐，可裁剪，见 §9 决策点 2） | Gateway send 端点对 agent 来源 params **剥离 `assignment_brief` 键**——保护混部场景下的旧 Runtime（旧版无条件提取）。PM 走独立 task-dispatch 端点，不受影响 |
+| 纵深防御（推荐，可裁剪，见 §9 决策点 2） | Gateway send 端点对 bot 来源 params **剥离 `assignment_brief` 键**——保护混部场景下的旧 Runtime（旧版无条件提取）。PM 走独立 task-dispatch 端点，不受影响 |
 | 测试 | ① 纯函数单测：`request` / `user_message` / `response` 携带该键 → 恒空；`pm_task` → 原样。② session_task 层回归：`kind="request"` 带 `assignment_brief` 的 Intent 不得进入系统块。③ Gateway 剥离测试（若做） |
 | 顺手 | 修正 [session_task.rs:1372](../../../core/acowork-runtime/src/agent/session/session_task.rs#L1372) 附近 `chat_attachment_ids` 缩进异常（#7，`cargo fmt` 限定该文件） |
 | 验收 | 攻击路径测试红→绿；PM 正常派发链路 brief 注入不受影响（既有测试保持绿） |
@@ -151,7 +151,7 @@ graph LR
 | Rust 单测 | `cargo test -p acowork-user -p acowork-core -p acowork-pm -p acowork-runtime -p acowork-gateway --lib` | 全绿（`--lib` 绕开被运行中服务锁定的 exe；完整二进制测试留给 CI） |
 | Clippy | `cargo clippy -p acowork-user -p acowork-core -p acowork-pm -p acowork-runtime -p acowork-gateway --all-targets -- -D warnings` | 0 warning |
 | Desktop | `npx tsc --noEmit` + `npx vitest run`（全量） | 0 错 / 全绿 |
-| E2E（手动，可选） | 建任务指派 agent → 群聊单行+chip → agent 系统块含 brief → claim/submit；停节点模拟不可达 → 有界重试、无重复行、预算不耗尽 | 用测试 agent，不动 gateway/runtime 进程 |
+| E2E（手动，可选） | 建任务指派 bot → 群聊单行+chip → bot 系统块含 brief → claim/submit；停节点模拟不可达 → 有界重试、无重复行、预算不耗尽 | 用测试 bot，不动 gateway/runtime 进程 |
 
 ### 9.4 后续债务（本轮不做，记录备查）
 

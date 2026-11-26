@@ -395,7 +395,7 @@ Displays current session/Agent statistics: token usage (`tokenUsage`), context u
 
 #### 4.4.3 Setup Tab cards
 
-The Setup tab is the single entry point for agent-level configuration — seven level‑1 collapsible cards, top to bottom:
+The Setup tab is the single entry point for bot-level configuration — seven level‑1 collapsible cards, top to bottom:
 
 | # | Card | Content |
 |---|------|---------|

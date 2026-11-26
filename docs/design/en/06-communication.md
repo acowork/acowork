@@ -1,14 +1,14 @@
 # Communication Protocol Design
 
 > Version: v3.2 | Last Updated: 2026-07-12
-> Major revision in this version: §1 fully aligned with [ADR-033](./../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) — Gateway ↔ Runtime IPC replaced with **MQTT pub/sub + HTTP reverse proxy**. gRPC (v3.1) and historical Socket API (≤v3.0) are no longer the main paths. §2 cross-Agent Intent routing reuses the same MQTT topic tree. §3 Desktop App / CLI access layer changed from gRPC WebSocket to MQTT + HTTP API.
+> Major revision in this version: §1 fully aligned with [ADR-033](./../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) — Gateway ↔ Runtime IPC replaced with **MQTT pub/sub + HTTP reverse proxy**. gRPC (v3.1) and historical Socket API (≤v3.0) are no longer the main paths. §2 cross-Bot Intent routing reuses the same MQTT topic tree. §3 Desktop App / CLI access layer changed from gRPC WebSocket to MQTT + HTTP API.
 
 ---
 
 ACowork's communication protocol covers three communication paths:
 
 1. **Gateway ↔ Bot Runtime IPC** — MQTT pub/sub (real-time events) + HTTP reverse proxy (large data queries)
-2. **Cross-Agent Intent routing** — Reuses the same MQTT topic tree, with Gateway as router
+2. **Cross-Bot Intent routing** — Reuses the same MQTT topic tree, with Gateway as router
 3. **Desktop App / CLI ↔ Gateway access layer** — HTTP API (REST) + MQTT subscription (streaming events)
 
 ```
@@ -87,7 +87,7 @@ acowork/
 │   │   └── config_update         # RuntimeConfigUpdate
 │   └── status                    # Agent status (Retained)
 └── system/
-    ├── intents/+                 # Intent routing (cross-Agent)
+    ├── intents/+                 # Intent routing (cross-Bot)
     │   ├── send
     │   └── received
     └── approvals/+               # Approval requests
@@ -101,7 +101,7 @@ acowork/
 - `agents/{agent_id}/sessions/{session_id}/inbound/+` — Gateway → Runtime reverse control channel (chat message, interrupt, system notification)
 - `agents/{agent_id}/lifecycle/+` — Bot lifecycle events (hello, ready, goodbye, config_update)
 - `agents/{agent_id}/status` — Bot status (Retained message, new subscribers get latest status immediately)
-- `system/intents/+` — Cross-Agent Intent routing
+- `system/intents/+` — Cross-Bot Intent routing
 - `system/approvals/+` — User approval flow (Gateway ↔ Runtime ↔ Desktop App)
 
 ### 1.3 MQTT Payload Format
@@ -195,7 +195,7 @@ message ConfigUpdatePayload {
     RuntimeConfig config = 1;
 }
 
-// === Intent routing (cross-Agent) ===
+// === Intent routing (cross-Bot) ===
 message IntentSendPayload {
     string from_agent = 1;
     string to_agent = 2;
@@ -411,7 +411,7 @@ Complete flow of user sending message and receiving response:
        └─ UI renders streaming output, displays tool calls
 ```
 
-## 2. Cross-Agent Intent Routing
+## 2. Cross-Bot Intent Routing
 
 Intent is the mechanism for Bots to communicate. When Bot A needs to call Bot B's capability, it sends an Intent message via Gateway.
 

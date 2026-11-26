@@ -179,7 +179,7 @@
 | 元素 | 说明 |
 |------|------|
 | 状态药丸 | `error`（红）/ `warning`（琥珀）/ `info`（灰），点击复制全文；hover Tooltip 显示完整内容 |
-| Bot + 上下文药丸 | 选中 Bot 运行中且结果面板折叠/非 Status Tab 时显示：`Bot: {名称}` + `Context: {usage}% | {tokens}/{窗口}`（≥90% 高亮）。`{窗口}` = 该会话生效窗口（per-session 覆盖存在时为其覆盖值，否则 per-agent 链解析值，ADR-074） |
+| Bot + 上下文药丸 | 选中 Bot 运行中且结果面板折叠/非 Status Tab 时显示：`Bot: {名称}` + `Context: {usage}% | {tokens}/{窗口}`（≥90% 高亮）。`{窗口}` = 该会话生效窗口（per-session 覆盖存在时为其覆盖值，否则 per-bot 链解析值，ADR-074） |
 | MQTT 调试控件 | `MqttDebugControls`（开发者用，显示 MQTT 连接状态） |
 | 文件状态簇 | 文件编辑器打开时，绝对定位在文件面板下方，显示光标位置 / LSP 状态等 |
 
@@ -543,12 +543,12 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 
 | 资源名 | 名称 | 角色 | 描述 |
 |--------|------|------|------|
-| software-architect-agent | Architect | Software Architect | 系统设计、架构评审、技术规划、风险评估 |
-| senior-engineer-agent | SSE | Senior Software Engineer | 代码评审、架构设计、调试、重构、测试、文档 |
-| quality-assurance-agent | QA | Quality Assurance Manager | 质量策略、测试计划、缺陷管理、发布验收 |
-| project-manager-agent | PM | Project Manager | 需求分析、任务拆解、进度跟踪、风险管理 |
-| product-manager-agent | Product | Product Manager | 产品策略、用户研究、PRD 撰写、路线图、发布规划 |
-| document-manager-agent | Docs | Document Manager | 文档收集、组织、撰写、转换、知识库维护 |
+| software-architect-bot | Architect | Software Architect | 系统设计、架构评审、技术规划、风险评估 |
+| senior-engineer-bot | SSE | Senior Software Engineer | 代码评审、架构设计、调试、重构、测试、文档 |
+| quality-assurance-bot | QA | Quality Assurance Manager | 质量策略、测试计划、缺陷管理、发布验收 |
+| project-manager-bot | PM | Project Manager | 需求分析、任务拆解、进度跟踪、风险管理 |
+| product-manager-bot | Product | Product Manager | 产品策略、用户研究、PRD 撰写、路线图、发布规划 |
+| document-manager-bot | Docs | Document Manager | 文档收集、组织、撰写、转换、知识库维护 |
 
 - 每项为 checkbox 卡片（名称 · 角色 / 描述），默认全部勾选；提供 [全选]/[清空]
 - **[安装所选 (N)]**：`waitBootstrapReady()`（轮询 `/api/bootstrap` 至 READY）→ `runBounded(items, 3)` 并发 3 提交 `install_bundled_agent` → 每项 `wait_agent_installed` 轮询 → 每项状态徽标（pending/submitted/completed/failed，含 operation_id）

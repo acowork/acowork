@@ -30,7 +30,7 @@ crates/acowork-gateway/
     ├── budget/
     │   ├── mod.rs
     │   ├── tracker.rs             # 用量统计 + 超限信号
-    │   └── config.rs              # 预算配置（per-agent 日/月限额）
+    │   └── config.rs              # 预算配置（per-bot 日/月限额）
     ├── rate/
     │   ├── mod.rs
     │   └── limiter.rs             # 速率令牌分配（per-provider RPM/TPM）

@@ -1,6 +1,6 @@
 # acowork-memory + acowork-sqlite — Bot Private Memory Engine and Memory Service
 
-**Position**: Storage + retrieval + offline distillation of Agent-private Memory **plus the standalone service process**, described across two crates.
+**Position**: Storage + retrieval + offline distillation of Bot-private Memory **plus the standalone service process**, described across two crates.
 
 - `acowork-memory`: Memory traits / types / offline distiller / retrieval quality metrics — **plus** the SQLite storage engine (`src/sqlite/`) — **plus** the `acowork-memory` service process (`src/main.rs` + `src/service/`, ADR-101).
 - `acowork-sqlite`: keeps only the two sidecar subsystems that still belong to the Runtime — the conversation vector index `ConversationStore` (ADR-081) and `SqliteSessionMetaStore` (ADR-082 §4 step 3); both hang off an already-open `SqliteStore`, and the crate re-exports that type.
@@ -89,7 +89,7 @@ crates/acowork-memory/
 - `manager.rs`: intermediate layer between the caller and the Store; orchestrates the three-phase
   memory lifecycle. The service side uses only its **retrieval orchestration**
   (`service/mcp/tools.rs` runs `retrieve()` with `MemoryManagerConfig::default()`: retrieval
-  quality parameters are service-wide now, and the per-agent config that lived inside the old
+  quality parameters are service-wide now, and the per-bot config that lived inside the old
   Runtime session handle has no counterpart on this side of the boundary).
 - `consolidation/distiller.rs`: 6-step offline distillation pipeline (ADR-068 §3.4), reads/writes via the `MemoryProvider` interface; scheduled by `service/pipeline.rs`.
 - `retrieval_metrics.rs`: retrieval quality metrics (see §6).
@@ -242,7 +242,7 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 | 9 | `chat_token_usage` ledger table | Design 27 (Chat Router usage, one aggregate row per Chat) |
 | 10 | `sessions.intent_key` / `intent_closed` | ADR-106 D11 (the intent context a session owns, plus its terminal mark) |
 | 11 | `chat_token_usage.history_tokens` | Design 27 (router projected-history occupancy, the only figure comparable to the budget) |
-| 12 | `sessions.aware_users` | ADR-076 §Decision 4 rev. (read-only aware accounts, seeded by the Gateway for agent-to-agent intents) |
+| 12 | `sessions.aware_users` | ADR-076 §Decision 4 rev. (read-only aware accounts, seeded by the Gateway for bot-to-bot intents) |
 | 13 | `sessions.tool_policy` (JSON, `NULL` = inherit the bot layer) | ADR-109 (per-session builtin-tool / MCP narrowing) |
 
 v3 stores **sum + count**, not a folded mean: each figure divides by its own sample count. A call can be measurable for TTFT only (the Provider reported no completion count), and a shared denominator would systematically inflate the speed mean.

@@ -1,6 +1,6 @@
-# Agent manifest 能力声明重构方案
+# Bot manifest 能力声明重构方案
 
-> 状态：v2（已按评审意见补 §7 推荐 MCP 前端交互、§8 Create Agent dialog 全字段覆盖；仍未改动生产代码）
+> 状态：v2（已按评审意见补 §7 推荐 MCP 前端交互、§8 Create Bot dialog 全字段覆盖；仍未改动生产代码）
 > 范围：`manifest.toml` 声明面 —— config 默认值 / MCP 推荐声明 + 其前端作用 / capability 与 skill 的关系 / labels / 创建向导
 > 关联：ADR-009、ADR-017、ADR-025、ADR-026、ADR-029、ADR-069、ADR-072、ADR-090、ADR-094、ADR-101
 
@@ -23,7 +23,7 @@
 
 ### 1.3 MCP 的三份状态，包无法参与
 
-[core/acowork-runtime/src/agent_config.rs:25](core/acowork-runtime/src/agent_config.rs#L25) `AgentMcpConfig { catalog, local, active_names }`：`catalog` 由 Gateway 推送，`local` 由 agent 自己的 `mcp_install` 装，`active_names = None` 表示"一个都不激活"（[:81](core/acowork-runtime/src/agent_config.rs#L81)）。
+[core/acowork-runtime/src/agent_config.rs:25](core/acowork-runtime/src/agent_config.rs#L25) `AgentMcpConfig { catalog, local, active_names }`：`catalog` 由 Gateway 推送，`local` 由 bot 自己的 `mcp_install` 装，`active_names = None` 表示"一个都不激活"（[:81](core/acowork-runtime/src/agent_config.rs#L81)）。
 
 预设注册表在**前端**：`apps/acowork-desktop/src/lib/mcp-presets.ts`，id 为 `playwright` / `brave-search` / `context7` 等；Gateway 与 Runtime 都不认识这些 id。
 
@@ -69,7 +69,7 @@ default_enabled_tools_for("pm")   agent_config.rs:1077
    - tool（builtin / WASM / RAG）：执行原语，`[[tools]]` 声明 opt-in（现状保持不变）；
    - mcp server：工具供给源，`[[mcp_servers]]` 声明**推荐**，安装与启用仍是用户动作；
    - skill：内部流程，唯一来源是包内 `skills/*/SKILL.md`（运行期可增删，manifest 不复制）；
-   - capability：对外 intent 契约，可被其他 agent 寻址的动作。
+   - capability：对外 intent 契约，可被其他 bot 寻址的动作。
 3. **包内不出现可执行内容**的老原则不破；manifest 声明的 MCP 也**不携带安装动作的自动执行权**（ADR-090：安装由 Runtime 在用户首次启用时执行）。
 4. **向后兼容**：新增字段一律 optional + serde default；老包零改动可解析；新字段只影响"首次安装 / 首次启动的 seed"，不影响已存在的用户配置。
 5. **声明图可校验**：capability → skill、skill → tool/mcp 的引用必须在发布期或安装期能被静态检查，检查失败的语义是包的问题，不是运行期静默降级。
@@ -95,7 +95,7 @@ default_enabled_tools_for("pm")   agent_config.rs:1077
 | 排除项 | 理由 |
 |---|---|
 | `shell_approval_threshold` / `approval_timeout_secs` | 安全边界归用户与平台，包不得降低审批门槛 |
-| `max_sessions` | 宿主资源配额，不是 agent 属性 |
+| `max_sessions` | 宿主资源配额，不是 bot 属性 |
 | `session_language` | 身份偏好，已有 `identity_deps` 通道 |
 | `system_prompt_override` | 用户覆盖域，包已通过 `prompts/` 表达 |
 | `search` / `chat_router` | 平台内部检索/路由策略，作者不该感知 |
@@ -181,7 +181,7 @@ required_secrets = ["CORP_MCP_TOKEN"]
 tools = ["kb_search"]
 ```
 
-形态 B 的必要性来自现状：`pm` / `doc` / `memory` 三个 MCP 由 Gateway 自动注入每个 agent 的 catalog（`core/acowork-gateway/src/mqtt/global_resources_builders.rs:335`），包无从"推荐安装"，但**确实需要声明"我用其中哪些工具"**。`hosted` 形态正是 `PM_DEFAULT_ENABLED_TOOLS` 那个硬编码的声明化替代。
+形态 B 的必要性来自现状：`pm` / `doc` / `memory` 三个 MCP 由 Gateway 自动注入每个 bot 的 catalog（`core/acowork-gateway/src/mqtt/global_resources_builders.rs:335`），包无从"推荐安装"，但**确实需要声明"我用其中哪些工具"**。`hosted` 形态正是 `PM_DEFAULT_ENABLED_TOOLS` 那个硬编码的声明化替代。
 
 v1 **禁止内联 stdio**（`transport = "stdio"` + `command`）。理由：stdio 声明等于"在你的机器上跑任意命令"，而它以"推荐"形态出现，收益远小于风险 —— 需要 stdio 的场景一律走预设引用（预设本身已经带了 `install` 规格与 `requiredEnv`，安装走 ADR-072 的管线）。若后续确需支持，必须新增 `Permission::McpInstall(Option<String>)` 作为门槛，这是独立决策。
 
@@ -228,30 +228,30 @@ pub struct RecommendedMcpServer {
 
 ### 4.5 推荐安装落 catalog，不落 local（决策）
 
-结论：**`[[mcp_servers]]` 的推荐项被用户点「安装并启用」后，写入的是 Gateway 的全局 catalog（`POST /api/mcp-catalog`），不是该 agent 的 `local` 列表。**
+结论：**`[[mcp_servers]]` 的推荐项被用户点「安装并启用」后，写入的是 Gateway 的全局 catalog（`POST /api/mcp-catalog`），不是该 bot 的 `local` 列表。**
 
 事实依据（代码取证）：
 
 | 事实 | 位置 |
 |---|---|
-| catalog 是**机器级共享注册表**，注释原文："a shared registry of server definitions (including credentials/API keys) that all agents can selectively activate. Analogous to the Vault for LLM providers" | `core/acowork-gateway/src/http/mcp_catalog_api.rs:3` |
-| catalog 持久化在 Gateway 的 `data_dir/mcp_catalog.json`，由 Gateway 推送给每个 agent | 同上 `catalog_path()` |
-| `local` 是**实例级**，由 agent 自己的 `mcp_install` / `mcp_uninstall` 工具写 | `core/acowork-runtime/src/agent_config.rs:29` |
+| catalog 是**机器级共享注册表**，注释原文："a shared registry of server definitions (including credentials/API keys) that all bots can selectively activate. Analogous to the Vault for LLM providers" | `core/acowork-gateway/src/http/mcp_catalog_api.rs:3` |
+| catalog 持久化在 Gateway 的 `data_dir/mcp_catalog.json`，由 Gateway 推送给每个 bot | 同上 `catalog_path()` |
+| `local` 是**实例级**，由 bot 自己的 `mcp_install` / `mcp_uninstall` 工具写 | `core/acowork-runtime/src/agent_config.rs:29` |
 | "装没装"从不持久化 —— **本机 PATH 就是共享状态**（ADR-090 D6）；第一个启用者做一次 install，后来者 health_check 直接通过 | `core/acowork-runtime/src/mcp_ensure.rs:1` |
 | `required_secrets` 的过滤（ADR-090 D4）在 Gateway 侧对 catalog 生效；local 条目不经这条链路 | `core/acowork-runtime/src/agent_config.rs`、`global_resources_builders.rs` |
 
 四条理由：
 
-1. **MCP 是机器资源**。同一个 `brave-search` 被 3 个 agent 推荐，落 catalog 只配置一次（含凭据）；落 local 会得到 3 份配置、3 条 `install` spec，各自跑一遍安装与探测。
+1. **MCP 是机器资源**。同一个 `brave-search` 被 3 个 bot 推荐，落 catalog 只配置一次（含凭据）；落 local 会得到 3 份配置、3 条 `install` spec，各自跑一遍安装与探测。
 2. **复用唯一安装路径**。预设安装管线（ADR-072）写的就是 catalog，`POST /api/mcp-catalog` 是既有端点；落 local 需要新造一条"从预设安装到实例"的写路径，与本方案"不新增写路径"的原则冲突。
-3. **凭据语义**。catalog 是凭据的既有归属地（类比 Vault）；把企业 MCP 的 token 拆散到 N 个 agent 配置文件里，既不安全也不可维护。
-4. **`local` 的语义要留住**：它属于**运行期自装** —— agent 通过 `mcp_install` 工具临时给自己装一个 server，没有可信预设可复用。包声明的推荐是**出厂意图**，不是运行时决定，两者不应混在一个列表里（合并时 local 还会 shadow 同名 catalog 条目，见 `AgentMcpConfig::merged()`）。
+3. **凭据语义**。catalog 是凭据的既有归属地（类比 Vault）；把企业 MCP 的 token 拆散到 N 个 bot 配置文件里，既不安全也不可维护。
+4. **`local` 的语义要留住**：它属于**运行期自装** —— bot 通过 `mcp_install` 工具临时给自己装一个 server，没有可信预设可复用。包声明的推荐是**出厂意图**，不是运行时决定，两者不应混在一个列表里（合并时 local 还会 shadow 同名 catalog 条目，见 `AgentMcpConfig::merged()`）。
 
 三个必须一起处理的后果：
 
-1. **可见性外溢**（预期行为，需在 UI 说明）：从 agent A 的工具面板装 `brave-search`，它会出现在本机每个 agent 的 MCP 列表里（**未激活**）。catalog 推送不会自动激活任何条目 —— `save_agent_mcp_config_catalog` 只在 `active_names` 为 `None` 时默认激活系统注入项（当前仅 `pm`）。走查稿 §A 需要补一句提示："安装后本机其他 Agent 也能看到它，但只在当前 Agent 激活。"
-2. **卸载 agent 不清理 catalog**：与用户手动添加的条目一致。可选增强（v1 不做，仅记录）：catalog 条目加 `origin`（`manual` | `preset:<id>` | `agent:<agent_id>`），用于 UI 显示来源与将来清理孤儿。
-3. **工具白名单仍是 per-agent**：`recommended.tools` 落到 `agent_mcp_tools.json`（实例级），与 catalog 的机器级配置正交 —— 正是 ADR-069 的分层（服务器共享、工具开关按 agent 各自决定）。
+1. **可见性外溢**（预期行为，需在 UI 说明）：从 bot A 的工具面板装 `brave-search`，它会出现在本机每个 bot 的 MCP 列表里（**未激活**）。catalog 推送不会自动激活任何条目 —— `save_agent_mcp_config_catalog` 只在 `active_names` 为 `None` 时默认激活系统注入项（当前仅 `pm`）。走查稿 §A 需要补一句提示："安装后本机其他 Bot 也能看到它，但只在当前 Bot 激活。"
+2. **卸载 bot 不清理 catalog**：与用户手动添加的条目一致。可选增强（v1 不做，仅记录）：catalog 条目加 `origin`（`manual` | `preset:<id>` | `bot:<agent_id>`），用于 UI 显示来源与将来清理孤儿。
+3. **工具白名单仍是 per-bot**：`recommended.tools` 落到 `agent_mcp_tools.json`（实例级），与 catalog 的机器级配置正交 —— 正是 ADR-069 的分层（服务器共享、工具开关按 bot 各自决定）。
 
 ---
 
@@ -261,7 +261,7 @@ pub struct RecommendedMcpServer {
 
 | 对象 | 回答的问题 | 存放位置 | 生命周期 | 消费方 |
 |---|---|---|---|---|
-| capability | 别的 agent 能否寻址我这个动作、契约是什么 | manifest `[capabilities.*]` | 包（安装期注册） | Gateway capability 注册表 / overview / intent 契约 |
+| capability | 别的 bot 能否寻址我这个动作、契约是什么 | manifest `[capabilities.*]` | 包（安装期注册） | Gateway capability 注册表 / overview / intent 契约 |
 | skill | 我内部按什么流程做事 | 包内 `skills/*/SKILL.md`，可运行期后装 | 实例（可增删） | Runtime 提示注入 + `load_skill` |
 | tool | 我用什么原语执行 | `[[tools]]` + `agent_tools.json` | 实例（用户开关） | ToolRegistry |
 | mcp server | 我的工具从哪来 | `[[mcp_servers]]` + `agent_mcp*.json` | 实例（用户开关） | MCP 管理器 |
@@ -302,16 +302,16 @@ labels = ["project-management", "agile", "requirements"]
 
 | # | 作用 | 用户看到什么 | 行为变化 |
 |---|---|---|---|
-| 1 | 可见 | Agent 工具面板顶部出现「来自 Agent 包的建议」分组，每行带作者写的 `why` | 用户不再需要自己去猜这个 Agent 缺什么 |
+| 1 | 可见 | Bot 工具面板顶部出现「来自 Bot 包的建议」分组，每行带作者写的 `why` | 用户不再需要自己去猜这个 Bot 缺什么 |
 | 2 | 一键落地 | 「安装并启用」按钮 | 复用现有 preset 安装管线 + 激活接口，一次点击完成今天要跳 3 个界面的操作 |
 | 3 | 真实改变工具集合 | 启用后该 server 的 `tools` 白名单成为默认 enabled 子集 | 用户不必在 30 个工具里手挑 4 个；这就是 `PM_DEFAULT_ENABLED_TOOLS` 的替代 |
-| 4 | 缺口可见 | 必需但未满足 → Agent 卡片角标 + 详情"能力受限"；工具改名 → 行内"该 MCP 未提供 `<tool>`" | 作者声明的意图与实际环境不一致时能被发现，而不是静默降级 |
+| 4 | 缺口可见 | 必需但未满足 → Bot 卡片角标 + 详情"能力受限"；工具改名 → 行内"该 MCP 未提供 `<tool>`" | 作者声明的意图与实际环境不一致时能被发现，而不是静默降级 |
 
 ### 7.2 状态机（Gateway 合成，前端只渲染）
 
 | state | 判定 | 行内文案 | trailing 动作 | 复用的既有端点 |
 |---|---|---|---|---|
-| `unavailable` | `recommended.name` 不在该 agent 的 catalog ∪ local 里 | 「未安装」+ why | 安装并启用 | `POST /api/mcp-catalog`（preset 安装管线）→ `PUT /api/agents/{id}/mcp-servers` 追加 name |
+| `unavailable` | `recommended.name` 不在该 bot 的 catalog ∪ local 里 | 「未安装」+ why | 安装并启用 | `POST /api/mcp-catalog`（preset 安装管线）→ `PUT /api/agents/{id}/mcp-servers` 追加 name |
 | `secrets_missing` | 在 catalog 里但 `required_secrets` 未填（Gateway 已按 ADR-090 D4 过滤掉） | 「缺少密钥：BRAVE_API_KEY」 | 填写密钥 | 复用 add-server 对话框的 secret 表单 |
 | `installed_inactive` | 在 catalog/local 里，但不在 `active_names` | 「已安装，未启用」 | 启用 | `PUT /api/agents/{id}/mcp-servers` |
 | `active` | 在 `active_names` 里 | 「已启用」+ 工具数 | 无（可展开看工具） | — |
@@ -323,9 +323,9 @@ labels = ["project-management", "agile", "requirements"]
 
 ### 7.3 装配点（三处，均有明确契约）
 
-1. **ToolsTab（右侧面板 → 工具）**：新分组「来自 Agent 包的建议」置于 MCP Servers 卡片**之上**（它需要用户先处理），仅当 `recommended.length > 0` 时渲染。每行复用 `ExpandableRow`，展开体显示 `why` + 若已激活则列出缺失工具。
-2. **Agent 列表卡片 / 详情**：存在 `required = true` 且 state ∉ {active, dismissed} 的条目时，卡片出一个小角标（沿用 sidebar count badge 的视觉语法），详情页加一行「能力受限：缺少必需 MCP `brave-search`」。**不阻断启动与聊天**（"建议"不是"依赖"）。
-3. **创建/安装成功后**：`onCreated` 回调里把右侧面板切到 `tools` 标签并展开该分组（一次性）。这样"推荐"在用户第一次见到这个 Agent 时就出现在眼前，而不是埋在标签页里。
+1. **ToolsTab（右侧面板 → 工具）**：新分组「来自 Bot 包的建议」置于 MCP Servers 卡片**之上**（它需要用户先处理），仅当 `recommended.length > 0` 时渲染。每行复用 `ExpandableRow`，展开体显示 `why` + 若已激活则列出缺失工具。
+2. **Bot 列表卡片 / 详情**：存在 `required = true` 且 state ∉ {active, dismissed} 的条目时，卡片出一个小角标（沿用 sidebar count badge 的视觉语法），详情页加一行「能力受限：缺少必需 MCP `brave-search`」。**不阻断启动与聊天**（"建议"不是"依赖"）。
+3. **创建/安装成功后**：`onCreated` 回调里把右侧面板切到 `tools` 标签并展开该分组（一次性）。这样"推荐"在用户第一次见到这个 Bot 时就出现在眼前，而不是埋在标签页里。
 
 ### 7.4 数据契约
 
@@ -345,7 +345,7 @@ labels = ["project-management", "agile", "requirements"]
 
 ---
 
-## 8. Create Agent dialog：覆盖本方案的全部数据
+## 8. Create Bot dialog：覆盖本方案的全部数据
 
 > 逐屏走查稿见 [agent-manifest-ui-walkthrough.md](agent-manifest-ui-walkthrough.md) §屏 D。
 
@@ -459,9 +459,9 @@ pub struct CreateAgentDraft {
 | 0 | 本方案 | `docs/plan/zh/` | — |
 | 1 | manifest 类型：`[config]`、`labels`、`[[mcp_servers]]`、`capabilities.*.skills`；`validate()` 新规则；`ManifestConfigDefaults`；`validate_graph` 纯函数 | `core/acowork-core/src/manifest.rs`（或拆 `manifest/`） | TOML 解析（含老包回归）+ 每一条校验规则的 red→green + 投影函数 |
 | 2 | `seed_agent_config_from_manifest` 替换 session_init 的 if 序列；`agent_mcp.json` 新增 `recommended` / `dismissed` 投影；`default_enabled_tools_for` 删除、改读 manifest | `acowork-runtime/src/agent_config.rs`、`startup/session_init.rs`、`agent_core.rs` | seed 幂等性 + 不覆盖非 None + 老 `agent_mcp.json` 解析兼容 |
-| 3 | 预设表上移 Gateway + `GET /api/mcp-presets`；`GET /agents/{id}/mcp-servers` 增 `recommended[].state`；`PUT` 增 `dismissed_recommendations`；agents list/detail 增 `labels` | `acowork-gateway/src/http/` | 预设 JSON 契约 + `state` 合成矩阵 + list 过滤 |
-| 4a | **推荐 MCP 的真实交互**（§7）：ToolsTab 建议分组 + 4 个动作 + 忽略/恢复；Agent 卡片要求角标与"能力受限"行；创建成功后自动切 Tools 标签 | `right-panel/ToolsTab.tsx`、`stores/mcpStore.ts`、`agent-list/*`、`lib/types.ts` | `resolveRecommended` / `missingRecommendedTools` 纯函数矩阵；不新增 DOM 选择器 |
-| 4b | **Create Agent dialog 5 步全字段**（§8）：labels / config / mcp / capability 四类输入；删掉 skill→capability；预览改走 `preview_manifest`；`create_agent(CreateAgentDraft)` + 单一 `build_manifest`；5 个 locale 文案（含修掉 `createWizard.skillsHint`） | `agent-list/CreateWizard.tsx`、`src-tauri/src/commands/create.rs`、`i18n/locales/*` | `build_manifest` 映射矩阵 + preview 与 create 同源 + 各步 `canNext` |
+| 3 | 预设表上移 Gateway + `GET /api/mcp-presets`；`GET /agents/{id}/mcp-servers` 增 `recommended[].state`；`PUT` 增 `dismissed_recommendations`；bots list/detail 增 `labels` | `acowork-gateway/src/http/` | 预设 JSON 契约 + `state` 合成矩阵 + list 过滤 |
+| 4a | **推荐 MCP 的真实交互**（§7）：ToolsTab 建议分组 + 4 个动作 + 忽略/恢复；Bot 卡片要求角标与"能力受限"行；创建成功后自动切 Tools 标签 | `right-panel/ToolsTab.tsx`、`stores/mcpStore.ts`、`agent-list/*`、`lib/types.ts` | `resolveRecommended` / `missingRecommendedTools` 纯函数矩阵；不新增 DOM 选择器 |
+| 4b | **Create Bot dialog 5 步全字段**（§8）：labels / config / mcp / capability 四类输入；删掉 skill→capability；预览改走 `preview_manifest`；`create_agent(CreateAgentDraft)` + 单一 `build_manifest`；5 个 locale 文案（含修掉 `createWizard.skillsHint`） | `agent-list/CreateWizard.tsx`、`src-tauri/src/commands/create.rs`、`i18n/locales/*` | `build_manifest` 映射矩阵 + preview 与 create 同源 + 各步 `canNext` |
 | 5 | ADR-104（zh + en 同提交）、`docs/design/{zh,en}/02-agent-package.md`、examples 更新、`dev/` 打包期 graph 校验接线 | docs / dev / examples | 打包脚本对非法包必须失败 |
 
 Phase 1 与 Phase 2 各自独立可交付、可回滚：Phase 1 只加字段与纯函数（无行为变化）；Phase 2 换 seed 入口（行为等价 + 新增两处来源）。Phase 3 → 4a 之间有硬依赖（没有 `state` 合成就没有可渲染的建议行）；4b 只依赖 Phase 1（`build_manifest` 需要新类型），可与 2/3/4a 并行。

@@ -2,7 +2,7 @@
 
 > 版本：v1.0 | 日期：2026-11-09
 >
-> **一句话**：agent↔agent 的 intent 与 intent response 在聊天列表里显示成 `[intent:<id>:<action>] {"...":"..."}` 这样的 JSON 源码，因为**模型提示材料**与**人类展示文本**长期以来是同一个字符串；本计划把两者拆成两条正交的产物——`content` 继续作为机器信封交给模型，新增 `display` 投影随 user 行的 `metadata.intent` 落库、经 `RoundProjection.user.display` 透传到桌面与移动端，让所有画像素的表面读 markdown，让程序继续读 JSON。
+> **一句话**：bot↔bot 的 intent 与 intent response 在聊天列表里显示成 `[intent:<id>:<action>] {"...":"..."}` 这样的 JSON 源码，因为**模型提示材料**与**人类展示文本**长期以来是同一个字符串；本计划把两者拆成两条正交的产物——`content` 继续作为机器信封交给模型，新增 `display` 投影随 user 行的 `metadata.intent` 落库、经 `RoundProjection.user.display` 透传到桌面与移动端，让所有画像素的表面读 markdown，让程序继续读 JSON。
 >
 > 前置调查已完成，证据均带 file:line（见 §1）。拆成 M1–M5 五个可独立交付/测试的模块（§4），§6 记录实施进度。
 
@@ -18,7 +18,7 @@
 
 ### 1.2 链路逐段
 
-1. **发送**：内置工具 `intent_send`（[intent_send.rs](../../../core/acowork-runtime/src/tools/builtin/intent_send.rs)）`POST /api/intents`，`params` 是 agent 自己构造的任意 JSON object。
+1. **发送**：内置工具 `intent_send`（[intent_send.rs](../../../core/acowork-runtime/src/tools/builtin/intent_send.rs)）`POST /api/intents`，`params` 是 bot 自己构造的任意 JSON object。
 2. **投递**：Gateway 的 [intent_api.rs](../../../core/acowork-gateway/src/http/intent_api.rs) → [delivery.rs](../../../core/acowork-gateway/src/intent/delivery.rs)（唤醒 + 信箱 + MQTT publish），信封原样传递。
 3. **接收**：[inbound.rs:317](../../../core/acowork-runtime/src/agent/inbound.rs#L317) 得到 `InboundMessage::IntentMessage`，[gateway_loop.rs](../../../core/acowork-runtime/src/startup/gateway_loop.rs) 交给 `deliver_intent_turn`。
 4. **渲染**：[intent_turn.rs:382](../../../core/acowork-runtime/src/agent/intent_turn.rs#L382) `render_intent_message()` 生成 `[intent:{from}:{action}] {params}` + 坐标行（message_id / conversation_id / source_chat_session_id / repo）。`{params}` 是 `serde_json::Value` 的 `Display`——**单行紧凑 JSON**。
@@ -58,7 +58,7 @@ body 是模型输入与（ADR-106 前的）会话契约，改它会污染 prompt
 一个 response 的 `message` 可以是整篇答复。投影是给「一眼看懂」的，不是给全文归档的——全文永远在机器信封里。超限时截断并置 `truncated: true`，桌面/移动在正文末尾渲染一行提示（i18n key `displayTruncated`），用户知道「还有更多，且原始信封完整」。
 
 **D3 — 请求侧没有 `message` 字段时，回落到 `params → markdown 列表`。**
-`response` 的载荷有约定键（`message`），原样当 markdown 渲染。`request` 没有约定键，agent 会传 `{"title":…,"workspace":…,"scope":…,"requirements":…}` 这类结构；若整段塞成一行，就是「JSON 问题换了件衣服」。规则：`title` 类键作标题行，`message`/`content`/`body` 类键原样作正文（它通常已是 markdown），**其余键逐条渲染成 markdown 列表**。`summary` 取 title，没有 title 就取正文首句，再没有就用 action。
+`response` 的载荷有约定键（`message`），原样当 markdown 渲染。`request` 没有约定键，bot 会传 `{"title":…,"workspace":…,"scope":…,"requirements":…}` 这类结构；若整段塞成一行，就是「JSON 问题换了件衣服」。规则：`title` 类键作标题行，`message`/`content`/`body` 类键原样作正文（它通常已是 markdown），**其余键逐条渲染成 markdown 列表**。`summary` 取 title，没有 title 就取正文首句，再没有就用 action。
 
 ---
 
@@ -105,6 +105,6 @@ body 是模型输入与（ADR-106 前的）会话契约，改它会污染 prompt
 
 ## 7. 非目标与后续
 
-1. **不改 intent 的 wire 契约**。`params` 仍是 agent 自定的 JSON；本计划只在接收侧做投影，不要求发送方遵守任何新 schema——否则协议变更会波及所有 agent 包。
-2. **不做发送侧预览确认**（「你的 agent 将要发出这段文字」）。属于产品决策，与本缺陷无关。
+1. **不改 intent 的 wire 契约**。`params` 仍是 bot 自定的 JSON；本计划只在接收侧做投影，不要求发送方遵守任何新 schema——否则协议变更会波及所有 bot 包。
+2. **不做发送侧预览确认**（「你的 bot 将要发出这段文字」）。属于产品决策，与本缺陷无关。
 3. **展示投影不参与任何契约**：没有它就回落，有它也不进 prompt。任何让它影响模型输入的改动都视为回归。

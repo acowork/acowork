@@ -78,7 +78,7 @@ Agent Runtime process startup
          └─ IPC Client: UsageReport (async)
 ```
 
-### 2.3 Intent Cross-Agent Communication
+### 2.3 Intent Cross-Bot Communication
 
 ```
 Weather Agent → IPC Client → GatewayRequest::IntentSend

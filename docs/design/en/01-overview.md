@@ -31,7 +31,7 @@ Design a decentralized, high-security, scalable AI Bot runtime platform. The cor
 - **Bot Autonomy**: Bot processes connect directly to LLM APIs, execute tools autonomously, and manage permission checks without relying on Gateway to proxy business logic.
 - **Biomimetic Memory System**: Memory is owned by the standalone memory service `acowork-memory` (ADR-101), one SQLite database per Bot instance (`$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`). The storage backend is SQLite (ADR-082): vectors live in a `vectors` table, lexical search runs on an FTS5 trigram index, and retrieval is a vector + lexical hybrid. The layers map onto four persisted labels (Episodic / Knowledge / Procedural / Autobiographical); the transient layer is the LLM context window and is never persisted. It includes forgetting mechanisms (three-factor decay), privacy levels (PrivacyLevel), and the memory lifecycle (Retrieve/Inject/Record/Consolidate/Decay/Compact).
   > Associative diffusion retrieval (§6) is a design goal, not implemented — ADR-082 D4 removed inter-layer graph traversal and creates no `edges` table.
-- **Permission Declaration and Authorization**: Bots declare required permissions (network, filesystem, cross-Agent calls, etc.) in their manifest; Gateway configures sandboxes at startup; Bots perform runtime self-checks.
+- **Permission Declaration and Authorization**: Bots declare required permissions (network, filesystem, cross-Bot calls, etc.) in their manifest; Gateway configures sandboxes at startup; Bots perform runtime self-checks.
 - **Cross-Platform Support**: .bot package format and the MQTT + HTTP protocol contract are unified across platforms; per-platform runtime mechanisms (process model, transport layer, sandbox) adapt to platform characteristics.
 
 ## 3. Overall Architecture
@@ -99,7 +99,7 @@ Design a decentralized, high-security, scalable AI Bot runtime platform. The cor
 | Private memory read/write | Memory service `acowork-memory` | Tool call (ADR-101), no business logic in the Runtime |
 | API Key storage | Gateway Vault | Centralized secure management |
 | API Key distribution | One-time at startup to Bot | Bot needs direct LLM access |
-| Budget tracking | Gateway (receives reports) | Cross-Agent statistics |
+| Budget tracking | Gateway (receives reports) | Cross-Bot statistics |
 | Budget enforcement | Bot (local pre-check) | Low latency, autonomous |
 | Budget hard limit | Gateway (over-limit signal) | Safety net |
 | Rate limiting | Gateway (token allocation) | Shared resource coordination |

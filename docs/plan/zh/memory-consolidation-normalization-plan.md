@@ -12,7 +12,7 @@
 
 ## 1. 起因：一次静默失败
 
-Ponytail agent 的记忆面板开了沉淀开关很久，产出 0 条沉淀记忆。排查结果：
+Ponytail bot 的记忆面板开了沉淀开关很久，产出 0 条沉淀记忆。排查结果：
 
 ```
 $ grep -h "EpisodicDistiller triggered" *.log | wc -l   → 29
@@ -113,8 +113,8 @@ content, category, confidence, importance, privacy, keywords    ← 现有
 
 `normalized` = **一句话的归一化表述**（第三人称、去场景、可长期为真）。不是三元组，不是 SPO，就是一句话。这是模型最擅长的一次性输出，编程场景无压力：
 
-> **content**：「用户确认了架构边界：Gateway = 通信 + 资源管理 + 反向代理，Node Agent = 通信转发 + Runtime 生命周期（装载/卸载/启动/停止），不部署业务逻辑到 Agent Runtime 内部，私域数据读写一律走 HTTP」
-> **normalized**：「ACowork 的 Gateway 只负责通信、资源管理与反向代理，Node Agent 只负责通信转发与 Runtime 生命周期管理，Agent 私有数据只经 Runtime HTTP 读写」
+> **content**：「用户确认了架构边界：Gateway = 通信 + 资源管理 + 反向代理，Node Service = 通信转发 + Runtime 生命周期（装载/卸载/启动/停止），不部署业务逻辑到 Bot Runtime 内部，私域数据读写一律走 HTTP」
+> **normalized**：「ACowork 的 Gateway 只负责通信、资源管理与反向代理，Node Service 只负责通信转发与 Runtime 生命周期管理，Bot 私有数据只经 Runtime HTTP 读写」
 
 向后兼容：缺省时蒸馏器回退用 `content`。
 
@@ -267,7 +267,7 @@ for episode in 扫描窗口:
 | 改 ADR-071 的触发参数（interval / accumulation / idle） | 触发机制本次工作正常，日志已证明 |
 | 给蒸馏器加 canonical predicate 词表 | 与 §2.3 结论冲突：没有结构消费者，词表是纯成本 |
 | 冲突消解逻辑改动 | 独立问题，混进来会让验证面翻倍 |
-| per-agent prompt override 机制变更 | 槽位保留，只是默认 prompt 内容变了 |
+| per-bot prompt override 机制变更 | 槽位保留，只是默认 prompt 内容变了 |
 
 ---
 
@@ -275,7 +275,7 @@ for episode in 扫描窗口:
 
 | # | 问题 | 我的倾向 |
 |---|---|---|
-| Q1 | `normalized` 必填还是选填？ | **选填**。必填会增加每次 `memory_store` 调用的失败面，且该工具是所有 agent 共用的契约 |
+| Q1 | `normalized` 必填还是选填？ | **选填**。必填会增加每次 `memory_store` 调用的失败面，且该工具是所有 bot 共用的契约 |
 | Q2 | 合并候选数 K 取多少？ | **K=5**。再多就把合并判断变成又一次批量处理 |
 | Q3 | 召回阈值 0.65 是否偏低导致误合并？ | 宁可宽松。误合并可被用户纠正（面板可编辑），漏合并不被察觉——但漏合并**不会永久丢失**（无墓碑），与 §2.5 的不对称性一致 |
 | Q4 | M0 是否先独立发布？ | **是**。M0 是 M2 的验证工具，且即使重构取消，M0 也该落地 |

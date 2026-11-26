@@ -1,8 +1,8 @@
-# agent↔agent 执行会话的人类介入与恢复通道实现计划
+# bot↔bot 执行会话的人类介入与恢复通道实现计划
 
 > 版本：v1.0（待人类确认） | 日期：2026-11-09
 >
-> **一句话**：agent A 发起 intent 让 agent B 干活时创建的执行 session，`initiator` 是 A（agent UUID）⇒ 按 [`SessionMeta::is_writable_by`](../../../core/acowork-core/src/session_meta.rs#L905) 只有 A 能写，人类既发不了消息也改不了 `model`；一旦开局参数不可用（选了一个额度已尽的 model / 凭据失效），这一轮以 `failed` 收口、session 停在 Idle，**没有任何入口能把这次运行救回来**（A 已经收到 failed 回执，不会重发；B 的会话里也没有第二个人）。本计划把"人类介入"做成一等能力：**能力分层授权 + 代发言溯源 + 真人入局 + model 自动降级**四条轴，拆成 8 个可独立交付/测试的模块。
+> **一句话**：bot A 发起 intent 让 bot B 干活时创建的执行 session，`initiator` 是 A（bot UUID）⇒ 按 [`SessionMeta::is_writable_by`](../../../core/acowork-core/src/session_meta.rs#L905) 只有 A 能写，人类既发不了消息也改不了 `model`；一旦开局参数不可用（选了一个额度已尽的 model / 凭据失效），这一轮以 `failed` 收口、session 停在 Idle，**没有任何入口能把这次运行救回来**（A 已经收到 failed 回执，不会重发；B 的会话里也没有第二个人）。本计划把"人类介入"做成一等能力：**能力分层授权 + 代发言溯源 + 真人入局 + model 自动降级**四条轴，拆成 8 个可独立交付/测试的模块。
 >
 > 前置调查已完成，证据均带 file:line（见 §1）。§7 列出**必须由人类拍板的开放问题**，未确认前不动手。
 
@@ -16,7 +16,7 @@
 
 - 统一写入口 [`post_send_message`](../../../core/acowork-runtime/src/http/session_control.rs#L852) 第一步就是 [`authorize_write`](../../../core/acowork-runtime/src/http/session_control.rs#L207) → [`SessionMeta::is_writable_by`](../../../core/acowork-core/src/session_meta.rs#L905)，`Some(initiator)` 分支只有 `initiator == uid` 一条路；注释明确"`Members` 从不转移所有权"、admin 也不例外。
 - `PUT /sessions/{sid}/config`（[server.rs:1437](../../../core/acowork-runtime/src/http/server.rs#L1437)）同样先 `authorize_write`，所以 **model / provider / reasoning_effort 人类也改不了**。
-- agent↔agent 的 `initiator` 是 agent UUID：[`route_intent_session(..., Some(env.from))`](../../../core/acowork-runtime/src/agent/session/session_manager.rs#L596) → 人类 uid 永远不等于它。
+- bot↔bot 的 `initiator` 是 bot UUID：[`route_intent_session(..., Some(env.from))`](../../../core/acowork-runtime/src/agent/session/session_manager.rs#L596) → 人类 uid 永远不等于它。
 - 只读侧上一轮已经放开：`aware_users`（[session_meta.rs:729](../../../core/acowork-core/src/session_meta.rs#L729)）只进 `is_readable_by`（[L808](../../../core/acowork-core/src/session_meta.rs#L808)），注释写死了"`is_writable_by` 刻意不查它"。见 [intent-agent-to-agent-human-visibility-plan.md](./intent-agent-to-agent-human-visibility-plan.md)。
 
 **结论**：不是权限算错，是**能力维度缺失**——"能不能读"与"能不能以什么身份写"被压成了一个 bool。
@@ -38,7 +38,7 @@
 ### 1.4 人类不可能被"提问"：`has_human` 与会话参与者
 
 - `has_human` 由 Gateway 从 Chat 参与者推出：[`chat_client::has_human_participant`](../../../core/acowork-gateway/src/intent/chat_client.rs#L95)（`identity == "human"` 才算），随 [`chat_grant`](../../../core/acowork-gateway/src/http/intent_api.rs#L1106) 上 wire，落到 [`TurnSurface.has_human`](../../../core/acowork-runtime/src/agent/intent_turn.rs#L74)。
-- agent↔agent 的 pair 会话参与者只有两个 agent ⇒ `Some(false)` ⇒ 迭代上限 / 环检测直接 `aborted` 而不 park（[loop_.rs:1524](../../../core/acowork-runtime/src/agent/loop_.rs#L1524)、[L1724](../../../core/acowork-runtime/src/agent/loop_.rs#L1724)）；`ask_user_question` 的卡片即使被记录也**没有可回答的人**（`answerable_by` 在 [`TurnSurface::new`](../../../core/acowork-runtime/src/agent/intent_turn.rs#L100) 里取 `env.from`，即 agent A）。
+- bot↔bot 的 pair 会话参与者只有两个 bot ⇒ `Some(false)` ⇒ 迭代上限 / 环检测直接 `aborted` 而不 park（[loop_.rs:1524](../../../core/acowork-runtime/src/agent/loop_.rs#L1524)、[L1724](../../../core/acowork-runtime/src/agent/loop_.rs#L1724)）；`ask_user_question` 的卡片即使被记录也**没有可回答的人**（`answerable_by` 在 [`TurnSurface::new`](../../../core/acowork-runtime/src/agent/intent_turn.rs#L100) 里取 `env.from`，即 bot A）。
 - 唯一的"加入人类"通道被封在路由层：[`add_participants_route`](../../../core/acowork-user/src/http/chat_sessions_api.rs#L762) 只允许 `user_group`，`agent_agent` / `user_agent` 的第三人一律 422；而 store 层 [`add_participant`](../../../core/acowork-user/src/chat_sessions.rs#L3207) 本身没有这个限制。
 - 另有一处既存不一致：`POST /sessions/{sid}/answer` 只要 [`authorize_read`](../../../core/acowork-runtime/src/http/session_control.rs#L1074) 就能答卡，比其它写动作弱一档——今天因为 turn 从不 park 所以打不到，一旦人类可介入就会变成"能答题的人 ≠ 被问的人"。
 
@@ -72,7 +72,7 @@ pub enum ConfigField {  // PUT /sessions/{sid}/config 的每个字段都在这�
 
 新增 `SessionMeta.interveners: Vec<String>`（SQLite 加列，`SCHEMA_VERSION` 13 → 14，仿 [schema.rs](../../../core/acowork-memory/src/sqlite/schema.rs#L325) 的 v12 步）；写入方只有一处：Gateway 的 [`aware_users_seed`](../../../core/acowork-gateway/src/http/intent_api.rs#L1129) 同一次计算产出两个名单，随 wire 下发、Runtime 在建会话时 stamp（写一次，与 `set_aware_users` 同形）。
 
-**为什么不合并成一个名单**：读与写是两个正交能力，合并就是 ADR-076 修订时踩过的同一个坑（`initiator` 曾经同时承担"谁发起"和"谁是人类归属"）。今天 agent↔agent 没有人类隐私主体、两个名单必然相同；将来 PM 任务会话、跨组织共享 agent 一定需要"能看不能写"。数据先分开，语义后收敛。
+**为什么不合并成一个名单**：读与写是两个正交能力，合并就是 ADR-076 修订时踩过的同一个坑（`initiator` 曾经同时承担"谁发起"和"谁是人类归属"）。今天 bot↔bot 没有人类隐私主体、两个名单必然相同；将来 PM 任务会话、跨组织共享 bot 一定需要"能看不能写"。数据先分开，语义后收敛。
 
 ### D3 — 代发言是"行上的一等事实"，不是 UI 的推断
 
@@ -129,7 +129,7 @@ HTTP 写入口（caller uid 已由 Gateway 校验）
 
 1. **负缓存** `ModelHealthRegistry`：`(provider, account_id, model) → Fatal{kind: Auth | Quota | ModelGone, at}`，TTL 有效，只在进程内（重启即清空——额度随时可能充值，持久化的毒化比漏判更危险）。
 2. **单一决策点** `resolve_session_model(meta, health, providers) → Chosen | Fallback{reason}`：在会话激活时（[session_manager.rs:1496](../../../core/acowork-runtime/src/agent/session/session_manager.rs#L1496) 附近解析 `initial_account` 的同一处）与 `apply_config` 改 model 时调用。约束不变：候选必须在 responder 自己的允许集内（复用 `clamp_to_responder`）。
-3. **降级阶梯**：同 provider 的另一个 account（同 model，换 key）→ agent 默认 model（可能是别的 provider，需 O5 确认）→ `Failed` + 可见通知。
+3. **降级阶梯**：同 provider 的另一个 account（同 model，换 key）→ bot 默认 model（可能是别的 provider，需 O5 确认）→ `Failed` + 可见通知。
 4. **首次调用失败时的一次性重试**：`GiveUp` 且 `is_balance_exhausted`/auth → 记毒 → 若能降级则切配置并重放本轮（每轮至多 N 次）→ 本轮完成而不是死掉。
 5. **记录**：降级写一条 ALREADY-EXISTS 的词表 notice `budget_exhausted`（[intent.rs:291](../../../core/acowork-core/src/intent.rs#L291) 的 `LIMIT_NOTICES`）进转录 + round 投影，并把真正生效的 `model / provider / account_id` 落回 `SessionMeta`（三个列都已存在）。
 
@@ -166,7 +166,7 @@ HTTP 写入口（caller uid 已由 Gateway 校验）
 
 **M7**：观察点放在 `decide_retry_action` 返回 `GiveUp` 且 `is_balance_exhausted` / auth 错误处（`reliable.rs` 已有 402 分类，[L555](../../../core/acowork-runtime/src/providers/reliable.rs#L555)）；成功调用处清除。`resolve_session_model` 是纯函数，输入 `(meta, health, providers)`，输出决策 + 原因，可单测穷举。降级生效必须走既有 `ConversationSession::apply_config`（单写者），不另开写路径。**注意 `BudgetGuard`（[budget_guard.rs:9](../../../core/acowork-runtime/src/agent/budget_guard.rs#L9)）是本地 token 预算预估，与本模块无关，不要混用。**
 
-**M8**：新路由把人类以 `identity = human` 加入 `agent_agent` chat（store 层已允许，只在路由层放行，且要求调用者本身就是该 agent 的 owner/guest）；随后 `has_human_participant()` 自动变 `Some(true)`，`chat_grant` 与 `TurnSurface` 无需改动。`loop_.rs:1524/1724` 的 `pending_intent.is_some() || has_human == Some(false)` 改为查 `TurnSurface` 的"可 park"判据（新方法 `may_park_on_human()`：`has_human == Some(true) && answerable_by 是一个人类 uid`），让 responder turn 在有真人时也能 park。卡片 `answerable_by`：`TurnSurface::new` 在 chat 有真人时取该真人（需 O2 拍板）；`answer` 端点同步从 `authorize_read` 提到同一 authority 并校验"你就是被问的人"。
+**M8**：新路由把人类以 `identity = human` 加入 `agent_agent` chat（store 层已允许，只在路由层放行，且要求调用者本身就是该 bot 的 owner/guest）；随后 `has_human_participant()` 自动变 `Some(true)`，`chat_grant` 与 `TurnSurface` 无需改动。`loop_.rs:1524/1724` 的 `pending_intent.is_some() || has_human == Some(false)` 改为查 `TurnSurface` 的"可 park"判据（新方法 `may_park_on_human()`：`has_human == Some(true) && answerable_by 是一个人类 uid`），让 responder turn 在有真人时也能 park。卡片 `answerable_by`：`TurnSurface::new` 在 chat 有真人时取该真人（需 O2 拍板）；`answer` 端点同步从 `authorize_read` 提到同一 authority 并校验"你就是被问的人"。
 
 ---
 
@@ -187,7 +187,7 @@ M7 与 1–2 完全解耦，可以先行/并行；M8 最后做，且必须等 O2
 
 ## 5. 验收不变量（回归测试清单）
 
-1. **不泄露**：共享 agent 下，A 的 user↔agent 私聊 session，B 既不可读也不可写（`authority == None`）。
+1. **不泄露**：共享 bot 下，A 的 user↔bot 私聊 session，B 既不可读也不可写（`authority == None`）。
 2. **只读仍在**：`aware_users` 命中但不在 `interveners` 的账号 → `Reader`，`PUT config` 403 且列出被拒字段。
 3. **介入层边界**：`Intervener` 改 `workspace` / `tool_policy` / `visibility` → 403；改 `model` / `provider` / `reasoning_effort` → 200 且 `SessionMeta` 真被改。
 4. **代发言溯源**：mode 1 写入的行 `metadata.speaker = {origin:human, author, on_behalf_of:initiator}`，`RoundProjection.user.display.speaker` 与之一致；前端渲染仍是字面文本 + 徽标。
@@ -205,11 +205,11 @@ M7 与 1–2 完全解耦，可以先行/并行；M8 最后做，且必须等 O2
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 写权限面放宽引入越权 | 高 | M4 与 M3 成对交付；不变量 1/2/3 进 CI；`interveners` 只在 agent↔agent 种子，PM/人类起源保持空 |
+| 写权限面放宽引入越权 | 高 | M4 与 M3 成对交付；不变量 1/2/3 进 CI；`interveners` 只在 bot↔bot 种子，PM/人类起源保持空 |
 | `SessionMeta` 加字段波及结构体字面量/SQLite | 编译期可见 | `#[serde(default)]` + migration 幂等判断（v12 的先例） |
 | `metadata.speaker` 成为第二个"非注册键" | 中 | 只经 core 的 `TurnSpeaker` 序列化，禁止字符串拼装；单一 `META_KEY` 常量 |
 | 抢占重试等待改变 turn 终态 | 中 | 只对 `ChatMessage` 生效（该路径今天只能来自校验过的人类）；`failed` 回执语义与现状一致 |
-| 自动降级悄悄换模型，成本/质量漂移 | 中 | 每次降级留 notice + 落 `account_id`；阶梯限定在 agent 允许集内；见 O5 |
+| 自动降级悄悄换模型，成本/质量漂移 | 中 | 每次降级留 notice + 落 `account_id`；阶梯限定在 bot 允许集内；见 O5 |
 | 真人入局改变 `has_human` 影响既有 PM 链路 | 中 | 仅新增路由能加真人，PM 的 ensure/sync 不碰 `agent_agent` |
 
 **回滚粒度**：M1–M8 各自独立提交、可单独 revert；批次 1 合入后对现网零行为影响。
@@ -219,10 +219,10 @@ M7 与 1–2 完全解耦，可以先行/并行；M8 最后做，且必须等 O2
 ## 7. 待人类确认的开放问题（未确认不动手）
 
 - **O1｜代发言之后 A 要不要知道结果。** 建议"不"：原 `request_id` 的应答已是 `failed`，人类介入是新的事实，A 的知情应由 A 的新 intent（或人在 A 的 chat 里）完成。若要求"自动告知 A"，需要新开一条 `agent_message` 通道并定义幂等身份，规模翻倍。
-- **O2｜B 的卡片该问谁。** 已按人类 2026-xx 的更正收敛：**不引入 mode 3，不做群聊**。执行会话里的人就是"以发起方 agent 的名义发言"，所以卡片要问的是**介入名单里的人**，不是把真人加成 participant。落法是让 `answerable_by` 指名单中的人（见 §8 批次 7），不做参与者模型改造。
-- **O3｜介入名单的范围。** 建议：agent↔agent 用与 `aware_users` 完全相同的种子（无人类隐私主体）；PM 任务会话（`initiator` = MCP 建任务的 agent）**本轮不开放**，留待单独评审（project owner 的"可看可写"另有语义）。
-- **O4｜介入者能不能把 model 设成 agent 允许集之外的。** 建议"不能"，仍走 `clamp_to_responder`——否则人类可以把 B 换成它 manifest 里根本没声明的模型，任务原始假设被静默破坏。
-- **O5｜自动降级是否允许跨 provider。** 建议阶梯止于"同 provider 换 account"→"agent 默认 model（可能跨 provider）"，但跨 provider 降级必须留 notice 且**不**写回 agent 级默认配置（只影响本会话）。若要求"永不跨 provider"，极端情况下只能 `Failed` + 等人工。
+- **O2｜B 的卡片该问谁。** 已按人类 2026-xx 的更正收敛：**不引入 mode 3，不做群聊**。执行会话里的人就是"以发起方 bot 的名义发言"，所以卡片要问的是**介入名单里的人**，不是把真人加成 participant。落法是让 `answerable_by` 指名单中的人（见 §8 批次 7），不做参与者模型改造。
+- **O3｜介入名单的范围。** 建议：bot↔bot 用与 `aware_users` 完全相同的种子（无人类隐私主体）；PM 任务会话（`initiator` = MCP 建任务的 bot）**本轮不开放**，留待单独评审（project owner 的"可看可写"另有语义）。
+- **O4｜介入者能不能把 model 设成 bot 允许集之外的。** 建议"不能"，仍走 `clamp_to_responder`——否则人类可以把 B 换成它 manifest 里根本没声明的模型，任务原始假设被静默破坏。
+- **O5｜自动降级是否允许跨 provider。** 建议阶梯止于"同 provider 换 account"→"bot 默认 model（可能跨 provider）"，但跨 provider 降级必须留 notice 且**不**写回 bot 级默认配置（只影响本会话）。若要求"永不跨 provider"，极端情况下只能 `Failed` + 等人工。
 
 ---
 
@@ -263,7 +263,7 @@ M7 与 1–2 完全解耦，可以先行/并行；M8 最后做，且必须等 O2
 
 **决策修正 2：`/answer`、`/approval` 的闸门本轮不动。**
 
-确认的事实：agent↔agent 的 responder turn 在没有介入名单时**根本不 park**（直接 `aborted`），所以 `/answer` 在 exec session 里今天不可达；这两个端点只要求 `authorize_read`，因为 chat 卡片必须能被群成员作答，收紧会 404 掉今天可用的路径。把"你就是被问的人"校验与"卡片真的会 park 等待"放同一批改才安全——第 4 批（M6）与第 6 批（M8）。本轮已做掉前置条件：有名单的会话现在会 park，卡片的"可答性"第一次有了意义。
+确认的事实：bot↔bot 的 responder turn 在没有介入名单时**根本不 park**（直接 `aborted`），所以 `/answer` 在 exec session 里今天不可达；这两个端点只要求 `authorize_read`，因为 chat 卡片必须能被群成员作答，收紧会 404 掉今天可用的路径。把"你就是被问的人"校验与"卡片真的会 park 等待"放同一批改才安全——第 4 批（M6）与第 6 批（M8）。本轮已做掉前置条件：有名单的会话现在会 park，卡片的"可答性"第一次有了意义。
 
 **批次 2 验收不变量**
 
@@ -305,16 +305,16 @@ M7 与 1–2 完全解耦，可以先行/并行；M8 最后做，且必须等 O2
 | 模块 | 落点 | 内容 |
 |---|---|---|
 | 策略（纯函数） | `agent/model_fallback.rs` | `ModelHealthRegistry` 负缓存（`(provider, model, account)` 三元组，TTL 15 分钟，读时过期即丢，无需清扫）；`classify(&RuntimeError) -> Option<ModelFailure>{BalanceExhausted,KeyRejected}`；`next_usable()` 阶梯过滤；`DegradationStep` 三级 |
-| 库存（数据） | `agent_core.rs::fallback_candidates` | 只做枚举：同 provider 其它 account → agent 默认 model 同 provider → agent 默认 model 跨 provider。默认 model/provider 从 `agent_config.json`（ADR-110 的同一份事实）读，**不新增缓存** |
+| 库存（数据） | `agent_core.rs::fallback_candidates` | 只做枚举：同 provider 其它 account → bot 默认 model 同 provider → bot 默认 model 跨 provider。默认 model/provider 从 `agent_config.json`（ADR-110 的同一份事实）读，**不新增缓存** |
 | 副作用 | `agent/loop_fallback.rs::degrade_after_capacity_failure` | 记负缓存 → 选候选 → `build_provider_for` 重建 → 同步 `SessionState` / `ContextBuilder.override_model` → 写回会话配置 → 落一条 `metadata.notice="model_degraded"` 的 system 行 |
 | 接线 | `loop_.rs` `RetryAction::GiveUp` 分支 | 收口前问一次"还有没有能服务的三元组"；有则计数器归零（新三元组拿自己的重试预算）、重取 `current_model`、`continue`；没有则**逐字保持**原来的 Idle + `Err` |
 
 三点必须写下来的判断：
 
 1. **"启动时校验 model 有没有预算"做不到，除非我们撒谎。** `ProviderListItem` 没有额度字段，平台唯一拿到过的额度事实就是 provider 拒绝调用本身。
-   所以这一层的诚实做法是把它变成持久事实：一旦某个三元组答"没钱"，本 agent 的所有会话都不再从它起步（负缓存跨 session 共享——额度是钥匙的属性，不是撞墙那个 session 的属性）。
+   所以这一层的诚实做法是把它变成持久事实：一旦某个三元组答"没钱"，本 bot 的所有会话都不再从它起步（负缓存跨 session 共享——额度是钥匙的属性，不是撞墙那个 session 的属性）。
 2. **只有容量类失败才降级。** 网络抖动、上下文溢出、工具错误说明不了账号的事，在这些上面轮换模型比失败本身更糟（retry 分层仍然管它们）。
-3. **切换写回会话，不写回 agent。** 一次 402 是"这个任务的账户/模型"的证据，从失败路径改人的默认设置会静默改掉之后所有 session；同时写回会话才让 model 菜单显示"真正在跑的模型"。
+3. **切换写回会话，不写回 bot。** 一次 402 是"这个任务的账户/模型"的证据，从失败路径改人的默认设置会静默改掉之后所有 session；同时写回会话才让 model 菜单显示"真正在跑的模型"。
 
 ### 批次 6 — M8 真人入局（部分已落）
 
@@ -327,7 +327,7 @@ M7 与 1–2 完全解耦，可以先行/并行；M8 最后做，且必须等 O2
 
 ### 批次 7 — 会话内告知"有真人在旁"（已落）
 
-口径由人类当场收紧：**执行会话里的人就是"以发起方 agent 的名义发言"，不做 mode 3，不把会话变成群聊。**
+口径由人类当场收紧：**执行会话里的人就是"以发起方 bot 的名义发言"，不做 mode 3，不把会话变成群聊。**
 于是 B 侧需要的信息不是"谁加入了会话"，而是"你读到的、以发起方名义写下的指令，有可能是那个人打的"。
 
 | 落点 | 内容 |
@@ -336,12 +336,12 @@ M7 与 1–2 完全解耦，可以先行/并行；M8 最后做，且必须等 O2
 | `agent/context.rs` | `ContextBuilder.operator_presence` 槽 + `## Operator Presence` 段，位置紧跟 `## Task Assignment`（Block A，会话生命周期、随名单 write-once 而恒定，因此 Block A 仍字节稳定） |
 | 注入点 | session task 启动时：`interveners()` 非空才设 |
 
-为什么放在 Block A 而不是挂在操作者那一轮：挂在轮上的后果是"操作者第一次开口之前的所有指令"仍被读成 agent 本人的话；而这个事实从会话创建起就为真，不是从某一条消息开始的。
+为什么放在 Block A 而不是挂在操作者那一轮：挂在轮上的后果是"操作者第一次开口之前的所有指令"仍被读成 bot 本人的话；而这个事实从会话创建起就为真，不是从某一条消息开始的。
 
 **还没做（按批次）**
 
-* 第 6 批 M8 剩余（已按 O2 更正收窄）：让 `answerable_by` 在有名单、且发起方是 agent 时指向名单里的真人，并给 `/answer`、`/approval` 补"你就是被问的人"校验（名单内兜底）。顺序不能反：先有人可指，才能收紧校验；反了就把最后一条能跑的路堵死。
-* **明确不做**：把真人加成三方 participant / 执行会话变群聊 / mode 3（"真身发言"）。`SessionKind` 里没有 2 agent + 1 人的形态，要动 user service 的参与者模型，而人类的需求只到"能以 agent 名义发消息"，该路径批次 3 已通。
+* 第 6 批 M8 剩余（已按 O2 更正收窄）：让 `answerable_by` 在有名单、且发起方是 bot 时指向名单里的真人，并给 `/answer`、`/approval` 补"你就是被问的人"校验（名单内兜底）。顺序不能反：先有人可指，才能收紧校验；反了就把最后一条能跑的路堵死。
+* **明确不做**：把真人加成三方 participant / 执行会话变群聊 / mode 3（"真身发言"）。`SessionKind` 里没有 2 bot + 1 人的形态，要动 user service 的参与者模型，而人类的需求只到"能以 bot 名义发消息"，该路径批次 3 已通。
 * 前端接线：`config_fields` 已下发，Desktop 的 `session-write-access.ts` 仍是单 bool；执行界面的 model picker 需按字段开关。
 * 批次 2 的同一个未验证口径仍然有效：session_state / chunk 的**推送**是否到达介入者界面没有实测。若收不到，M8 剩余部分要顺带核对 Gateway 的 session_state 扇出是否按 scope 过滤。
 
@@ -351,7 +351,7 @@ M7 与 1–2 完全解耦，可以先行/并行；M8 最后做，且必须等 O2
 `every_control_the_run_can_offer_is_pressable_by_the_intervener`、`a_stranger_cannot_press_the_controls_either`）、
 `session_visibility_e2e` 2 项、`session_meta_sqlite_e2e` 2 项通过；`clippy -D warnings` 干净（runtime + gateway，含 tests）。
 Desktop `tsc --noEmit` 干净；`vitest` 3088 passed / 6 failed，6 项全部落在 `GroupChatPanel.blockRef/pmDispatch`
-的 `@` 提及文本（`@agent-a` vs `@Agent A`），**已用 stash 对照确认在 HEAD 上同样失败**，与本方案改动无关。
+的 `@` 提及文本（`@agent-a` vs `@Bot A`），**已用 stash 对照确认在 HEAD 上同样失败**，与本方案改动无关。
 
 ### 新增不变量
 
@@ -367,7 +367,7 @@ Desktop `tsc --noEmit` 干净；`vitest` 3088 passed / 6 failed，6 项全部落
 | 无默认 model 时阶梯止于第一级（要失败得响亮，不是死循环） | `…::without_an_agent_default_the_ladder_stops_after_another_account` |
 | 名单让 turn 可回答，无名单/未知不改变原判据 | `loop_interaction::tests::an_intervener_roster_makes_the_turn_answerable`、`…::without_a_roster_the_gate_still_says_no_human`、`…::an_unknown_answerability_still_fails_open` |
 | 人以发起方之名发言是一条独立事实（不是从会话所有者推断的） | `turn_speaker::tests::an_intervener_speaks_as_the_initiator` |
-| 有名单只在 Block A 多一段，且不进用户轮；无名单逐字节不变 | `agent::context::tests::operator_presence_is_a_session_section_not_a_turn` |
+| 有名单只在 Block A 多一段，且不进用户轮；无名单逐字节不变 | `bot::context::tests::operator_presence_is_a_session_section_not_a_turn` |
 
 
 **一个未验证的口径**：`human_can_reach_pause()` 读当前会话名单，"能点 Continue"由同一张表保证（介入档含 `may_turn`），但 session_state / chunk 的**推送**是否到达该人的界面没有在本轮验证。若实测收不到，第 6 批要顺带核对 Gateway 的 session_state 扇出是否按 scope 过滤。

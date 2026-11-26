@@ -169,7 +169,7 @@ Each session has independent token budget, but total Bot budget is constrained:
 
 ```rust
 pub struct BudgetGuard {
-    agent_total_limit: u64,           // Agent-level total limit
+    agent_total_limit: u64,           // Bot-level total limit
     session_default_limit: u64,       // default per session
     session_overrides: HashMap<SessionId, u64>,  // per-session override
 }

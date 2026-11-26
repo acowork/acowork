@@ -119,7 +119,7 @@ Block A must not contain:
 - random values, request ids, message ids;
 - any structure serialised in HashMap order.
 
-`identity_context` changes only when the user's language/timezone changes (low frequency) and is acceptable. `## Capabilities` (§3.7) derives only from the agent-level capability set and is name-sorted, so it is turn-independent; only a change of that set (MCP server or skill added/removed) costs a prefix miss, which is expected.
+`identity_context` changes only when the user's language/timezone changes (low frequency) and is acceptable. `## Capabilities` (§3.7) derives only from the bot-level capability set and is name-sorted, so it is turn-independent; only a change of that set (MCP server or skill added/removed) costs a prefix miss, which is expected.
 
 ### 3.6 Isolation from the execute prompt
 
@@ -148,7 +148,7 @@ The section is produced by `chat_router::prompt::build_capability_section`, rule
 
 The append point is the same as `## Identity` (inside `build_block_a`, after the `# Safety` tail), so a `chat.md` override can replace the persona but cannot delete the one statement of what the bot can do and how to use it: it states bot facts, not persona prose. With no capability at all the section is omitted entirely, and a bare package gets Block A byte-identical to before. Per-group name caps are 12 / 16 / 32 (servers / skills / builtin tools), 8 declared gaps, 40 bytes per name; overflow renders as `(+N more)`, and the rules teach the model not to read absence behind that marker as "not set up". The section explains nothing the model already knows (the safety tail's "do not promise results" is not restated). A fully equipped bot measures 1004 B.
 
-The data comes only from agent-level sets (manifest, `core.all_tools`, the skill registry) and never from the turn, so it is byte-stable for a given capability set and lives inside the cached prefix; only a change of the set itself (an MCP server or skill added/removed) costs one prefix miss.
+The data comes only from bot-level sets (manifest, `core.all_tools`, the skill registry) and never from the turn, so it is byte-stable for a given capability set and lives inside the cached prefix; only a change of the set itself (an MCP server or skill added/removed) costs one prefix miss.
 
 ## 4. Block B: Append-Only History Projection
 

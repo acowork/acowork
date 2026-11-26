@@ -16,7 +16,7 @@ Skill System
 │   ├── YAML frontmatter        Metadata (name, triggers, tool deps, model compatibility snapshot)
 │   └── Markdown body           Instruction body (execution steps, notes, output format)
 │
-├── Experience Layer (dynamic)   ← SQLite memory nodes, Agent-private
+├── Experience Layer (dynamic)   ← SQLite memory nodes, Bot-private
 │   ├── SkillDraft              Draft Skill (debugging phase)
 │   ├── SkillIteration          Iteration version (snapshot per modification)
 │   ├── SkillExecution          Execution record (result of each trial run)

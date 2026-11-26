@@ -678,7 +678,7 @@ apps/acowork-mobile/
 
 `agentStore` 与 `chatStore` 各自持有一份 `sessions` 数组。`session-write-access.ts` 读前者，`chatStore.openSession` 读后者（后者恒为空），因此 `can_write` 永远读不到 `false`——只读会话会错误地发送 `open_session`，composer 门禁失效。
 
-这不是可以"两边都更新一下"的同步问题：**同一事实的两个副本必然分叉**，而分叉方向恰好是权限门禁 fail-open。修正为 `agentStore` 单独持有会话列表，`chatStore` 只保留 per-agent 视图态（当前会话、消息、loading），并通过 `getSession()` 读 `can_write`。该缺陷由 `session-access.test.ts` 的删除用例暴露。
+这不是可以"两边都更新一下"的同步问题：**同一事实的两个副本必然分叉**，而分叉方向恰好是权限门禁 fail-open。修正为 `agentStore` 单独持有会话列表，`chatStore` 只保留 per-bot 视图态（当前会话、消息、loading），并通过 `getSession()` 读 `can_write`。该缺陷由 `session-access.test.ts` 的删除用例暴露。
 
 **推论：权限门禁读取的字段，其所有权必须唯一。**
 
