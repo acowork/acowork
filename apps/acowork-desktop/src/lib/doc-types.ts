@@ -51,6 +51,43 @@ export interface DirMeta {
   creator?: string | null;
   /** 显式 ACL；缺省 = 继承父目录链（设计 §9） */
   acl?: Ace[] | null;
+  /**
+   * 文档库图标引用：`BUILTIN_ICONS` 的 key（如 `icon-07`）；缺省 = 默认图标。
+   * 只有顶层节点（文档库）携带；库内目录恒为 undefined。
+   */
+  icon?: string | null;
+  /** 文档库描述；同样只有顶层节点携带。 */
+  description?: string | null;
+}
+
+/**
+ * 文档库 = 根目录的直接子节点。服务端仍是 `DirMeta`（同一份存储、同一棵
+ * 树）；前端用这个别名把「顶层节点」与「库内目录」在类型上分开，避免把
+ * 目录当成库来渲染图标 / 描述 / owner。
+ */
+export type LibraryMeta = DirMeta;
+
+/** `POST /api/doc/libraries` 请求体。 */
+export interface CreateLibraryInput {
+  name: string;
+  icon?: string | null;
+  description?: string | null;
+  /** 成员用户 id；服务端落成 `edit` ACL。 */
+  members?: string[];
+  /** 群主用户 id；省略 = 创建者。 */
+  owner?: string | null;
+}
+
+/**
+ * `PATCH /api/doc/libraries/{id}` 请求体。
+ *
+ * 三态语义：字段缺省 = 不修改；显式 `null` = 清空；有值 = 覆盖。
+ */
+export interface UpdateLibraryInput {
+  name?: string;
+  icon?: string | null;
+  description?: string | null;
+  owner?: string;
 }
 
 // ── 权限（ACL，设计 §9）──────────────────────────────────────────────

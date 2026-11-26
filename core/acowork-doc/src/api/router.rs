@@ -31,12 +31,16 @@
 //! - `POST   /refs/validate`  batch doc-reference validation (G4)
 //! - `GET    /permissions/{kind}/{id}` node ACL view (design §9)
 //! - `PUT    /permissions/{kind}/{id}` replace node ACL (creator/admin)
+//! - `GET    /libraries`      list top-level libraries
+//! - `POST   /libraries`      create a library (root-level node)
+//! - `PATCH  /libraries/{id}` edit a library (name/icon/description/owner)
 
 use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 
 use crate::api::dirs as d;
 use crate::api::docs as c;
+use crate::api::libraries as lb;
 use crate::api::permissions as p;
 use crate::api::refs as rf;
 use crate::api::requests as r;
@@ -61,6 +65,10 @@ pub fn doc_router(state: DocState) -> Router {
         .route("/dirs/{dir_id}", get(d::read_dir))
         .route("/dirs/{dir_id}", delete(d::delete_dir))
         .route("/dirs/{dir_id}/name", patch(d::rename_dir))
+        // ── libraries (top-level nodes) ─────────────────────────────
+        .route("/libraries", get(lb::list_libraries))
+        .route("/libraries", post(lb::create_library))
+        .route("/libraries/{dir_id}", patch(lb::update_library))
         // ── tree ────────────────────────────────────────────────────
         .route("/tree", get(d::list_tree))
         // ── update requests (design §5) ─────────────────────────────

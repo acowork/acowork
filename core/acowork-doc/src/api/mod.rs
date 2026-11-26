@@ -21,6 +21,7 @@ pub mod body;
 pub mod dirs;
 pub mod docs;
 pub mod dto;
+pub mod libraries;
 pub mod permissions;
 pub mod refs;
 pub mod requests;

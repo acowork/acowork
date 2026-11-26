@@ -274,6 +274,9 @@ mod tests {
                 parent_dir_id: ROOT_DIR_ID.to_string(),
                 name: "gone".into(),
                 creator: Some("agent-a".into()),
+            
+                icon: None,
+                description: None,
             })
             .await
             .unwrap();

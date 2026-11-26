@@ -786,3 +786,121 @@ async fn approve_without_gateway_configured_still_works() {
     let srv = spawn().await; // gateway_url = None
     approve_one(&srv).await;
 }
+
+// ── libraries: the root's children are libraries, not plain dirs ───────
+
+/// A library is created with icon / description / members / owner in one
+/// call, and every part is readable back through the two surfaces that own
+/// it: `GET /libraries` (metadata) and `GET /permissions/dir/{id}` (members).
+#[tokio::test(flavor = "multi_thread")]
+async fn library_create_carries_metadata_members_and_owner() {
+    let srv = spawn().await;
+
+    let (status, body) = srv
+        .post(
+            "/libraries",
+            json!({
+                "name": "研发",
+                "icon": "icon-07",
+                "description": "工程团队的文档库",
+                "members": ["u-alice", " u-alice "],
+                "owner": "u-bob",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let lib_id = body["dir_id"].as_str().unwrap().to_string();
+    assert_eq!(body["name"], "研发");
+    assert_eq!(body["icon"], "icon-07");
+    assert_eq!(body["description"], "工程团队的文档库");
+    // Owner transfer runs last and rewrites the creator, which is what the
+    // ACL manage gate reads.
+    assert_eq!(body["creator"], "u-bob");
+
+    // Members are deduplicated into an explicit `edit` ACL.
+    let (status, perms) = srv.get(&format!("/permissions/dir/{lib_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{perms}");
+    let explicit = perms["explicit"].as_array().unwrap();
+    assert_eq!(explicit.len(), 1, "{perms}");
+    assert_eq!(explicit[0]["principal"], "u-alice");
+    assert_eq!(explicit[0]["role"], "edit");
+
+    // The library list carries the same metadata without loading each node.
+    let (status, body) = srv.get("/libraries").await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = body["libraries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["dir_id"] == lib_id)
+        .cloned()
+        .expect("created library must be listed");
+    assert_eq!(listed["icon"], "icon-07");
+    assert_eq!(listed["description"], "工程团队的文档库");
+    assert_eq!(listed["creator"], "u-bob");
+
+    // The plain tree still sees it as a root child (one tree, not two).
+    let (_, tree) = srv.get("/tree?dir_id=root").await;
+    assert!(tree["dirs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["dir_id"] == lib_id));
+}
+
+/// PATCH is tri-state per field: absent = untouched, `null` = cleared,
+/// value = set. A collapsing `Option<String>` would silently make "clear
+/// the icon" a no-op.
+#[tokio::test(flavor = "multi_thread")]
+async fn library_patch_distinguishes_absent_from_null() {
+    let srv = spawn().await;
+    let (_, body) = srv
+        .post(
+            "/libraries",
+            json!({ "name": "产品", "icon": "icon-03", "description": "old" }),
+        )
+        .await;
+    let lib_id = body["dir_id"].as_str().unwrap().to_string();
+
+    // Clear the icon, keep the description untouched, rename.
+    let (status, body) = srv
+        .patch(
+            &format!("/libraries/{lib_id}"),
+            json!({ "name": "产品-2", "icon": null }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "产品-2");
+    assert!(body["icon"].is_null(), "icon must be cleared: {body}");
+    assert_eq!(body["description"], "old", "absent field is untouched");
+
+    // A nested directory is not a library and must not grow library fields.
+    let sub = srv.mkdir(&lib_id, "内部").await;
+    let (status, body) = srv
+        .patch(&format!("/libraries/{sub}"), json!({ "icon": "icon-01" }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(TestServer::error_code(&body), "bad_request");
+
+    // The root itself is not a library.
+    let (status, _) = srv
+        .patch("/libraries/root", json!({ "name": "all" }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn library_create_rejects_duplicate_and_bad_icon() {
+    let srv = spawn().await;
+    let (status, _) = srv.post("/libraries", json!({ "name": "同名" })).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, body) = srv.post("/libraries", json!({ "name": "同名" })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(TestServer::error_code(&body), "name_conflict");
+
+    let (status, body) = srv
+        .post("/libraries", json!({ "name": "坏图标", "icon": "a\u{7}b" }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(TestServer::error_code(&body), "bad_request");
+}

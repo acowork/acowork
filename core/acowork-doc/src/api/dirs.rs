@@ -42,6 +42,8 @@ pub async fn create_dir(
             parent_dir_id: body.parent_dir_id,
             name: body.name,
             creator: actor.id.clone(),
+            icon: None,
+            description: None,
         })
         .await
         .map_err(ApiError::from)?;

@@ -2462,6 +2462,32 @@
     "emptyDir": "Empty folder"
   },
   "doc": {
+    "library": {
+      "createTitle": "New library",
+      "editTitle": "Edit library",
+      "newLibrary": "New library",
+      "allLibraries": "All libraries",
+      "name": "Name",
+      "namePlaceholder": "Library name",
+      "description": "Description",
+      "descriptionPlaceholder": "What is this library for? (optional)",
+      "members": "Members",
+      "noMembers": "No members to invite",
+      "membersEditHint": "Manage members and access in the Permissions card of the settings panel.",
+      "owner": "Owner",
+      "ownerHint": "The owner manages this library's permissions; defaults to the creator.",
+      "defaultIcon": "Default icon",
+      "iconPickerTitle": "Choose a library icon",
+      "nameRequired": "Enter a library name",
+      "created": "Library created",
+      "saved": "Library saved",
+      "saveFailed": "Could not save the library",
+      "emptyTitle": "No libraries yet",
+      "emptyHint": "Create a library to organize documents like a project.",
+      "noDescription": "No description",
+      "unknownOwner": "Unknown",
+      "memberCount": "{{count}} members"
+    },
     "settingsPanel": {
       "title": "Doc Settings",
       "permissions": "Permissions",

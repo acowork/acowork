@@ -2473,6 +2473,32 @@
     "emptyDir": "空文件夹"
   },
   "doc": {
+    "library": {
+      "createTitle": "新建文档库",
+      "editTitle": "编辑文档库",
+      "newLibrary": "新建文档库",
+      "allLibraries": "全部文档库",
+      "name": "名称",
+      "namePlaceholder": "文档库名称",
+      "description": "描述",
+      "descriptionPlaceholder": "简单描述这个文档库的用途（可选）",
+      "members": "成员",
+      "noMembers": "暂无可邀请的成员",
+      "membersEditHint": "成员与权限在右侧设置面板的「权限」卡片中管理。",
+      "owner": "所有者",
+      "ownerHint": "所有者可管理该文档库的权限；默认是创建者。",
+      "defaultIcon": "默认图标",
+      "iconPickerTitle": "选择文档库图标",
+      "nameRequired": "请填写文档库名称",
+      "created": "文档库已创建",
+      "saved": "文档库已保存",
+      "saveFailed": "保存文档库失败",
+      "emptyTitle": "还没有文档库",
+      "emptyHint": "新建一个文档库，像项目一样组织你的文档。",
+      "noDescription": "暂无描述",
+      "unknownOwner": "未知",
+      "memberCount": "{{count}} 位成员"
+    },
     "settingsPanel": {
       "title": "文档设置",
       "permissions": "权限",

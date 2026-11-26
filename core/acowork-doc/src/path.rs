@@ -34,6 +34,14 @@ const MAX_NAME_LEN: usize = 200;
 /// Cap on the total relative-path string handed in via API params.
 const MAX_RELATIVE_PATH_LEN: usize = 4096;
 
+/// Cap on a library icon reference. The value is an opaque UI key
+/// (`icon-07`, later `custom:<relative asset path>`), never inline bytes.
+const MAX_ICON_LEN: usize = 256;
+
+/// Cap on a library description. Long enough for a paragraph, short enough
+/// that the whole library list stays one cheap read.
+const MAX_DESCRIPTION_LEN: usize = 2000;
+
 // ── ID whitelist ───────────────────────────────────────────────────────
 
 /// Validate a document id (`doc-` + 12 lowercase hex).
@@ -149,6 +157,42 @@ pub fn validate_doc_name(name: &str) -> Result<(), DocError> {
     }
     if is_windows_reserved(name) {
         return Err(DocError::ReservedName(String::from(name)));
+    }
+    Ok(())
+}
+
+/// Validate a library icon reference (`library.json` / `DirMeta` `icon`).
+///
+/// The value is a short opaque UI key, not a path and not bytes; we only
+/// reject control characters so the tree/JSON round-trip stays clean.
+pub fn validate_library_icon(icon: &str) -> Result<(), DocError> {
+    if icon.is_empty() {
+        return Err(DocError::BadRequest(String::from("icon is empty")));
+    }
+    if icon.len() > MAX_ICON_LEN {
+        return Err(DocError::BadRequest(String::from("icon too long")));
+    }
+    if icon.chars().any(|c| c.is_control()) {
+        return Err(DocError::BadRequest(String::from(
+            "icon contains control character",
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a library description. Newlines are allowed; control characters
+/// other than `\n` / `\t` are not.
+pub fn validate_library_description(description: &str) -> Result<(), DocError> {
+    if description.len() > MAX_DESCRIPTION_LEN {
+        return Err(DocError::BadRequest(String::from("description too long")));
+    }
+    if description
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err(DocError::BadRequest(String::from(
+            "description contains control character",
+        )));
     }
     Ok(())
 }

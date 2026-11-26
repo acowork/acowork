@@ -15,7 +15,13 @@ import { create } from "zustand";
 import * as docApi from "../../lib/doc-api";
 import { log } from "../../lib/logger";
 import { DOC_ROOT_DIR_ID } from "../../lib/doc-types";
-import type { DirMeta, DocMeta, DocTreeNode } from "../../lib/doc-types";
+import type {
+  CreateLibraryInput,
+  DirMeta,
+  DocMeta,
+  DocTreeNode,
+  UpdateLibraryInput,
+} from "../../lib/doc-types";
 import { useDocEditorStore } from "./editorStore";
 
 /** 树中选中的节点（权限卡片的作用对象，设计 §9） */
@@ -63,6 +69,14 @@ interface DocTreeState {
   refreshVisible: () => Promise<void>;
 
   createDir: (parentDirId: string, name: string) => Promise<DirMeta | null>;
+
+  /**
+   * 新建文档库 = 在 root 下建一个带库元数据的节点。成功后刷新根层，让
+   * 侧栏/库列表立刻出现新库；失败只记 error，不建半成品状态。
+   */
+  createLibrary: (input: CreateLibraryInput) => Promise<DirMeta | null>;
+  /** 改文档库元数据（名称 / 图标 / 描述 / 群主）。成功后刷新根层。 */
+  updateLibrary: (dirId: string, input: UpdateLibraryInput) => Promise<boolean>;
   renameDir: (dirId: string, parentDirId: string, newName: string) => Promise<boolean>;
   deleteDir: (dirId: string, parentDirId: string) => Promise<boolean>;
 
@@ -155,6 +169,36 @@ export const useDocTreeStore = create<DocTreeState>((set, get) => ({
       log.warn("[doc:tree] createDir failed:", e);
       set({ error: e instanceof Error ? e.message : String(e) });
       return null;
+    }
+  },
+
+  createLibrary: async (input) => {
+    try {
+      const lib = await docApi.createLibrary(input);
+      // root 必须展开，否则新库在树里看不见；再强制重拉根层（服务端是真相）。
+      set((s) => ({ expanded: { ...s.expanded, [DOC_ROOT_DIR_ID]: true } }));
+      await get().refreshDir(DOC_ROOT_DIR_ID);
+      return lib;
+    } catch (e) {
+      log.warn("[doc:tree] createLibrary failed:", e);
+      set({ error: e instanceof Error ? e.message : String(e) });
+      return null;
+    }
+  },
+
+  updateLibrary: async (dirId, input) => {
+    try {
+      const meta = await docApi.updateLibrary(dirId, input);
+      const sel = get().selectedNode;
+      if (sel?.kind === "dir" && sel.id === dirId) {
+        set({ selectedNode: { ...sel, name: meta.name } });
+      }
+      await get().refreshDir(DOC_ROOT_DIR_ID);
+      return true;
+    } catch (e) {
+      log.warn("[doc:tree] updateLibrary failed:", e);
+      set({ error: e instanceof Error ? e.message : String(e) });
+      return false;
     }
   },
 
