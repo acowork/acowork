@@ -6,7 +6,7 @@
 //! - GET    /api/agents/:id/avatar — reverse-proxied to the hosting node
 //! - GET/PUT /api/agents/:id/avatar-config — reverse-proxied to the Runtime
 //! - POST /api/agents/:id/manifest/{avatar,file} — reverse-proxied to the node
-//! - POST   /api/agents/install  — install a .agent package
+//! - POST   /api/agents/install  — install a .bot package
 //! - POST   /api/agents/:id/clone — clone an agent (skeleton or full)
 //! - DELETE /api/agents/:id       — uninstall an agent
 //! - POST   /api/agents/:id/start — start an agent
@@ -52,7 +52,7 @@ pub fn agent_routes() -> Router<AppState> {
         // instance, and the caller never has to orchestrate that.
         .route("/api/agents/ensure", post(ensure_agent))
         // ADR-055 §3.2: package distribution source — remote Nodes pull
-        // the uploaded `.agent` file from the Gateway's registry here.
+        // the uploaded `.bot` file from the Gateway's registry here.
         .route(
             "/api/packages/{agent_id}/download",
             get(download_package),
@@ -725,7 +725,7 @@ pub(crate) async fn resolve_agent_node_id(
     })
 }
 
-/// `GET /api/packages/{agent_id}/download` — serve the uploaded `.agent`
+/// `GET /api/packages/{agent_id}/download` — serve the uploaded `.bot`
 /// source file from the package registry (ADR-055 §3.2). This is how a
 /// remote Node pulls the package during an asynchronous install.
 ///
@@ -780,7 +780,7 @@ pub async fn download_package(
             .ok_or_else(|| ApiError::internal("Gateway config unavailable"))?
     };
 
-    let path = registry_dir.join(format!("{}.agent", agent_id));
+    let path = registry_dir.join(format!("{}.bot", agent_id));
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|e| ApiError::not_found(&format!("Package '{}' not in registry: {}", agent_id, e)))?;
@@ -791,7 +791,7 @@ pub async fn download_package(
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}.agent\"", agent_id),
+            format!("attachment; filename=\"{}.bot\"", agent_id),
         )
         .body(body)
         .map_err(|e| ApiError::internal(&format!("Failed to build download response: {}", e)))
@@ -1188,7 +1188,7 @@ pub async fn get_agent_lsp_endpoint(
     }))
 }
 
-/// `POST /api/agents/install` — upload and install a .agent package.
+/// `POST /api/agents/install` — upload and install a .bot package.
 ///
 /// ADR-055 §3.2: asynchronous install. The Gateway spools the upload
 /// into its package registry, then issues an `install` command carrying
@@ -1566,7 +1566,7 @@ pub async fn install_agent(
     Ok((StatusCode::ACCEPTED, Json(ack)))
 }
 
-/// An uploaded `.agent` spooled to a temp file, with its parsed
+/// An uploaded `.bot` spooled to a temp file, with its parsed
 /// manifest.
 ///
 /// The upload is only ever a staging area — the durable copy is the
@@ -1580,7 +1580,7 @@ struct StagedPackage {
 impl StagedPackage {
     fn stage(package_bytes: &[u8]) -> Result<Self, ApiError> {
         let path = std::env::temp_dir().join(format!(
-            "acowork-install-{}-{}.agent",
+            "acowork-install-{}-{}.bot",
             std::process::id(),
             timestamp_nanos(),
         ));
@@ -1590,7 +1590,7 @@ impl StagedPackage {
                 e
             )));
         }
-        // A `.agent` is a ZIP; the manifest must be read out of it before
+        // A `.bot` is a ZIP; the manifest must be read out of it before
         // the registry copy gets a stable name (the URL is derived from
         // `agent_id`, which only the manifest knows).
         match extract_manifest_from_package(&path) {
@@ -1612,7 +1612,7 @@ impl Drop for StagedPackage {
 /// Spool package bytes to a temp file, extract the manifest, and persist
 /// the source into the package registry. Returns `(manifest, download_url)`.
 ///
-/// Shared by install and upgrade — both persist the uploaded `.agent` to
+/// Shared by install and upgrade — both persist the uploaded `.bot` to
 /// the Gateway's registry and hand the node a download URL (ADR-055 §3.2).
 async fn register_package_in_registry(
     state: &AppState,
@@ -1650,7 +1650,7 @@ async fn publish_to_registry(
             e
         )));
     }
-    let registry_path = registry_dir.join(format!("{}.agent", agent_id));
+    let registry_path = registry_dir.join(format!("{}.bot", agent_id));
     // ADR-113: a Gateway-LOCAL deployment query for the loopback download
     // optimisation only. `local_node_id()` is decided from protocol-visible
     // state (online + hostname); it is NOT an install target and never
@@ -1678,7 +1678,7 @@ async fn publish_to_registry(
     Ok(url)
 }
 
-/// Extract the `manifest.toml` from a `.agent` package ZIP (path-based).
+/// Extract the `manifest.toml` from a `.bot` package ZIP (path-based).
 ///
 /// ADR-055 Phase 2b.3: the Gateway no longer installs packages itself —
 /// it extracts the manifest only to route the node install command and to
@@ -1918,7 +1918,7 @@ pub async fn clone_agent(
 
 /// `POST /api/agents/:id/upgrade` — upgrade an agent to a new package
 ///
-/// Multipart body: `package` (the new .agent file, required) + `node_id`.
+/// Multipart body: `package` (the new .bot file, required) + `node_id`.
 /// ADR-113: upgrade targets an EXISTING instance, so an omitted `node_id`
 /// is resolved from that instance's recorded `node_id` in the protocol
 /// inventory — never from the Gateway's own machine, hostname or a launcher

@@ -76,7 +76,7 @@ const SAFE_AGENT = {
   avatar: null,
   permissions: ["Read"],
   high_risk_permissions: [],
-  package: { file: "downloads/com.acowork.safe.agent", size_bytes: 2048, sha256: "aa" },
+  package: { file: "downloads/com.acowork.safe.bot", size_bytes: 2048, sha256: "aa" },
   signature: { status: "official-channel" },
   deprecated: null,
 };

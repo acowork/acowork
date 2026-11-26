@@ -334,7 +334,7 @@ fn upload_form(package_bytes: &[u8], node_id: &str) -> Result<reqwest::multipart
         .part(
             "package",
             reqwest::multipart::Part::bytes(package_bytes.to_vec())
-                .file_name("package.agent")
+                .file_name("package.bot")
                 .mime_str("application/octet-stream")?,
         )
         .text("node_id", node_id.to_string()))
@@ -544,7 +544,7 @@ impl GatewayClient {
         parse_gateway_response(resp).await
     }
 
-    /// `POST /api/agents/install` — upload .agent package via multipart
+    /// `POST /api/agents/install` — upload .bot package via multipart
     ///
     /// `node_id` is the REQUIRED target node (ADR-113). The Gateway
     /// rejects a request without it; it never infers a default landing

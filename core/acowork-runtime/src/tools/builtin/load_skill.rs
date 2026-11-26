@@ -56,7 +56,7 @@ pub const TOOL_NAME: &str = "load_skill";
 /// Loads the full Markdown body of a single skill by name, on LLM
 /// demand. See module-level docs for the ADR-094 rationale.
 pub struct LoadSkillTool {
-    /// Agent's `.agent` package directory (where `skills/<name>/SKILL.md`
+    /// Agent's `.bot` package directory (where `skills/<name>/SKILL.md`
     /// lives). Distinct from the session `work_dir` — package files are
     /// read-only, runtime state is not.
     package_dir: PathBuf,

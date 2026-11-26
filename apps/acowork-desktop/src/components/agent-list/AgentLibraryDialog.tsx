@@ -523,7 +523,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
       setLocalError(null);
       // Rejected client-side first so the message names the file instead of
       // a Rust stack string (REQ-011).
-      if (!path.toLowerCase().endsWith(".agent")) {
+      if (!path.toLowerCase().endsWith(".bot")) {
         setLocalError(t("agentHub.notAgentFile", { name: path.split(/[\\/]/).pop() || path }));
         return;
       }
@@ -603,7 +603,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     if (busy || targetBlocked) return;
     const selected = await openFilePicker({
       multiple: false,
-      filters: [{ name: t("agentList.filterAgentPackage"), extensions: ["agent"] }],
+      filters: [{ name: t("agentList.filterAgentPackage"), extensions: ["bot"] }],
     });
     if (typeof selected === "string" && selected) void acceptLocalPath(selected);
   }, [acceptLocalPath, busy, targetBlocked, t]);

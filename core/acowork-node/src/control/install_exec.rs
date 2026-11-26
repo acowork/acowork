@@ -159,7 +159,7 @@ impl NodeInstallExecutor {
             InstallSource::LocalFile { path } => Ok((PathBuf::from(path), None)),
             InstallSource::Registry { url } => {
                 let spool = std::env::temp_dir().join(format!(
-                    "acowork-node-install-{}-{}.agent",
+                    "acowork-node-install-{}-{}.bot",
                     std::process::id(),
                     uuid::Uuid::new_v4()
                 ));

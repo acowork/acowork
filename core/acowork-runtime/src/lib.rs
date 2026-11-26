@@ -1,6 +1,6 @@
 //! acowork-runtime — Agent Runtime library
 //!
-//! Unified execution engine for .agent packages.
+//! Unified execution engine for .bot packages.
 
 pub mod agent;
 pub mod agent_config;

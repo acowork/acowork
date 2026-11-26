@@ -60,7 +60,7 @@ pub async fn fetch_hub_index() -> Result<HubIndex, String> {
     }
 }
 
-/// Summarize a local `.agent` file for the Local tab (name / size / package
+/// Summarize a local `.bot` file for the Local tab (name / size / package
 /// id) before the user commits to installing it.
 #[tauri::command]
 pub async fn inspect_local_package(package_path: String) -> Result<LocalPackageInfo, String> {

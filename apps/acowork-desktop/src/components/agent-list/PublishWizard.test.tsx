@@ -57,9 +57,9 @@ import { PublishWizard } from "./PublishWizard";
 
 const AGENT_ID = "com.example.demo";
 const NODE_PACKAGE =
-  "C:\\Users\\u\\.acowork\\acowork-node\\packages\\com.example.demo-1.0.0.agent";
+  "C:\\Users\\u\\.acowork\\acowork-node\\packages\\com.example.demo-1.0.0.bot";
 const LIBRARY_PATH =
-  "C:\\Users\\u\\AppData\\Local\\com.acowork.desktop\\agent-library\\com.example.demo-1.0.0.agent";
+  "C:\\Users\\u\\AppData\\Local\\com.acowork.desktop\\agent-library\\com.example.demo-1.0.0.bot";
 
 /** Fake Gateway: prepare → build → signed build, plus the write-back command. */
 function mockPublishFlow(
@@ -132,7 +132,7 @@ describe("PublishWizard library write-back", () => {
     mockPublishFlow(async () => ({
       status: "saved",
       path: LIBRARY_PATH,
-      file_name: "com.example.demo-1.0.0.agent",
+      file_name: "com.example.demo-1.0.0.bot",
     }));
 
     await runToDistribute();
@@ -141,7 +141,7 @@ describe("PublishWizard library write-back", () => {
     // The signed build's output path — not the earlier unsigned build's.
     expect(saveCalls()[0][1]).toEqual({ packagePath: NODE_PACKAGE });
     expect(
-      await screen.findByText(/publishWizard\.librarySaved file=com\.example\.demo-1\.0\.0\.agent/),
+      await screen.findByText(/publishWizard\.librarySaved file=com\.example\.demo-1\.0\.0\.bot/),
     ).toBeTruthy();
     expect(screen.getByText(LIBRARY_PATH)).toBeTruthy();
   });
@@ -154,7 +154,7 @@ describe("PublishWizard library write-back", () => {
     mockPublishFlow(async () => ({
       status: "saved",
       path: LIBRARY_PATH,
-      file_name: "com.example.demo-1.0.0.agent",
+      file_name: "com.example.demo-1.0.0.bot",
     }));
 
     await runToDistribute();
@@ -183,7 +183,7 @@ describe("PublishWizard library write-back", () => {
     mockPublishFlow(async () => ({
       status: "saved",
       path: LIBRARY_PATH,
-      file_name: "com.example.demo-1.0.0.agent",
+      file_name: "com.example.demo-1.0.0.bot",
     }));
     const base = h.invoke.getMockImplementation();
     h.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
@@ -202,7 +202,7 @@ describe("PublishWizard library write-back", () => {
     mockPublishFlow(async () => ({
       status: "saved",
       path: LIBRARY_PATH,
-      file_name: "com.example.demo-1.0.0.agent",
+      file_name: "com.example.demo-1.0.0.bot",
     }));
 
     render(<PublishWizard open agentId={AGENT_ID} agentName="Demo" onClose={() => {}} />);
@@ -218,14 +218,14 @@ describe("PublishWizard library write-back", () => {
     mockPublishFlow(async () => ({
       status: "remote_skipped",
       path: null,
-      file_name: "com.example.demo-1.0.0.agent",
+      file_name: "com.example.demo-1.0.0.bot",
     }));
 
     await runToDistribute();
 
     expect(
       await screen.findByText(
-        /publishWizard\.libraryRemoteSkipped node=workstation file=com\.example\.demo-1\.0\.0\.agent/,
+        /publishWizard\.libraryRemoteSkipped node=workstation file=com\.example\.demo-1\.0\.0\.bot/,
       ),
     ).toBeTruthy();
     // Nothing failed, so there is nothing to retry.
@@ -246,7 +246,7 @@ describe("PublishWizard library write-back", () => {
       return {
         status: "saved",
         path: LIBRARY_PATH,
-        file_name: "com.example.demo-1.0.0.agent",
+        file_name: "com.example.demo-1.0.0.bot",
       };
     });
 
@@ -261,7 +261,7 @@ describe("PublishWizard library write-back", () => {
     fireEvent.click(screen.getByRole("button", { name: /common\.retry/ }));
 
     expect(
-      await screen.findByText(/publishWizard\.librarySaved file=com\.example\.demo-1\.0\.0\.agent/),
+      await screen.findByText(/publishWizard\.librarySaved file=com\.example\.demo-1\.0\.0\.bot/),
     ).toBeTruthy();
     expect(saveCalls()).toHaveLength(2);
     expect(saveCalls()[1][1]).toEqual({ packagePath: NODE_PACKAGE });

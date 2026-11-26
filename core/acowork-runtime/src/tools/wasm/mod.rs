@@ -1,7 +1,7 @@
 //! WASM tool sandbox module
 //!
 //! Provides Wasmtime-based sandboxed execution for custom tools.
-//! WASM tools are loaded from .agent packages and run in isolated
+//! WASM tools are loaded from .bot packages and run in isolated
 //! instances with fuel metering, memory limits, and WASI capabilities.
 //!
 //! Architecture:

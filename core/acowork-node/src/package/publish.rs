@@ -1,9 +1,9 @@
-//! Package publishing — prepare and build/sign .agent packages
+//! Package publishing — prepare and build/sign .bot packages
 //! (migrated from gateway `package_manager/publish.rs`, ADR-055 §6.20).
 //!
 //! S4.2: Publish prepare — validate manifest completeness, check
 //! prompts, optional skills format check, cleanup operations.
-//! S4.3: Publish build — package agent directory into .agent ZIP,
+//! S4.3: Publish build — package agent directory into .bot ZIP,
 //! optional signing.
 
 use std::path::Path;
@@ -379,7 +379,7 @@ pub fn prepare_publish(
 
 // ── S4.3: Publish build ───────────────────────────────────────────────
 
-/// Build a .agent package from an installed agent directory.
+/// Build a .bot package from an installed agent directory.
 ///
 /// ADR-073: the target is located by instance identity (`instance_id`,
 /// falling back to the package id for legacy commands).
@@ -407,7 +407,7 @@ pub fn build_package(
         )));
     }
 
-    let output_filename = format!("{}-{}.agent", agent_id, info.version);
+    let output_filename = format!("{}-{}.bot", agent_id, info.version);
     let output_path = output_dir.join(&output_filename);
 
     if let Some(parent) = output_path.parent() {
@@ -431,7 +431,7 @@ pub fn build_package(
             // Default: use dev key from agents/.signing-keys/
             Path::new("agents/.signing-keys")
         });
-        let signed_path = output_dir.join(format!("{}-{}-signed.agent", agent_id, info.version));
+        let signed_path = output_dir.join(format!("{}-{}-signed.bot", agent_id, info.version));
 
         match acowork_sign::sign::sign_package(
             &output_path,
@@ -465,7 +465,7 @@ pub fn build_package(
     })
 }
 
-/// Result of building an .agent package
+/// Result of building an .bot package
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BuildResult {
     pub output_path: String,
@@ -708,7 +708,7 @@ model = "gpt-4"
         let result =
             build_package("inst-com.test.weather", "com.test.weather", &output_dir, false, None, &state)
                 .unwrap();
-        assert!(result.output_path.ends_with(".agent"));
+        assert!(result.output_path.ends_with(".bot"));
         assert!(result.file_size > 0);
         assert!(!result.signed);
         assert!(Path::new(&result.output_path).exists());

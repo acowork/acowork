@@ -4,7 +4,7 @@
 # Usage: ./build-agent.sh <agent-dir> [output-dir]
 #
 # This script:
-# 1. Creates a .agent ZIP package from the agent directory
+# 1. Creates a .bot ZIP package from the agent directory
 # 2. Generates signing keys (if not exist)
 # 3. Signs the package
 # 4. Outputs to the specified directory
@@ -91,9 +91,9 @@ fi
 # Convert to absolute paths
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 
-# Step 1: Create unsigned .agent package (ZIP)
-UNSIGNED_PKG="${OUTPUT_DIR}/${AGENT_ID}-${AGENT_VERSION}.unsigned.agent"
-SIGNED_PKG="${OUTPUT_DIR}/${AGENT_ID}.agent"
+# Step 1: Create unsigned .bot package (ZIP)
+UNSIGNED_PKG="${OUTPUT_DIR}/${AGENT_ID}-${AGENT_VERSION}.unsigned.bot"
+SIGNED_PKG="${OUTPUT_DIR}/${AGENT_ID}.bot"
 
 echo -e "${GREEN}[1/4]${NC} Creating unsigned package..."
 AGENT_DIR_ABS="$(cd "$AGENT_DIR" && pwd)"

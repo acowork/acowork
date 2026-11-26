@@ -1,6 +1,6 @@
-//! .agent ZIP package loader + manifest validation
+//! .bot ZIP package loader + manifest validation
 //!
-//! Loads .agent packages from ZIP files or extracted directories.
+//! Loads .bot packages from ZIP files or extracted directories.
 //! Validates manifest, verifies signature (delegated to acowork-sign),
 //! and extracts prompt files.
 
@@ -20,7 +20,7 @@ pub struct LoadedPackage {
     pub package_dir: PathBuf,
 }
 
-/// Load .agent package from ZIP file or directory
+/// Load .bot package from ZIP file or directory
 pub fn load_package(package_path: &Path) -> Result<LoadedPackage> {
     if !package_path.exists() {
         return Err(RuntimeError::Package(format!(

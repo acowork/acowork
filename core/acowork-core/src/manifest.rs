@@ -1,6 +1,6 @@
-//! manifest.toml data structures for .agent packages
+//! manifest.toml data structures for .bot packages
 //!
-//! The AgentManifest is the core declaration of every .agent package.
+//! The AgentManifest is the core declaration of every .bot package.
 //! It defines the agent's identity, capabilities, permissions, and
 //! configuration in a declarative TOML format.
 
@@ -581,7 +581,7 @@ pub fn is_valid_label(label: &str) -> bool {
         && !label.ends_with('-')
 }
 
-/// Complete manifest.toml structure for .agent packages
+/// Complete manifest.toml structure for .bot packages
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentManifest {
     /// Reverse-domain identifier (e.g., "com.example.weather").
@@ -608,7 +608,7 @@ pub struct AgentManifest {
     /// Agent role / job title (e.g. "Project Manager")
     #[serde(default)]
     pub role: Option<String>,
-    /// Path to avatar image within the .agent package (e.g. "assets/avatar.png")
+    /// Path to avatar image within the .bot package (e.g. "assets/avatar.png")
     #[serde(default)]
     pub avatar: Option<String>,
     /// Builtin avatar index selected at packaging time (e.g. "icon-05" or "5").
@@ -1134,7 +1134,7 @@ fn default_memory_enabled() -> bool {
     true
 }
 
-/// Per-agent EpisodicDistiller configuration from the `.agent` manifest
+/// Per-agent EpisodicDistiller configuration from the `.bot` manifest
 /// `[memory.distiller]` section (ADR-068 M4/M7).
 ///
 /// Every field is optional. The distiller is **off by default** (opt-in,
@@ -1170,7 +1170,7 @@ pub struct ManifestDistillerConfig {
     pub min_importance: Option<f32>,
 }
 
-/// Optional memory-quality overrides from the `.agent` manifest
+/// Optional memory-quality overrides from the `.bot` manifest
 /// `[memory.quality]` section (ADR-062 D2).
 ///
 /// Every field is optional: a present field overrides the matching default in

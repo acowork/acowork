@@ -21,7 +21,7 @@ static FILE_APPENDER: std::sync::OnceLock<Arc<acowork_core::logging::SizeRolling
 /// Agent Runtime CLI
 #[derive(Parser)]
 #[command(name = "acowork-runtime")]
-#[command(about = "Agent Runtime - unified execution engine for .agent packages")]
+#[command(about = "Agent Runtime - unified execution engine for .bot packages")]
 #[command(version)]
 pub struct Cli {
     /// Agent ID (reverse-domain identifier, e.g., com.example.weather).
@@ -41,7 +41,7 @@ pub struct Cli {
     #[arg(long, env = "ACOWORK_AGENT_INSTANCE_ID")]
     pub agent_instance_id: String,
 
-    /// Path to .agent package (ZIP file or extracted directory)
+    /// Path to .bot package (ZIP file or extracted directory)
     #[arg(long, env = "ACOWORK_PACKAGE_PATH")]
     pub package_path: String,
 

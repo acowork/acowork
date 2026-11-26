@@ -48,7 +48,7 @@ pub struct RuntimeDebugService {
     /// `startup/debug_enable.rs`); the `reload_prompts` impl tolerates
     /// `None` with an `Internal` error rather than panicking.
     agent_core: Arc<std::sync::RwLock<Option<Arc<AgentCore>>>>,
-    /// ADR-063: the agent's `.agent` package directory (where
+    /// ADR-063: the agent's `.bot` package directory (where
     /// `prompts/<file>.md` lives). `reload_prompts` reads each canonical
     /// filename via `load_optional_prompt(package_dir, file)` and writes
     /// the result into the matching `AgentCore` field.

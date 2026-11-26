@@ -27,7 +27,7 @@ use std::path::Path;
 use crate::error::{NodeError, Result};
 use crate::state::NodeState;
 
-/// Upgrade a .agent package (signature fingerprint consistency check required)
+/// Upgrade a .bot package (signature fingerprint consistency check required)
 ///
 /// ADR-073: the target is located by instance identity (`instance_id`,
 /// falling back to the package id for legacy commands); the upgrade
@@ -174,7 +174,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn create_test_zip(dir: &Path, agent_id: &str, version: &str) -> PathBuf {
-        let zip_path = dir.join(format!("{}-{}.agent", agent_id.replace('.', "-"), version));
+        let zip_path = dir.join(format!("{}-{}.bot", agent_id.replace('.', "-"), version));
         let zip_file = std::fs::File::create(&zip_path).unwrap();
         let mut zip = zip::ZipWriter::new(zip_file);
         let options = zip::write::SimpleFileOptions::default();
@@ -291,7 +291,7 @@ mod tests {
         let result = upgrade_package(
             "",
             "com.test.unknown",
-            Path::new("/tmp/nonexistent.agent"),
+            Path::new("/tmp/nonexistent.bot"),
             Path::new("/tmp/installed"),
             &mut state,
             true,

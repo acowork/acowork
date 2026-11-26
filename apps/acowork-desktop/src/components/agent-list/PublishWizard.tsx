@@ -834,7 +834,7 @@ function AvatarPickerSubForm({
               {value.relativePath}
             </div>
             <div className="text-10 text-text-tertiary">
-              ship as part of the .agent package
+              ship as part of the .bot package
             </div>
           </div>
           <div className="flex items-center gap-1">

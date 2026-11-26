@@ -120,7 +120,7 @@ pub fn clone_agent(
     //    Now any package-level dir survives except the per-instance
     //    state dirs in PACKAGE_ALWAYS_EXCLUDE_DIRS (workspace, runtime,
     //    memory) — the same list that keeps those dirs out of a
-    //    published `.agent`.
+    //    published `.bot`.
     for entry in read_dir_sorted(source_path)? {
         if !entry.is_dir() {
             // Stray top-level files (no real install has them, but
@@ -356,7 +356,7 @@ fn is_valid_agent_id(agent_id: &str) -> bool {
 /// Is this top-level entry per-instance state rather than package content?
 ///
 /// Reuses [`PACKAGE_ALWAYS_EXCLUDE_DIRS`] — the same list that keeps
-/// `workspace/` and `runtime/` out of a published `.agent` — so a new
+/// `workspace/` and `runtime/` out of a published `.bot` — so a new
 /// state directory is excluded from clones the day it is added there.
 /// One list, no second copy to rot.
 ///

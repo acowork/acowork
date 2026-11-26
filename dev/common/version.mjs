@@ -109,7 +109,7 @@ function set(version) {
     }
     writeFileSync(VERSION_FILE, `${version}\n`);
     console.log(`Version set to ${version} in VERSION + ${SOURCES.length} declarations.`);
-    console.log('Review the diff, rebuild changed .agent packages, then commit together.');
+    console.log('Review the diff, rebuild changed .bot packages, then commit together.');
 }
 
 function assertTag(tag) {

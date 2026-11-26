@@ -10,7 +10,7 @@
 //!     with a `[package]` table the manifest schema does not even have.
 //!   - `create_agent(draft)` builds the skeleton directory, expands the
 //!     uploaded skill ZIPs into `skills/{name}/`, writes the manifest, zips the
-//!     skeleton into a `.agent` package and hands it to the Gateway.
+//!     skeleton into a `.bot` package and hands it to the Gateway.
 //!   - `parse_skill_zip_preview` reads one ZIP's frontmatter for the wizard's
 //!     per-row preview.
 //!
@@ -450,11 +450,11 @@ pub async fn create_agent(
     let config_dir = temp_dir.join("config");
     std::fs::create_dir_all(&config_dir)
         .map_err(|e| format!("Failed to create config dir: {}", e))?;
-    std::fs::write(config_dir.join("settings.toml"), "# Agent settings\n")
+    std::fs::write(config_dir.join("settings.toml"), "# Bot settings\n")
         .map_err(|e| format!("Failed to write settings: {}", e))?;
 
-    // Zip the skeleton directory into a temporary .agent file
-    let zip_path = temp_dir.with_extension("agent");
+    // Zip the skeleton directory into a temporary .bot file
+    let zip_path = temp_dir.with_extension("bot");
     let zip_file = std::fs::File::create(&zip_path)
         .map_err(|e| format!("Failed to create zip file: {}", e))?;
     let mut zip_writer = zip::ZipWriter::new(zip_file);

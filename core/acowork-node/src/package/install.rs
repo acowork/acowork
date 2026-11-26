@@ -1,4 +1,4 @@
-//! .agent package installation (migrated from gateway
+//! .bot package installation (migrated from gateway
 //! `package_manager/install.rs`, ADR-055 §6.20).
 //!
 //! Install flow: read ZIP from path → signature verify → manifest
@@ -21,7 +21,7 @@ use std::path::Path;
 use crate::error::{NodeError, Result};
 use crate::state::{InstalledAgent, NodeState};
 
-/// Install a .agent package from a file path.
+/// Install a .bot package from a file path.
 ///
 /// This is the sole installation entry point. When `dev_mode` is true,
 /// unsigned packages are allowed (for local development). In production
@@ -235,7 +235,7 @@ mod tests {
 
     /// Build a package that also ships `skills/<name>/SKILL.md` for each name.
     fn create_test_zip_with_skills(dir: &Path, manifest_toml: &str, skills: &[&str]) -> PathBuf {
-        let zip_path = dir.join("test.agent");
+        let zip_path = dir.join("test.bot");
         let zip_file = std::fs::File::create(&zip_path).unwrap();
         let mut zip = zip::ZipWriter::new(zip_file);
         let options = zip::write::SimpleFileOptions::default();
@@ -267,7 +267,7 @@ Body.
     }
 
     fn create_test_zip(dir: &Path, manifest_toml: &str) -> PathBuf {
-        let zip_path = dir.join("test.agent");
+        let zip_path = dir.join("test.bot");
         let zip_file = std::fs::File::create(&zip_path).unwrap();
         let mut zip = zip::ZipWriter::new(zip_file);
         let options = zip::write::SimpleFileOptions::default();
@@ -358,7 +358,7 @@ Body.
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         // Create ZIP without manifest.toml
-        let zip_path = temp_dir.join("no-manifest.agent");
+        let zip_path = temp_dir.join("no-manifest.bot");
         let zip_file = std::fs::File::create(&zip_path).unwrap();
         let mut zip = zip::ZipWriter::new(zip_file);
         let options = zip::write::SimpleFileOptions::default();

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "acowork-keygen")]
-#[command(about = "Generate Ed25519 key pairs for .agent package signing")]
+#[command(about = "Generate Ed25519 key pairs for .bot package signing")]
 struct Cli {
     /// Key type (developer or platform)
     #[arg(short, long, default_value = "developer", value_enum)]

@@ -918,7 +918,7 @@ fn split_installed_topic(topic: &str) -> Option<(String, String)> {
     Some((node_id.to_string(), instance_id.to_string()))
 }
 
-/// `acowork-gateway package <agent-id>` — build a `.agent` package from an
+/// `acowork-gateway package <agent-id>` — build a `.bot` package from an
 /// installed agent on the node that hosts it (ADR-055 §6.13.3; replaces
 /// the pre-node-topology local build).
 ///
@@ -1160,7 +1160,7 @@ pub async fn install_agent_via_mqtt(
     let agent_id = manifest.agent_id.clone();
 
     std::fs::create_dir_all(dispatch.registry_dir).map_err(crate::error::GatewayError::Io)?;
-    let registry_path = dispatch.registry_dir.join(format!("{agent_id}.agent"));
+    let registry_path = dispatch.registry_dir.join(format!("{agent_id}.bot"));
     std::fs::copy(package_path, &registry_path).map_err(crate::error::GatewayError::Io)?;
 
     // The download URL must be reachable from the target node: the
@@ -1216,7 +1216,7 @@ pub async fn upgrade_agent_via_mqtt(
     }
 
     std::fs::create_dir_all(dispatch.registry_dir).map_err(crate::error::GatewayError::Io)?;
-    let registry_path = dispatch.registry_dir.join(format!("{agent_id}.agent"));
+    let registry_path = dispatch.registry_dir.join(format!("{agent_id}.bot"));
     std::fs::copy(package_path, &registry_path).map_err(crate::error::GatewayError::Io)?;
 
     // Same host selection as install: the local node dials the bind

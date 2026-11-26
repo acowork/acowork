@@ -3,12 +3,12 @@
 .SYNOPSIS
     ACowork Agent Package Builder and Signer (PowerShell)
 .DESCRIPTION
-    Builds and signs .agent packages for one or all example agents.
+    Builds and signs .bot packages for one or all example agents.
     Equivalent to dev/common/build-agent.sh for Windows.
 .PARAMETER AgentDir
     Path to a single agent directory. If omitted with -All, builds all agents.
 .PARAMETER OutputDir
-    Output directory for .agent packages (default: agents/agent-packages)
+    Output directory for .bot packages (default: agents/agent-packages)
 .PARAMETER All
     Build all agents in the agents/ directory.
 .EXAMPLE
@@ -119,7 +119,7 @@ function Build-Agent {
     Write-Subtle "  Key Dir   : $KeyDir"
     Write-Host ""
 
-    # ── [1/4] Create unsigned .agent ZIP ──
+    # ── [1/4] Create unsigned .bot ZIP ──
 
     # Same pin as build-agent.sh: timestamp the archive at the last commit that
     # touched this agent, so the two builders on the two platforms produce one
@@ -129,8 +129,8 @@ function Build-Agent {
         if ($LASTEXITCODE -eq 0 -and $pin) { $env:SOURCE_DATE_EPOCH = "$pin".Trim() }
     }
 
-    $unsignedPkg = Join-Path $OutputDir "$agentId-$agentVersion.unsigned.agent"
-    $signedPkg   = Join-Path $OutputDir "$agentId.agent"
+    $unsignedPkg = Join-Path $OutputDir "$agentId-$agentVersion.unsigned.bot"
+    $signedPkg   = Join-Path $OutputDir "$agentId.bot"
 
     Write-Subtle "[1/4] Creating unsigned package..."
 

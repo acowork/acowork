@@ -194,7 +194,7 @@ pub type SharedSessionManagerSlot = Arc<
 #[derive(Clone)]
 pub(crate) struct HttpState {
     pub(crate) work_dir: PathBuf,
-    /// ADR-063: the agent's `.agent` package directory (where
+    /// ADR-063: the agent's `.bot` package directory (where
     /// `prompts/<file>.md` lives). Distinct from `work_dir` — the work
     /// directory holds runtime state (sessions, attachments) while the
     /// package directory holds the declared directives (manifest.toml,
@@ -410,7 +410,7 @@ impl RuntimeHttpServer {
     /// resource lifetimes explicit at the call site and to avoid coupling
     /// the HTTP module to startup-phase internals.
     ///
-    /// ADR-063: `package_dir` is the agent's `.agent` package directory,
+    /// ADR-063: `package_dir` is the agent's `.bot` package directory,
     /// distinct from `work_dir` (which holds runtime state). The two
     /// `/agents/{id}/prompts*` routes mount under this server via
     /// [`crate::http::prompts::prompts_routes`] and resolve every override

@@ -411,7 +411,7 @@ fn node_event_result_json_round_trip() {
         request_id: "req-0008".to_string(),
         status: "ok".to_string(),
         message: "built".to_string(),
-        result_json: Some(r#"{"output_path":"/pkg/a.agent","signed":false,"file_size":42}"#.to_string()),
+        result_json: Some(r#"{"output_path":"/pkg/a.bot","signed":false,"file_size":42}"#.to_string()),
     };
     let decoded = decode_envelope(&envelope_with(data_envelope::Payload::NodeEvent(event)).encode_to_vec());
     let data_envelope::Payload::NodeEvent(ev) = decoded.payload.expect("payload") else {

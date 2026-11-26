@@ -7,9 +7,9 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "acowork-sign")]
-#[command(about = "Sign .agent packages")]
+#[command(about = "Sign .bot packages")]
 struct Cli {
-    /// Input .agent package path (unsigned ZIP)
+    /// Input .bot package path (unsigned ZIP)
     #[arg(short, long)]
     input: PathBuf,
 

@@ -5,7 +5,7 @@
 //!
 //! The library is a **user-owned directory**, not the shipped resource folder:
 //! `app_local_data_dir()/agent-library`. The bundled `resource_dir/
-//! agent-packages/*.agent` are copied in once (D10) because the resource tree
+//! agent-packages/*.bot` are copied in once (D10) because the resource tree
 //! is read-only in per-machine installs, is replaced wholesale on upgrade, and
 //! is `target/debug` in dev builds — none of which may hold user data.
 //!
@@ -49,11 +49,11 @@ const BUNDLED_DIR: &str = "agent-packages";
 const LIBRARY_DIR: &str = "agent-library";
 
 /// Only files with this extension are listed (REQ-023).
-const PACKAGE_EXT: &str = "agent";
+const PACKAGE_EXT: &str = "bot";
 
 // ── Data model ─────────────────────────────────────────────────────────────
 
-/// The avatar declared by one `.agent` file, as the card can draw it.
+/// The avatar declared by one `.bot` file, as the card can draw it.
 ///
 /// The manifest has two mutually exclusive ways to name an avatar
 /// (`AgentManifest::avatar` and `builtin_avatar`, the same pair the Runtime's
@@ -92,7 +92,7 @@ pub enum LocalAvatar {
 /// `file_name` / `path` are always known; everything else comes from
 /// `manifest.toml` inside the ZIP, so a broken package leaves it `None` and
 /// explains itself in `error`. Identity is **never** guessed from the filename
-/// (REQ-024): `com.acowork.senior-engineer.agent` happens to match its
+/// (REQ-024): `com.acowork.senior-engineer.bot` happens to match its
 /// `agent_id` today, but a renamed or re-versioned artifact must not break the
 /// row.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -251,11 +251,11 @@ pub(crate) fn seed_if_missing(app: &AppHandle) -> Result<usize, String> {
     Ok(copied)
 }
 
-/// Copy one `.agent` into the library, **overwriting** a same-named file, and
+/// Copy one `.bot` into the library, **overwriting** a same-named file, and
 /// return the destination path.
 ///
 /// The publish wizard reuses this (plan §3 T2): a rebuild of
-/// `{agent_id}-{version}.agent` is the same artifact and must replace the old
+/// `{agent_id}-{version}.bot` is the same artifact and must replace the old
 /// one — unlike seeding, "overwrite" is correct here because the caller is
 /// producing the file, not restoring a default.
 ///
@@ -287,7 +287,7 @@ pub(crate) fn copy_into(library: &Path, src: &Path) -> Result<PathBuf, String> {
 
 // ── Enumeration (F12 / F15) ────────────────────────────────────────────────
 
-/// The `.agent` files of one directory entry iterator, sorted by file name.
+/// The `.bot` files of one directory entry iterator, sorted by file name.
 ///
 /// F12: this is the only place that decides "which packages exist" — the
 /// directory listing, never a hard-coded match like
@@ -307,7 +307,7 @@ fn package_paths(
         if !has_package_extension(&path) {
             continue;
         }
-        // A directory named `foo.agent` is not a package.
+        // A directory named `foo.bot` is not a package.
         match entry.file_type() {
             Ok(ft) if ft.is_dir() => continue,
             Ok(_) => {}
@@ -321,7 +321,7 @@ fn package_paths(
     Ok(paths)
 }
 
-/// Is this a `.agent` package by file name (case-insensitive)?
+/// Is this a `.bot` package by file name (case-insensitive)?
 ///
 /// Shared with the publish write-back: the wizard copies a file the node just
 /// built, so the same one-definition-of-"a package" applies on both paths.
@@ -396,7 +396,7 @@ fn read_row(path: &Path) -> LocalAgentRow {
     row
 }
 
-/// Everything the card needs from one `.agent` file, read in **one** archive
+/// Everything the card needs from one `.bot` file, read in **one** archive
 /// pass: the manifest, the packaged avatar, the skill names.
 ///
 /// One pass keeps the three derived fields impossible to disagree with each
@@ -417,13 +417,13 @@ const MAX_AVATAR_BYTES: u64 = 256 * 1024;
 
 type Archive = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
 
-/// Read one `.agent` archive into the fields a row shows.
+/// Read one `.bot` archive into the fields a row shows.
 pub(crate) fn read_package(path: &Path) -> Result<PackageFacts, String> {
     let bytes =
         std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     let reader = std::io::Cursor::new(bytes);
     let mut archive = Archive::new(reader)
-        .map_err(|e| format!("Not a valid .agent package (ZIP): {e}"))?;
+        .map_err(|e| format!("Not a valid .bot package (ZIP): {e}"))?;
 
     let manifest = read_manifest_from(&mut archive)?;
     let avatar = resolve_avatar(&mut archive, &manifest);
@@ -568,7 +568,7 @@ pub(crate) fn list_rows(library: &Path) -> LocalAgentList {
 
 // ── Commands ───────────────────────────────────────────────────────────────
 
-/// List every `*.agent` in the library, seeding it from the bundled packages
+/// List every `*.bot` in the library, seeding it from the bundled packages
 /// first.
 ///
 /// One command for N files (F13): reading N ZIP manifests in the webview would
@@ -622,7 +622,7 @@ pub async fn ensure_local_agent(
 
     let path = PathBuf::from(&package_path);
     if !has_package_extension(&path) {
-        return Err(format!("Not an .agent package: {package_path}"));
+        return Err(format!("Not an .bot package: {package_path}"));
     }
     // The webview only ever passes a path it received from the list. Confining
     // it to the library keeps this IPC endpoint from becoming a second
@@ -680,7 +680,7 @@ pub async fn ensure_local_agent(
 /// different spelling (`\\?\`) than the one the list handed out.
 ///
 /// `starts_with` alone is not enough — it compares components, so
-/// `/lib/../../etc/passwd.agent` *does* start with `/lib`. Any `..` component
+/// `/lib/../../etc/passwd.bot` *does* start with `/lib`. Any `..` component
 /// therefore rejects the path outright (a lexically clean path cannot escape
 /// without one), and `root` itself is not a package file.
 fn is_inside(path: &Path, root: &Path) -> bool {
@@ -771,7 +771,7 @@ type = "Network"
 type = "FilesystemRead"
 "#;
 
-    /// Write a minimal but real `.agent` (ZIP + manifest.toml).
+    /// Write a minimal but real `.bot` (ZIP + manifest.toml).
     fn write_package(path: &Path, manifest: &str) {
         use std::io::Write as _;
         let file = std::fs::File::create(path).unwrap();
@@ -787,12 +787,12 @@ type = "FilesystemRead"
         let bundled = Scratch::new("seed-src");
         let scratch = Scratch::new("seed-dst");
         let library = scratch.path().join("agent-library");
-        write_package(&bundled.child("a.agent"), MANIFEST);
-        write_package(&bundled.child("b.agent"), MANIFEST);
+        write_package(&bundled.child("a.bot"), MANIFEST);
+        write_package(&bundled.child("b.bot"), MANIFEST);
 
         assert_eq!(seed_from(bundled.path(), &library).unwrap(), 2);
-        assert!(library.join("a.agent").exists());
-        assert!(library.join("b.agent").exists());
+        assert!(library.join("a.bot").exists());
+        assert!(library.join("b.bot").exists());
         // Second call: the directory exists, so seeding does not run at all.
         assert_eq!(seed_from(bundled.path(), &library).unwrap(), 0);
     }
@@ -804,10 +804,10 @@ type = "FilesystemRead"
         let bundled = Scratch::new("empty-src");
         let scratch = Scratch::new("empty-dst");
         let library = scratch.path().join("agent-library");
-        write_package(&bundled.child("a.agent"), MANIFEST);
+        write_package(&bundled.child("a.bot"), MANIFEST);
 
         seed_from(bundled.path(), &library).unwrap();
-        std::fs::remove_file(library.join("a.agent")).unwrap();
+        std::fs::remove_file(library.join("a.bot")).unwrap();
 
         assert_eq!(seed_from(bundled.path(), &library).unwrap(), 0);
         let list = list_rows(&library);
@@ -821,14 +821,14 @@ type = "FilesystemRead"
         let bundled = Scratch::new("revive-src");
         let scratch = Scratch::new("revive-dst");
         let library = scratch.path().join("agent-library");
-        write_package(&bundled.child("a.agent"), MANIFEST);
-        write_package(&bundled.child("b.agent"), MANIFEST);
+        write_package(&bundled.child("a.bot"), MANIFEST);
+        write_package(&bundled.child("b.bot"), MANIFEST);
 
         assert_eq!(seed_from(bundled.path(), &library).unwrap(), 2);
-        std::fs::remove_file(library.join("a.agent")).unwrap();
+        std::fs::remove_file(library.join("a.bot")).unwrap();
 
         assert_eq!(seed_from(bundled.path(), &library).unwrap(), 0);
-        assert!(!library.join("a.agent").exists());
+        assert!(!library.join("a.bot").exists());
         assert_eq!(list_rows(&library).rows.len(), 1);
     }
 
@@ -837,12 +837,12 @@ type = "FilesystemRead"
     fn seeding_never_overwrites_an_existing_file() {
         let bundled = Scratch::new("keep-src");
         let library = Scratch::new("keep-dst");
-        write_package(&bundled.child("a.agent"), MANIFEST);
-        std::fs::write(library.child("a.agent"), b"user edited this").unwrap();
+        write_package(&bundled.child("a.bot"), MANIFEST);
+        std::fs::write(library.child("a.bot"), b"user edited this").unwrap();
 
         assert_eq!(seed_from(bundled.path(), library.path()).unwrap(), 0);
         assert_eq!(
-            std::fs::read(library.child("a.agent")).unwrap(),
+            std::fs::read(library.child("a.bot")).unwrap(),
             b"user edited this"
         );
     }
@@ -858,26 +858,26 @@ type = "FilesystemRead"
     #[test]
     fn rows_are_sorted_by_file_name_and_ignore_other_files() {
         let library = Scratch::new("sort");
-        write_package(&library.child("z.agent"), MANIFEST);
-        write_package(&library.child("a.agent"), MANIFEST);
+        write_package(&library.child("z.bot"), MANIFEST);
+        write_package(&library.child("a.bot"), MANIFEST);
         std::fs::write(library.child("notes.txt"), b"ignore me").unwrap();
-        std::fs::create_dir_all(library.child("dir.agent")).unwrap();
+        std::fs::create_dir_all(library.child("dir.bot")).unwrap();
 
         let list = list_rows(library.path());
         assert!(list.warning.is_none());
         let names: Vec<_> = list.rows.iter().map(|r| r.file_name.as_str()).collect();
-        assert_eq!(names, vec!["a.agent", "z.agent"]);
+        assert_eq!(names, vec!["a.bot", "z.bot"]);
     }
 
     /// REQ-024: the row is built from `manifest.toml`, not from the filename.
     #[test]
     fn row_identity_comes_from_the_manifest() {
         let library = Scratch::new("identity");
-        write_package(&library.child("renamed.agent"), MANIFEST);
+        write_package(&library.child("renamed.bot"), MANIFEST);
 
         let list = list_rows(library.path());
         let row = &list.rows[0];
-        assert_eq!(row.file_name, "renamed.agent");
+        assert_eq!(row.file_name, "renamed.bot");
         assert_eq!(row.agent_id.as_deref(), Some("com.example.demo"));
         assert_eq!(row.name.as_deref(), Some("Demo"));
         assert_eq!(row.version.as_deref(), Some("1.0.0"));
@@ -891,8 +891,8 @@ type = "FilesystemRead"
     #[test]
     fn a_broken_file_reports_its_own_error_only() {
         let library = Scratch::new("broken");
-        write_package(&library.child("good.agent"), MANIFEST);
-        std::fs::write(library.child("bad.agent"), b"not a zip").unwrap();
+        write_package(&library.child("good.bot"), MANIFEST);
+        std::fs::write(library.child("bad.bot"), b"not a zip").unwrap();
 
         let list = list_rows(library.path());
         assert!(list.warning.is_none());
@@ -901,7 +901,7 @@ type = "FilesystemRead"
         let bad = list
             .rows
             .iter()
-            .find(|r| r.file_name == "bad.agent")
+            .find(|r| r.file_name == "bad.bot")
             .unwrap();
         assert!(bad.agent_id.is_none());
         assert!(bad.error.as_deref().unwrap().contains("ZIP"));
@@ -912,7 +912,7 @@ type = "FilesystemRead"
         let good = list
             .rows
             .iter()
-            .find(|r| r.file_name == "good.agent")
+            .find(|r| r.file_name == "good.bot")
             .unwrap();
         assert!(good.error.is_none());
     }
@@ -921,9 +921,9 @@ type = "FilesystemRead"
     #[test]
     fn two_versions_of_one_agent_stay_separate() {
         let library = Scratch::new("versions");
-        write_package(&library.child("com.example.demo-1.0.0.agent"), MANIFEST);
+        write_package(&library.child("com.example.demo-1.0.0.bot"), MANIFEST);
         write_package(
-            &library.child("com.example.demo-1.1.0.agent"),
+            &library.child("com.example.demo-1.1.0.bot"),
             &MANIFEST.replace("1.0.0", "1.1.0"),
         );
 
@@ -950,7 +950,7 @@ type = "FilesystemRead"
     fn copy_into_the_library_replaces_a_same_named_file() {
         let scratch = Scratch::new("copy");
         let library = scratch.path().join("agent-library");
-        let src = scratch.child("incoming.agent");
+        let src = scratch.child("incoming.bot");
         std::fs::write(&src, b"first").unwrap();
 
         let target = copy_into(&library, &src).unwrap();
@@ -969,16 +969,16 @@ type = "FilesystemRead"
     #[test]
     fn the_ensure_command_only_accepts_library_paths() {
         let root = Path::new("/tmp/agent-library");
-        assert!(is_inside(Path::new("/tmp/agent-library/a.agent"), root));
-        assert!(!is_inside(Path::new("/tmp/elsewhere/a.agent"), root));
+        assert!(is_inside(Path::new("/tmp/agent-library/a.bot"), root));
+        assert!(!is_inside(Path::new("/tmp/elsewhere/a.bot"), root));
         assert!(!is_inside(
-            Path::new("/tmp/agent-library/../../etc/passwd.agent"),
+            Path::new("/tmp/agent-library/../../etc/passwd.bot"),
             root
         ));
     }
 
     /// A1 / REQ-023 / REQ-024 against the REAL shipped packages: every bundled
-    /// `.agent` must produce a healthy row carrying a manifest identity.
+    /// `.bot` must produce a healthy row carrying a manifest identity.
     ///
     /// This is the test that catches manifest-schema drift — the packaged
     /// manifests are written by a different tool, and a field `AgentManifest`
@@ -1113,7 +1113,7 @@ description = "Audits debt"
         let scratch = Scratch::new("rich");
         let library = scratch.path();
         write_package_with(
-            &library.join("rich.agent"),
+            &library.join("rich.bot"),
             RICH_MANIFEST,
             &[
                 ("assets/avatar.png", PNG),
@@ -1152,7 +1152,7 @@ description = "Audits debt"
 builtin_avatar = \"icon-15\"",
         );
         assert!(manifest.contains("builtin_avatar"), "fixture edit missed");
-        write_package(&scratch.child("builtin.agent"), &manifest);
+        write_package(&scratch.child("builtin.bot"), &manifest);
 
         let row = &list_rows(scratch.path()).rows[0];
         assert_eq!(row.error, None);
@@ -1175,7 +1175,7 @@ builtin_avatar = \"icon-15\"",
 builtin_avatar = \"icon-15\"",
         );
         write_package_with(
-            &scratch.child("both.agent"),
+            &scratch.child("both.bot"),
             &manifest,
             &[("assets/avatar.png", PNG)],
         );
@@ -1202,7 +1202,7 @@ builtin_avatar = \"icon-15\"",
 builtin_avatar = \"icon-15\"",
             );
         write_package_with(
-            &scratch.child("broken.agent"),
+            &scratch.child("broken.bot"),
             &manifest,
             &[("assets/avatar.txt", b"i am not a picture")],
         );
@@ -1216,7 +1216,7 @@ builtin_avatar = \"icon-15\"",
     #[test]
     fn a_package_without_an_avatar_has_none() {
         let scratch = Scratch::new("no-avatar");
-        write_package(&scratch.child("plain.agent"), MANIFEST);
+        write_package(&scratch.child("plain.bot"), MANIFEST);
         let row = &list_rows(scratch.path()).rows[0];
         assert_eq!(row.avatar, None);
         assert_eq!(row.error, None, "a missing avatar is not a broken package");
@@ -1231,7 +1231,7 @@ builtin_avatar = \"icon-15\"",
         let scratch = Scratch::new("txt-avatar");
         let manifest = RICH_MANIFEST.replace("assets/avatar.png", "assets/avatar.txt");
         write_package_with(
-            &scratch.child("txt.agent"),
+            &scratch.child("txt.bot"),
             &manifest,
             &[("assets/avatar.txt", b"i am not a picture")],
         );
@@ -1248,7 +1248,7 @@ builtin_avatar = \"icon-15\"",
         let scratch = Scratch::new("traversal-avatar");
         let manifest = RICH_MANIFEST.replace("assets/avatar.png", "../../evil.png");
         write_package_with(
-            &scratch.child("evil.agent"),
+            &scratch.child("evil.bot"),
             &manifest,
             &[("../../evil.png", PNG), ("assets/avatar.png", PNG)],
         );
@@ -1262,7 +1262,7 @@ builtin_avatar = \"icon-15\"",
     #[test]
     fn a_declared_avatar_missing_from_the_archive_is_not_a_row_error() {
         let scratch = Scratch::new("ghost-avatar");
-        write_package_with(&scratch.child("ghost.agent"), RICH_MANIFEST, &[]);
+        write_package_with(&scratch.child("ghost.bot"), RICH_MANIFEST, &[]);
         let row = &list_rows(scratch.path()).rows[0];
         assert_eq!(row.error, None);
         assert_eq!(row.avatar, None);
@@ -1296,10 +1296,10 @@ builtin_avatar = \"icon-15\"",
     }
 
     #[test]
-    fn extension_match_is_case_insensitive_and_requires_agent() {
-        assert!(has_package_extension(Path::new("a.agent")));
-        assert!(has_package_extension(Path::new("a.AGENT")));
-        assert!(!has_package_extension(Path::new("a.agent.zip")));
-        assert!(!has_package_extension(Path::new("agent")));
+    fn extension_match_is_case_insensitive_and_requires_bot() {
+        assert!(has_package_extension(Path::new("a.bot")));
+        assert!(has_package_extension(Path::new("a.BOT")));
+        assert!(!has_package_extension(Path::new("a.bot.zip")));
+        assert!(!has_package_extension(Path::new("bot")));
     }
 }

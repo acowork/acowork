@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::error::{NodeError, Result};
 use crate::state::NodeState;
 
-/// Uninstall a .agent package
+/// Uninstall a .bot package
 ///
 /// ADR-073: the target is located by instance identity (`instance_id`,
 /// falling back to the package id for legacy commands).

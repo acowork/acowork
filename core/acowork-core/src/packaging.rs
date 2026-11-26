@@ -1,7 +1,7 @@
 //! Agent package data isolation types and constants.
 //!
 //! Defines `PackageOptions` for controlling which data items are included
-//! when building an `.agent` package, along with directory/pattern exclusion
+//! when building an `.bot` package, along with directory/pattern exclusion
 //! constants. The default excludes conversation files and user configs to
 //! protect user privacy.
 //!
@@ -17,17 +17,17 @@ use serde::{Deserialize, Serialize};
 // Always-exclude constants
 // ---------------------------------------------------------------------------
 
-/// Directories that are always excluded when building an .agent package.
+/// Directories that are always excluded when building an .bot package.
 ///
 /// These contain runtime data that should never be shipped inside a
-/// distributable `.agent` file.
+/// distributable `.bot` file.
 pub const PACKAGE_ALWAYS_EXCLUDE_DIRS: &[&str] = &[
     "memory",    // Legacy in-workspace store dir (ADR-082, pre-ADR-101 layout)
     "workspace", // User workspace state
     "runtime",   // Runtime temporary files
 ];
 
-/// File patterns to always exclude when building an .agent package.
+/// File patterns to always exclude when building an .bot package.
 pub const PACKAGE_EXCLUDE_PATTERNS: &[&str] = &["*.log", "*.tmp"];
 
 /// Directories excluded by default but user-can-include via packaging UI.
@@ -42,7 +42,7 @@ pub const PACKAGE_DEFAULT_EXCLUDE_DIRS: &[&str] = &[
 
 /// Packaging options specified by user via checklist UI.
 ///
-/// Controls which data items are included when building an `.agent` package.
+/// Controls which data items are included when building an `.bot` package.
 /// Defaults follow the "exclude private data by default" principle from
 /// the design document (§5.2 of 15-conversation-persistence.md): `Default`
 /// is derived, so every flag starts `false` (nothing private ships).

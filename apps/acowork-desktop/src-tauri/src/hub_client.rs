@@ -143,7 +143,7 @@ pub struct HubSignature {
     pub status: String,
 }
 
-/// Summary of a `.agent` file on the local disk, shown in the Local tab after
+/// Summary of a `.bot` file on the local disk, shown in the Local tab after
 /// the user picks or drops one.
 #[derive(Debug, Clone, Serialize)]
 pub struct LocalPackageInfo {
@@ -297,7 +297,7 @@ pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<()> {
     Ok(())
 }
 
-/// Read a local `.agent` file's display summary. The extension check is the
+/// Read a local `.bot` file's display summary. The extension check is the
 /// user-facing half of REQ-011: a wrong file should fail here with a clear
 /// message, not after a Gateway round trip.
 pub fn inspect_local_package(path: &str) -> Result<LocalPackageInfo> {
@@ -305,10 +305,10 @@ pub fn inspect_local_package(path: &str) -> Result<LocalPackageInfo> {
     let ext_matches = file
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("agent"))
+        .map(|e| e.eq_ignore_ascii_case("bot"))
         .unwrap_or(false);
     if !ext_matches {
-        bail!("Not an .agent package: {path}");
+        bail!("Not an .bot package: {path}");
     }
     let bytes = std::fs::read(file).map_err(|e| anyhow!("Failed to read {path}: {e}"))?;
     let agent_id = crate::commands::agent::read_agent_id_from_package(&bytes)
@@ -332,11 +332,11 @@ mod tests {
     fn join_asset_url_normalizes_root_relative_paths() {
         // The published catalog uses site-relative paths without a leading
         // slash; a leading slash is equally valid and must not double up.
-        let a = join_asset_url("downloads/com.acowork.software-architect.agent").unwrap();
-        let b = join_asset_url("/downloads/com.acowork.software-architect.agent").unwrap();
+        let a = join_asset_url("downloads/com.acowork.software-architect.bot").unwrap();
+        let b = join_asset_url("/downloads/com.acowork.software-architect.bot").unwrap();
         assert_eq!(a, b);
         assert!(a.starts_with("https://"));
-        assert!(a.ends_with("/downloads/com.acowork.software-architect.agent"));
+        assert!(a.ends_with("/downloads/com.acowork.software-architect.bot"));
     }
 
     #[test]
@@ -345,15 +345,15 @@ mod tests {
             "",
             "..",
             "downloads/../../etc/passwd",
-            "https://evil.example/x.agent",
-            "//evil.example/x.agent",
-            "downloads\\..\\secrets.agent",
+            "https://evil.example/x.bot",
+            "//evil.example/x.bot",
+            "downloads\\..\\secrets.bot",
             // Percent-encoded traversal: the literal segment scan above runs
             // before the URL parser normalizes, so these must be rejected by
             // the encoding check rather than decoded and judged afterwards.
-            "downloads/%2e%2e/secrets.agent",
-            "downloads/..%2f..%2fsecrets.agent",
-            "%2f%2fevil.example%2fx.agent",
+            "downloads/%2e%2e/secrets.bot",
+            "downloads/..%2f..%2fsecrets.bot",
+            "%2f%2fevil.example%2fx.bot",
         ] {
             assert!(
                 join_asset_url(bad).is_err(),
@@ -416,7 +416,7 @@ mod tests {
             "agents": [
                 {
                     "agent_id": "com.acowork.minimal",
-                    "package": { "file": "downloads/com.acowork.minimal.agent", "size_bytes": 12, "sha256": "ab" }
+                    "package": { "file": "downloads/com.acowork.minimal.bot", "size_bytes": 12, "sha256": "ab" }
                 },
                 {
                     "agent_id": "com.acowork.full",
@@ -428,7 +428,7 @@ mod tests {
                     "high_risk_permissions": ["Shell"],
                     "signature": { "status": "official-channel" },
                     "deprecated": { "reason": "superseded" },
-                    "package": { "file": "downloads/com.acowork.full.agent" }
+                    "package": { "file": "downloads/com.acowork.full.bot" }
                 }
             ]
         }"#;
@@ -469,9 +469,9 @@ mod tests {
         let not_agent = dir.join("notes.txt");
         std::fs::write(&not_agent, b"hello").unwrap();
         let err = inspect_local_package(not_agent.to_str().unwrap()).unwrap_err();
-        assert!(err.to_string().contains("Not an .agent package"));
+        assert!(err.to_string().contains("Not an .bot package"));
 
-        let fake_agent = dir.join("fake.agent");
+        let fake_agent = dir.join("fake.bot");
         std::fs::write(&fake_agent, b"not a zip").unwrap();
         // Right extension, broken package: fails on the manifest read, which is
         // the point — the filename is never trusted.

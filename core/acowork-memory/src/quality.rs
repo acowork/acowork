@@ -3,7 +3,7 @@
 //! Before ADR-062, quality thresholds that affect memory behaviour were
 //! scattered across the retrieval and write paths as hardcoded constants
 //! (see ADR-062 §2.4). This module centralizes the "effective but hardcoded"
-//! parameters so they can be tuned per agent (via the `.agent` manifest
+//! parameters so they can be tuned per agent (via the `.bot` manifest
 //! `[memory.quality]` section) and calibrated from measured distributions
 //! (ADR-062 §6.6 / M3.6).
 //!

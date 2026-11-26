@@ -66,7 +66,7 @@ const API_KEY_VALUE: &str = "sk-minimax-secret-12345";
 const PASSWORD: &str = "bootstrap-integration-test-password";
 const NODE_ID: &str = "verify-node";
 
-/// Path to a real bundled `.agent` package, used as an install fixture.
+/// Path to a real bundled `.bot` package, used as an install fixture.
 ///
 /// Any bundled package works: these tests exercise the install / retained
 /// inventory wire path, not one package's semantics. (ADR-077 removed the
@@ -82,7 +82,7 @@ fn bundled_package_path() -> std::path::PathBuf {
         .expect("core/")
         .parent()
         .expect("workspace root")
-        .join("agents/agent-packages/com.acowork.senior-engineer.agent")
+        .join("agents/agent-packages/com.acowork.senior-engineer.bot")
 }
 
 /// Pick a fresh MQTT port per test invocation (broker threads never
@@ -472,7 +472,7 @@ fn build_shared_state(vault_dir: &std::path::Path, password: &str) -> SharedHttp
     Arc::new(RwLock::new(gw_state))
 }
 
-/// Read `manifest.toml` out of a `.agent` zip package.
+/// Read `manifest.toml` out of a `.bot` zip package.
 fn manifest_toml_from_package(package_path: &std::path::Path) -> String {
     use std::io::Read;
     let data = std::fs::read(package_path).expect("read package");
@@ -491,7 +491,7 @@ fn multipart_body(fields: &[(&str, Vec<u8>)], boundary: &str) -> Vec<u8> {
         out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         if *name == "package" {
             out.extend_from_slice(
-                b"Content-Disposition: form-data; name=\"package\"; filename=\"pkg.agent\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+                b"Content-Disposition: form-data; name=\"package\"; filename=\"pkg.bot\"\r\nContent-Type: application/octet-stream\r\n\r\n",
             );
         } else {
             out.extend_from_slice(

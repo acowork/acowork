@@ -20,7 +20,7 @@
 //! The 5 files listed in [`OVERRIDABLE_PROMPTS`] are the canonical
 //! "package-declared overrides" for the hardcoded LLM prompt constants in
 //! [`crate::prompt`] and the downstream grafeo/memory modules. When a
-//! `.agent` package provides one of these files in `prompts/`, it
+//! `.bot` package provides one of these files in `prompts/`, it
 //! replaces the built-in default at runtime via the
 //! `AgentCore.<field>` resolution chain (see ADR-063 §3.2).
 //!

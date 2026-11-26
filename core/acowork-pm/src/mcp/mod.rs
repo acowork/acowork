@@ -172,7 +172,7 @@ pub struct AgentInfo {
     /// this", never "which one". `None` when the Gateway did not report it.
     pub package_name: Option<String>,
     /// Agent role (manifest top-level `role`, e.g. `"Senior Software Engineer"`).
-    /// Gateway list response missing the field, or the `.agent` package not
+    /// Gateway list response missing the field, or the `.bot` package not
     /// declaring one → `None`.
     pub role: Option<String>,
     /// ADR-085 liveness, taken verbatim from Gateway `AgentListResponse.alive`

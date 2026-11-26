@@ -1,6 +1,6 @@
 //! Signing block data structures and binary serialization
 //!
-//! The Signing Block is inserted into the .agent ZIP file before the
+//! The Signing Block is inserted into the .bot ZIP file before the
 //! Central Directory, similar to Android's APK Signature Scheme v2.
 //!
 //! ## V2 Binary Format (current, APK v2 style)

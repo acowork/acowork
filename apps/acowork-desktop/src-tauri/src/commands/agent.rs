@@ -28,18 +28,18 @@ const INSTALL_BOOTSTRAP_WAIT_SECS: u64 = 30;
 /// (download + signature verify + extract + retained publish).
 pub(crate) const INSTALL_WAIT_SECS: u64 = 180;
 
-/// Extract the `agent_id` from a `.agent` package's embedded
+/// Extract the `agent_id` from a `.bot` package's embedded
 /// `manifest.toml`. We do not trust the filename — OnboardingFlow §725
 /// calls out the same hazard (the Gateway inventory and the Node's
 /// install table key on the manifest id, not the filename), and the
 /// generic AgentList installer hits the same bug if we silently use the
 /// filename here. A non-MVP path: install the package from anywhere
-/// (including a renamed `.agent`) and `wait_agent_installed` still
+/// (including a renamed `.bot`) and `wait_agent_installed` still
 /// polls the right id.
 pub(crate) fn read_agent_id_from_package(package_bytes: &[u8]) -> Result<String, String> {
     let reader = std::io::Cursor::new(package_bytes);
     let mut archive = zip::ZipArchive::new(reader)
-        .map_err(|e| format!("Failed to read .agent package as ZIP: {}", e))?;
+        .map_err(|e| format!("Failed to read .bot package as ZIP: {}", e))?;
     let mut manifest_file = archive
         .by_name("manifest.toml")
         .map_err(|e| format!("manifest.toml not found in package: {}", e))?;
@@ -205,7 +205,7 @@ pub(crate) fn require_node_id(node_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Install an agent from a .agent package
+/// Install an agent from a .bot package
 ///
 /// Reads the package file locally (Desktop App side) and uploads its contents
 /// to the Gateway via multipart/form-data. This works across platform boundaries
@@ -229,7 +229,7 @@ pub async fn install_agent(
     node_id: String,
 ) -> Result<OperationAck, String> {
     require_node_id(&node_id)?;
-    // Read the .agent file into memory on the Desktop App side
+    // Read the .bot file into memory on the Desktop App side
     let package_bytes = std::fs::read(&package_path)
         .map_err(|e| format!("Failed to read package file '{}': {}", package_path, e))?;
 
@@ -407,17 +407,17 @@ fn bundled_agent_package_path(
     resource_name: &str,
 ) -> std::path::PathBuf {
     let package_name = match resource_name {
-        "software-architect-agent" => "com.acowork.software-architect.agent",
-        "senior-engineer-agent" => "com.acowork.senior-engineer.agent",
-        "quality-assurance-agent" => "com.acowork.quality-assurance.agent",
-        "project-manager-agent" => "com.acowork.project-manager.agent",
-        "product-manager-agent" => "com.acowork.product-manager.agent",
-        "document-manager-agent" => "com.acowork.document-manager.agent",
-        "android-node-agent" => "com.acowork.android-node.agent",
+        "software-architect-agent" => "com.acowork.software-architect.bot",
+        "senior-engineer-agent" => "com.acowork.senior-engineer.bot",
+        "quality-assurance-agent" => "com.acowork.quality-assurance.bot",
+        "project-manager-agent" => "com.acowork.project-manager.bot",
+        "product-manager-agent" => "com.acowork.product-manager.bot",
+        "document-manager-agent" => "com.acowork.document-manager.bot",
+        "android-node-agent" => "com.acowork.android-node.bot",
         other => {
             return resource_dir
                 .join("agent-packages")
-                .join(format!("{}.agent", other));
+                .join(format!("{}.bot", other));
         }
     };
     resource_dir.join("agent-packages").join(package_name)
@@ -563,4 +563,80 @@ pub async fn upload_user_avatar_file(
         .upload_user_avatar_file(&bytes, file_name)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod bundled_package_tests {
+    use super::bundled_agent_package_path;
+
+    /// The packaged-agent tree as it is shipped: `tauri.conf.json` maps
+    /// `../../../agents/agent-packages` onto `resource_dir/agent-packages`,
+    /// so the directory that holds `agent-packages/` on disk plays the role
+    /// of `resource_dir` here.
+    fn shipped_resource_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("agents")
+    }
+
+    /// Every resource name onboarding can send must resolve to a package that
+    /// is actually on disk *and* readable.
+    ///
+    /// This is the whole reason the test exists: `install_bundled_agent` reads
+    /// the resolved path with `std::fs::read` at runtime, so a stale name or a
+    /// changed package extension compiles, passes CI and then fails for the
+    /// user on the first "install a bundled agent" click with "Failed to read
+    /// bundled package". The names below are the ones
+    /// `OnboardingFlow.tsx`'s `RECOMMENDED_AGENTS` sends, plus the
+    /// `android-node-agent` entry this match carries.
+    #[test]
+    fn every_bundled_resource_name_resolves_to_a_readable_package() {
+        let resource_dir = shipped_resource_dir();
+        let names = [
+            "software-architect-agent",
+            "senior-engineer-agent",
+            "quality-assurance-agent",
+            "project-manager-agent",
+            "product-manager-agent",
+            "document-manager-agent",
+            "android-node-agent",
+        ];
+        for name in names {
+            let resolved = bundled_agent_package_path(&resource_dir, name);
+            assert_eq!(
+                resolved.extension().and_then(|e| e.to_str()),
+                Some("bot"),
+                "{name} resolved to {} — shipped packages use the .bot extension",
+                resolved.display()
+            );
+            assert!(
+                resolved.is_file(),
+                "{name} resolved to {}, which does not exist — bundled_agent_package_path \
+                 and the contents of agents/agent-packages/ disagree",
+                resolved.display()
+            );
+            let bytes = std::fs::read(&resolved).unwrap_or_else(|e| {
+                panic!("{name}: cannot read {}: {e}", resolved.display())
+            });
+            assert!(
+                bytes.starts_with(b"PK"),
+                "{name}: {} is not a ZIP package",
+                resolved.display()
+            );
+        }
+    }
+
+    /// The catch-all arm builds `<resource_name>.bot`; a `.agent` there would
+    /// silently point at a file nobody ships.
+    #[test]
+    fn the_catch_all_arm_builds_a_bot_file_name() {
+        let resolved = bundled_agent_package_path(std::path::Path::new("/res"), "custom-agent");
+        assert_eq!(
+            resolved,
+            std::path::Path::new("/res").join("agent-packages").join("custom-agent.bot"),
+            "the catch-all arm must keep the agent-packages directory and a .bot file name"
+        );
+    }
 }

@@ -138,9 +138,9 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Install a .agent package
+    /// Install a .bot package
     Install {
-        /// Path to .agent package file
+        /// Path to .bot package file
         package: String,
         /// Target node (ADR-113): `--node <node_id>` is REQUIRED.
         /// List the ids with `acowork-gateway nodes list`; the Gateway
@@ -163,7 +163,7 @@ pub enum Commands {
     Upgrade {
         /// Agent ID to upgrade
         agent_id: String,
-        /// Path to new .agent package file
+        /// Path to new .bot package file
         package: String,
         /// Target node (ADR-113): `--node <node_id>` is REQUIRED.
         /// List the ids with `acowork-gateway nodes list`; the Gateway
@@ -193,7 +193,7 @@ pub enum Commands {
     },
     /// List installed agents
     List,
-    /// Package an installed agent into .agent file (built on the hosting
+    /// Package an installed agent into .bot file (built on the hosting
     /// node; --output/--key-dir are node-local paths, empty output uses
     /// the node's packages dir)
     Package {
@@ -1046,10 +1046,10 @@ mod tests {
 
     #[test]
     fn test_cli_parse_install() {
-        let cli = Cli::parse_from(["acowork-gateway", "install", "weather.agent"]);
+        let cli = Cli::parse_from(["acowork-gateway", "install", "weather.bot"]);
         match cli.command {
             Some(Commands::Install { package, .. }) => {
-                assert_eq!(package, "weather.agent");
+                assert_eq!(package, "weather.bot");
             }
             _ => panic!("Expected Install command"),
         }
@@ -1103,12 +1103,12 @@ mod tests {
             "acowork-gateway",
             "upgrade",
             "com.example.weather",
-            "weather-v2.agent",
+            "weather-v2.bot",
         ]);
         match cli.command {
             Some(Commands::Upgrade { agent_id, package, .. }) => {
                 assert_eq!(agent_id, "com.example.weather");
-                assert_eq!(package, "weather-v2.agent");
+                assert_eq!(package, "weather-v2.bot");
             }
             _ => panic!("Expected Upgrade command"),
         }

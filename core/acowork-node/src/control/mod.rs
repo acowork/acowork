@@ -558,7 +558,7 @@ async fn handle_command(
                     );
                 }
                 let tmp = std::env::temp_dir().join(format!(
-                    "acowork-node-upgrade-{}-{}.agent",
+                    "acowork-node-upgrade-{}-{}.bot",
                     std::process::id(),
                     uuid::Uuid::new_v4()
                 ));
@@ -2590,7 +2590,7 @@ mod tests {
         let cmd = install_command(
             &uuid::Uuid::new_v4().to_string(),
             "com.test.agent",
-            "D:/tmp/pkg.agent",
+            "D:/tmp/pkg.bot",
             true,
         );
         let reply = handle_command(&state, &config, &cmd, None).await;
@@ -2609,7 +2609,7 @@ mod tests {
         let state = gated_state().await;
         let config = test_config();
         let instance = uuid::Uuid::new_v4().to_string();
-        let cmd = install_command(&instance, "com.test.agent", "D:/tmp/pkg.agent", false);
+        let cmd = install_command(&instance, "com.test.agent", "D:/tmp/pkg.bot", false);
 
         let first = handle_command(&state, &config, &cmd, None).await;
         let second = handle_command(&state, &config, &cmd, None).await;
@@ -2635,7 +2635,7 @@ mod tests {
             let cmd = install_command(
                 &uuid::Uuid::new_v4().to_string(),
                 "com.test.agent",
-                "D:/tmp/pkg.agent",
+                "D:/tmp/pkg.bot",
                 false,
             );
             let reply = handle_command(&state, &config, &cmd, None).await;
@@ -2655,7 +2655,7 @@ mod tests {
         let cmd = install_command(
             &uuid::Uuid::new_v4().to_string(),
             "com.test.agent",
-            "D:/tmp/pkg.agent",
+            "D:/tmp/pkg.bot",
             false,
         );
 
@@ -2670,7 +2670,7 @@ mod tests {
     async fn install_with_a_non_uuid_instance_is_refused() {
         let state = gated_state().await;
         let config = test_config();
-        let cmd = install_command("com.test.agent", "com.test.agent", "D:/tmp/pkg.agent", false);
+        let cmd = install_command("com.test.agent", "com.test.agent", "D:/tmp/pkg.bot", false);
 
         let reply = handle_command(&state, &config, &cmd, None).await;
         assert_eq!(reply.status, "error");

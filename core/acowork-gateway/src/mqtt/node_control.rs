@@ -395,7 +395,7 @@ impl NodeControlClient {
         .await
     }
 
-    /// Build (and optionally sign) a .agent package on a node. The
+    /// Build (and optionally sign) a .bot package on a node. The
     /// structured result is carried in `NodeEvent.result_json` (JSON).
     pub async fn publish_build(
         &self,

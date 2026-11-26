@@ -21,7 +21,7 @@
 //! cargo build --target wasm32-wasip2 --release
 //! ```
 //!
-//! The resulting .wasm file goes into the .agent package's `tools/` directory.
+//! The resulting .wasm file goes into the .bot package's `tools/` directory.
 
 pub mod exports;
 pub mod tool;

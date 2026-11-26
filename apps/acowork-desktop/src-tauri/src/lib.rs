@@ -663,7 +663,7 @@ pub fn run() {
             commands::publish::prepare_publish,
             commands::publish::build_publish,
             commands::publish::export_package,
-            // REQ-029 / D12: copy the built .agent from the node's packages
+            // REQ-029 / D12: copy the built .bot from the node's packages
             // dir into the Local library (local single-machine deployment
             // only — remote/relay answers `remote_skipped`, never an error).
             commands::publish::save_publish_to_library,

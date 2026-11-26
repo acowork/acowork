@@ -76,7 +76,7 @@ impl BuiltinToolEntry {
 pub struct AgentCore {
     /// Runtime configuration
     pub(crate) config: RuntimeConfig,
-    /// Agent manifest (declarative .agent package metadata)
+    /// Agent manifest (declarative .bot package metadata)
     pub(crate) manifest: acowork_core::AgentManifest,
     /// LLM Provider
     pub(crate) provider: Arc<dyn Provider>,
@@ -219,7 +219,7 @@ pub struct AgentCore {
     /// Shared across session clones; empty registry = no skills installed.
     pub(crate) skill_registry: Arc<std::sync::RwLock<Arc<crate::skills::parser::SkillRegistry>>>,
     /// Agent-specific compaction prompt (from `prompts/summary.md` in the
-    /// .agent package). `None` (the inner `Option`) = use the built-in
+    /// .bot package). `None` (the inner `Option`) = use the built-in
     /// [`crate::prompt::COMPACTION_SYSTEM_PROMPT`] fallback.
     ///
     /// This is the package-declared summarization directive for context

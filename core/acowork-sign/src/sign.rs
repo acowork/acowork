@@ -1,6 +1,6 @@
 //! Package signing (insert Signing Block into ZIP)
 //!
-//! Signs a .agent package by:
+//! Signs a .bot package by:
 //! 1. Reading the ZIP contents
 //! 2. Computing SHA-256 digests of each section
 //! 3. Creating a SigningBlock with Ed25519 signature
@@ -22,7 +22,7 @@ use crate::signing_block::{
     SigningBlock,
 };
 
-/// Sign a .agent package
+/// Sign a .bot package
 ///
 /// Reads the input ZIP, computes digests, signs them, and produces
 /// a signed ZIP with the SigningBlock inserted before the Central Directory.
@@ -156,7 +156,7 @@ pub fn create_signature_data(
 
 /// Write a signed ZIP with the SigningBlock binary-embedded before the Central Directory
 ///
-/// The .agent ZIP format (V2, APK v2 style):
+/// The .bot ZIP format (V2, APK v2 style):
 /// ```text
 /// [Local file headers + file data]     — original ZIP content
 /// [SigningBlock (binary)]              — inserted before CD
@@ -232,7 +232,7 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp_dir);
         fs::create_dir_all(&tmp_dir).unwrap();
 
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         create_test_zip(&zip_path);
 
         let zip_data = fs::read(&zip_path).unwrap();
@@ -259,11 +259,11 @@ mod tests {
         crate::keygen::generate_and_save(&tmp_dir.join("keys"), KeyType::Developer).unwrap();
 
         // Create test ZIP
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         create_test_zip(&zip_path);
 
         // Sign
-        let signed_path = tmp_dir.join("signed.agent");
+        let signed_path = tmp_dir.join("signed.bot");
         sign_package(
             &zip_path,
             &signed_path,
@@ -362,11 +362,11 @@ mod tests {
         crate::keygen::generate_and_save(&tmp_dir.join("keys"), KeyType::Developer).unwrap();
 
         // Create test ZIP
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         create_test_zip(&zip_path);
 
         // Sign with V2 binary format
-        let signed_path = tmp_dir.join("signed.agent");
+        let signed_path = tmp_dir.join("signed.bot");
         sign_package(
             &zip_path,
             &signed_path,
@@ -414,10 +414,10 @@ mod tests {
         crate::keygen::generate_and_save(&tmp_dir.join("keys"), KeyType::Developer).unwrap();
 
         // Create and sign
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         create_test_zip(&zip_path);
 
-        let signed_path = tmp_dir.join("signed.agent");
+        let signed_path = tmp_dir.join("signed.bot");
         sign_package(
             &zip_path,
             &signed_path,
@@ -444,10 +444,10 @@ mod tests {
         crate::keygen::generate_and_save(&tmp_dir.join("keys"), KeyType::Developer).unwrap();
 
         // Create and sign
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         create_test_zip(&zip_path);
 
-        let signed_path = tmp_dir.join("signed.agent");
+        let signed_path = tmp_dir.join("signed.bot");
         sign_package(
             &zip_path,
             &signed_path,
@@ -475,11 +475,11 @@ mod tests {
         crate::keygen::generate_and_save(&tmp_dir.join("keys"), KeyType::Developer).unwrap();
 
         // Create test ZIP
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         create_test_zip(&zip_path);
 
         // Sign with legacy V1 format
-        let signed_path = tmp_dir.join("signed_legacy.agent");
+        let signed_path = tmp_dir.join("signed_legacy.bot");
         sign_package_legacy(
             &zip_path,
             &signed_path,
@@ -506,11 +506,11 @@ mod tests {
         crate::keygen::generate_and_save(&tmp_dir.join("keys"), KeyType::Developer).unwrap();
 
         // Create test ZIP
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         create_test_zip(&zip_path);
 
         // Sign
-        let signed_path = tmp_dir.join("signed.agent");
+        let signed_path = tmp_dir.join("signed.bot");
         sign_package(
             &zip_path,
             &signed_path,
@@ -557,7 +557,7 @@ mod tests {
     fn sign_verify_and_check_zip(zip_path: &Path, tmp_dir: &Path, expected_file_count: usize) {
         crate::keygen::generate_and_save(&tmp_dir.join("keys"), KeyType::Developer).unwrap();
 
-        let signed_path = tmp_dir.join("signed.agent");
+        let signed_path = tmp_dir.join("signed.bot");
         sign_package(
             zip_path,
             &signed_path,
@@ -586,7 +586,7 @@ mod tests {
         fs::create_dir_all(&tmp_dir).unwrap();
 
         // Create ZIP with 25 files
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         let file = fs::File::create(&zip_path).unwrap();
         let mut writer = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
@@ -612,7 +612,7 @@ mod tests {
         fs::create_dir_all(&tmp_dir).unwrap();
 
         // Create ZIP with one 1MB+ file
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         let file = fs::File::create(&zip_path).unwrap();
         let mut writer = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
@@ -637,7 +637,7 @@ mod tests {
         fs::create_dir_all(&tmp_dir).unwrap();
 
         // Create ZIP with deeply nested directory structure
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         let file = fs::File::create(&zip_path).unwrap();
         let mut writer = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
@@ -674,7 +674,7 @@ mod tests {
         fs::create_dir_all(&tmp_dir).unwrap();
 
         // Create ZIP with empty files alongside non-empty ones
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         let file = fs::File::create(&zip_path).unwrap();
         let mut writer = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
@@ -705,7 +705,7 @@ mod tests {
         fs::create_dir_all(&tmp_dir).unwrap();
 
         // Create ZIP with multiple entries
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         let file = fs::File::create(&zip_path).unwrap();
         let mut writer = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
@@ -724,7 +724,7 @@ mod tests {
 
         // Sign
         crate::keygen::generate_and_save(&tmp_dir.join("keys"), KeyType::Developer).unwrap();
-        let signed_path = tmp_dir.join("signed.agent");
+        let signed_path = tmp_dir.join("signed.bot");
         sign_package(
             &zip_path,
             &signed_path,

@@ -1,7 +1,7 @@
 //! acowork-core — Shared types, protocols, and traits for ACowork.AI
 //!
 //! This crate contains all types shared across the ACowork workspace:
-//! - Manifest structures (`.agent` package format)
+//! - Manifest structures (`.bot` package format)
 //! - Protocol messages (MQTT payload types, JSON DTOs)
 //! - Tool and Provider traits
 //! - Permission, Identity, Budget types

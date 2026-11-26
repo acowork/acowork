@@ -153,7 +153,7 @@ fn parse_result<T: serde::de::DeserializeOwned>(
 /// Install-locally request
 #[derive(Debug, Deserialize)]
 pub struct InstallLocallyRequest {
-    /// Path to the built .agent package (from build_publish response)
+    /// Path to the built .bot package (from build_publish response)
     pub package_path: String,
     /// ADR-113: explicit target node. The Gateway never infers a default
     /// landing node from who spawned what.
@@ -231,7 +231,7 @@ pub struct ExportInfo {
     pub output_path: String,
 }
 
-/// `POST /api/agents/:id/publish/export` — export built .agent file
+/// `POST /api/agents/:id/publish/export` — export built .bot file
 pub async fn export_package(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -242,7 +242,7 @@ pub async fn export_package(
     // must match what `build_package` wrote, which uses the
     // *package* name from `cmd.agent_id` (see `build_publish`
     // above). Without this resolve, an instance-id URL would build
-    // a `{instance_id}-{version}.agent` filename that the node
+    // a `{instance_id}-{version}.bot` filename that the node
     // never wrote → spurious 404 "Run publish/build first".
     let (instance_id, resolved_agent_id) =
         crate::http::agents::resolve_agent_identity(&state, &agent_id).await?;
@@ -261,7 +261,7 @@ pub async fn export_package(
         (output_dir, info.version.clone())
     };
 
-    let filename = format!("{}-{}.agent", resolved_agent_id, version);
+    let filename = format!("{}-{}.bot", resolved_agent_id, version);
     let output_path = output_dir.join(&filename);
 
     if !output_path.exists() {
@@ -280,13 +280,13 @@ pub async fn export_package(
 #[cfg(test)]
 mod tests {
     //! Minimal regression coverage for the filename contract between
-    //! `build_publish` (writes `{package_name}-{version}.agent`) and
+    //! `build_publish` (writes `{package_name}-{version}.bot`) and
     //! `export_package` (must look up the same filename).
     //!
     //! The original bug: `export_package` built the filename from
     //! the raw route variable, which is the *instance* id (UUIDv4) in
     //! the Desktop call path, producing
-    //! `{instance_id}-{version}.agent` — a path the node never
+    //! `{instance_id}-{version}.bot` — a path the node never
     //! wrote. The fix calls `resolve_agent_identity` and uses the
     //! resolved package name, matching what `build_package` writes.
     //!
@@ -300,7 +300,7 @@ mod tests {
     /// inside `export_package`. If this drifts from the production
     /// code, the contract test below is meaningless.
     fn expected_filename(package_name: &str, version: &str) -> String {
-        format!("{}-{}.agent", package_name, version)
+        format!("{}-{}.bot", package_name, version)
     }
 
     #[test]
@@ -312,10 +312,10 @@ mod tests {
         let instance_id = "59e7f3a8-7db3-4ffe-94e3-04e04cc45083";
         let version = "0.1.0";
 
-        // The contract: filename == `{package_name}-{version}.agent`,
-        // never `{instance_id}-{version}.agent`.
+        // The contract: filename == `{package_name}-{version}.bot`,
+        // never `{instance_id}-{version}.bot`.
         let name = expected_filename(package_name, version);
-        assert_eq!(name, "com.acowork.ponytail-0.1.0.agent");
+        assert_eq!(name, "com.acowork.ponytail-0.1.0.bot");
         assert!(
             !name.contains(instance_id),
             "filename must be derived from the package name, not the route variable"

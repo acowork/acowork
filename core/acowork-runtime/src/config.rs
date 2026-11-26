@@ -56,7 +56,7 @@ pub struct RuntimeConfig {
     /// mode). `validate()` rejects an empty value at startup.
     #[serde(default)]
     pub agent_instance_id: String,
-    /// Path to .agent package (ZIP or directory)
+    /// Path to .bot package (ZIP or directory)
     pub package_path: String,
     /// Working directory for the agent
     pub work_dir: String,

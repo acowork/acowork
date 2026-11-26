@@ -8,7 +8,7 @@
 # this order:
 #
 #   1. this repo  — edit the agent, bump `version` in its manifest.toml,
-#                   rebuild its `.agent` (dev/common/build-agent.sh), commit.
+#                   rebuild its `.bot` (dev/common/build-agent.sh), commit.
 #   2. the hub    — THIS SCRIPT. It runs the hub's generator against a
 #                   committed ref of this repo and opens the PR it produces.
 #
@@ -179,7 +179,7 @@ ${MAIN_REPO}@${SHA}. Packages touched: ${CHANGED%-}.
 The main repo's agents/<name>-agent/ is the source of truth for these
 bytes; nothing in agents/official/ is authored here. The content change
 landed there first, and this commit only carries it to the registry, so
-the published .agent files match what the app ships under the same
+the published .bot files match what the app ships under the same
 agent_id and an installed package stays upgradeable.
 MSG
 

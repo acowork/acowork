@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-description = ".agent package signing and verification toolchain"
+description = ".bot package signing and verification toolchain"
 
 [[bin]]
 name = "acowork-keygen"

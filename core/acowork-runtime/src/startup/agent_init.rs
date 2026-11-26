@@ -1,7 +1,7 @@
 //! Phase A: per-agent initialization.
 //!
 //! Covers Steps 0-8 of the original `async_main`:
-//!   - Load .agent package
+//!   - Load .bot package
 //!   - Connect to Gateway gRPC + AgentHello handshake
 //!   - Build system prompt & SkillRegistry
 //!   - Resolve LLM provider
@@ -36,8 +36,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     use crate::tools::builtin;
     use crate::tools::registry::ToolRegistry;
 
-    // ── Step 1: Load .agent package ─────────────────────────────────
-    tracing::info!(path = %config.package_path, "Loading .agent package");
+    // ── Step 1: Load .bot package ─────────────────────────────────
+    tracing::info!(path = %config.package_path, "Loading .bot package");
     let loaded = load_package(std::path::Path::new(&config.package_path))?;
     tracing::info!(
         agent_id = %loaded.manifest.agent_id,
@@ -238,7 +238,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         match crate::http::RuntimeHttpServer::start_with_bind_port(
             bind_port,
             std::path::PathBuf::from(&config.work_dir),
-            // ADR-063: the agent's `.agent` package directory holds
+            // ADR-063: the agent's `.bot` package directory holds
             // `prompts/<file>.md` — distinct from `work_dir` (runtime
             // state). Wired into HttpState so the `/agents/{id}/prompts*`
             // routes can resolve canonical filenames under
@@ -601,7 +601,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // from `prompts/<file>.md` independently — missing files yield `None`
     // and the LLM call site falls back to the built-in constant. We log at
     // debug level (not info) because the absence of an override is the
-    // common case for the v1 .agent packages shipped today.
+    // common case for the v1 .bot packages shipped today.
     let load_or_trace = |filename: &'static str, ctx_desc: &'static str| {
         let loaded =
             crate::package::prompt_builder::load_optional_prompt(&loaded.package_dir, filename);
@@ -946,7 +946,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         intent_send_config,
         // ADR-094: `load_skill` needs the package dir to read
         // `<package_dir>/skills/<name>/SKILL.md`. `loaded.package_dir`
-        // is the resolved `.agent` package root — distinct from the
+        // is the resolved `.bot` package root — distinct from the
         // session `work_dir` (which holds runtime state, not the
         // agent's read-only package files).
         loaded.package_dir.clone(),

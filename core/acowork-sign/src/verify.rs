@@ -1,6 +1,6 @@
 //! Package verification (extract Signing Block + verify)
 //!
-//! Verifies a .agent package by:
+//! Verifies a .bot package by:
 //! 1. Extracting the SigningBlock (V2 binary format, or V1 legacy ZIP entry)
 //! 2. Recomputing section digests
 //! 3. Verifying the Ed25519 signature
@@ -16,7 +16,7 @@ use crate::error::{Result, SignError};
 use crate::sign::create_signature_data;
 use crate::signing_block::{SignerIdentity, SigningBlock};
 
-/// Verify a .agent package signature from a file path.
+/// Verify a .bot package signature from a file path.
 ///
 /// This is the sole verification entry point. All callers (CLI install,
 /// HTTP multipart upload, etc.) must write their input to a file first and
@@ -116,7 +116,7 @@ fn verify_package_impl(zip_data: &[u8]) -> Result<VerificationResult> {
     })
 }
 
-/// Extract the signing block from a .agent ZIP
+/// Extract the signing block from a .bot ZIP
 ///
 /// Tries V2 binary format first (APK v2 style, embedded before CD),
 /// then falls back to V1 legacy format (ZIP entry "META-INF/SIGNING.BLOCK").
@@ -247,10 +247,10 @@ mod tests {
         crate::keygen::generate_and_save(&tmp_dir.join("keys"), KeyType::Developer).unwrap();
 
         // Create and sign
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         create_test_zip(&zip_path);
 
-        let signed_path = tmp_dir.join("signed.agent");
+        let signed_path = tmp_dir.join("signed.bot");
         crate::sign::sign_package(
             &zip_path,
             &signed_path,
@@ -274,7 +274,7 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp_dir);
         fs::create_dir_all(&tmp_dir).unwrap();
 
-        let zip_path = tmp_dir.join("unsigned.agent");
+        let zip_path = tmp_dir.join("unsigned.bot");
         create_test_zip(&zip_path);
 
         let result = verify_package(&zip_path);
@@ -293,10 +293,10 @@ mod tests {
         crate::keygen::generate_and_save(&tmp_dir.join("keys"), KeyType::Developer).unwrap();
 
         // Create and sign
-        let zip_path = tmp_dir.join("test.agent");
+        let zip_path = tmp_dir.join("test.bot");
         create_test_zip(&zip_path);
 
-        let signed_path = tmp_dir.join("signed.agent");
+        let signed_path = tmp_dir.join("signed.bot");
         crate::sign::sign_package(
             &zip_path,
             &signed_path,
@@ -344,7 +344,7 @@ mod tests {
         let tampered_data =
             crate::zip_utils::insert_block_before_cd(&tampered_zip_data, &block_data).unwrap();
 
-        let tampered_path = tmp_dir.join("tampered.agent");
+        let tampered_path = tmp_dir.join("tampered.bot");
         fs::write(&tampered_path, tampered_data).unwrap();
 
         // Verify should fail

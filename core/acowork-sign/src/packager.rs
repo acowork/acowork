@@ -1,6 +1,6 @@
 //! Agent package builder with data isolation support.
 //!
-//! Builds an `.agent` ZIP package from an installed agent directory,
+//! Builds an `.bot` ZIP package from an installed agent directory,
 //! respecting `PackageOptions` to control which data items are included.
 //! Private data (conversations, Episodes, private KnowledgeNodes) is
 //! excluded by default to protect user privacy.
@@ -18,7 +18,7 @@ use crate::error::{Result, SignError};
 // Package builder
 // ---------------------------------------------------------------------------
 
-/// Build an `.agent` package from an installed agent directory.
+/// Build an `.bot` package from an installed agent directory.
 ///
 /// Walks the agent directory, applies exclusion rules based on `options`,
 /// and writes the resulting ZIP to `output_path`. If `options` is `None`,
@@ -54,7 +54,7 @@ pub fn build_agent_package(
     build_agent_package_with_options(agent_dir, output_path, &opts)
 }
 
-/// Build an `.agent` package with explicit `PackageOptions`.
+/// Build an `.bot` package with explicit `PackageOptions`.
 fn build_agent_package_with_options(
     agent_dir: &Path,
     output_path: &Path,
@@ -440,8 +440,8 @@ runtime_version = "0.1.0"
             ..Default::default()
         };
 
-        let first = tmp_dir.join("first.agent");
-        let second = tmp_dir.join("second.agent");
+        let first = tmp_dir.join("first.bot");
+        let second = tmp_dir.join("second.bot");
         build_agent_package_with_options(&agent_dir, &first, &opts).unwrap();
         build_agent_package_with_options(&agent_dir, &second, &opts).unwrap();
         assert_eq!(
@@ -456,7 +456,7 @@ runtime_version = "0.1.0"
             timestamp_epoch: Some(1_600_000_000),
             ..Default::default()
         };
-        let third = tmp_dir.join("third.agent");
+        let third = tmp_dir.join("third.bot");
         build_agent_package_with_options(&agent_dir, &third, &other).unwrap();
         assert_ne!(
             fs::read(&first).unwrap(),
@@ -466,7 +466,7 @@ runtime_version = "0.1.0"
 
         // Content still dominates: one pin, two trees, two packages.
         fs::write(agent_dir.join("prompts/system.md"), "changed").unwrap();
-        let fourth = tmp_dir.join("fourth.agent");
+        let fourth = tmp_dir.join("fourth.bot");
         build_agent_package_with_options(&agent_dir, &fourth, &opts).unwrap();
         assert_ne!(
             fs::read(&first).unwrap(),
@@ -506,7 +506,7 @@ runtime_version = "0.1.0"
         let agent_dir = tmp_dir.join("agent");
         create_test_agent_dir(&agent_dir);
 
-        let output_path = tmp_dir.join("output.agent");
+        let output_path = tmp_dir.join("output.bot");
         let opts = PackageOptions::default(); // conversations excluded by default
 
         build_agent_package_with_options(&agent_dir, &output_path, &opts).unwrap();
@@ -546,7 +546,7 @@ runtime_version = "0.1.0"
         let agent_dir = tmp_dir.join("agent");
         create_test_agent_dir(&agent_dir);
 
-        let output_path = tmp_dir.join("output.agent");
+        let output_path = tmp_dir.join("output.bot");
         let opts = PackageOptions {
             include_conversations: true,
             ..Default::default()
@@ -580,7 +580,7 @@ runtime_version = "0.1.0"
         let agent_dir = tmp_dir.join("agent");
         create_test_agent_dir(&agent_dir);
 
-        let output_path = tmp_dir.join("output.agent");
+        let output_path = tmp_dir.join("output.bot");
         let opts = PackageOptions {
             include_config: true,
             ..Default::default()
@@ -609,7 +609,7 @@ runtime_version = "0.1.0"
         let agent_dir = tmp_dir.join("agent");
         create_test_agent_dir(&agent_dir);
 
-        let output_path = tmp_dir.join("output.agent");
+        let output_path = tmp_dir.join("output.bot");
         // Every option the type offers is switched on: a `memory/` directory
         // left over from the pre-ADR-101 layout still must not travel
         // (ADR-101 decision 11).
@@ -656,7 +656,7 @@ runtime_version = "0.1.0"
         let agent_dir = tmp_dir.join("agent");
         create_test_agent_dir(&agent_dir);
 
-        let output_path = tmp_dir.join("output.agent");
+        let output_path = tmp_dir.join("output.bot");
 
         build_agent_package(&agent_dir, &output_path, None).unwrap();
 
@@ -797,7 +797,7 @@ runtime_version = "0.1.0"
         let agent_dir = tmp_dir.join("agent");
         agent_dir_with(&agent_dir, VALID_MANIFEST, &["not-search"]);
 
-        let out = tmp_dir.join("out.agent");
+        let out = tmp_dir.join("out.bot");
         let err = build_agent_package(&agent_dir, &out, None).expect_err("must refuse");
         assert!(err.to_string().contains("skills"));
         assert!(!out.exists(), "no archive may be written for a rejected package");
@@ -811,7 +811,7 @@ runtime_version = "0.1.0"
         let agent_dir = tmp_dir.join("agent");
         agent_dir_with(&agent_dir, VALID_MANIFEST, &["search"]);
 
-        let out = tmp_dir.join("out.agent");
+        let out = tmp_dir.join("out.bot");
         build_agent_package(&agent_dir, &out, None).expect("valid package builds");
         assert!(out.exists());
         let names = list_archive_entries(&out);
@@ -838,8 +838,8 @@ runtime_version = "0.1.0"
             &["search", "index", "archive", "beta"],
         );
 
-        let first = tmp_dir.join("first.agent");
-        let second = tmp_dir.join("second.agent");
+        let first = tmp_dir.join("first.bot");
+        let second = tmp_dir.join("second.bot");
         build_agent_package(&agent_dir, &first, None).unwrap();
         build_agent_package(&agent_dir, &second, None).unwrap();
 

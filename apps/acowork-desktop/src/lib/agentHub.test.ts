@@ -44,7 +44,7 @@ function agent(overrides: Partial<HubAgent> = {}): HubAgent {
     avatar: null,
     permissions: ["Read"],
     high_risk_permissions: [],
-    package: { file: "downloads/com.acowork.test.agent", size_bytes: 2048, sha256: "ab" },
+    package: { file: "downloads/com.acowork.test.bot", size_bytes: 2048, sha256: "ab" },
     signature: { status: "official-channel" },
     deprecated: null,
     ...overrides,
@@ -120,8 +120,8 @@ describe("high risk permissions", () => {
 
 describe("localChipsOf", () => {
   const row = (over: Partial<Parameters<typeof localChipsOf>[0]> = {}) => ({
-    file_name: "a.agent",
-    path: "C:/lib/a.agent",
+    file_name: "a.bot",
+    path: "C:/lib/a.bot",
     agent_id: "com.x.y",
     name: "X",
     version: "1.0.0",

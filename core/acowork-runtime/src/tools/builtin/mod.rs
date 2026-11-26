@@ -123,7 +123,7 @@ use crate::tools::workspace_resolver::SharedResolver;
 /// for thin pass-through facades (cf. `AgentCore::new_with_observer`): the
 /// arguments are independent assembly dependencies for the tool registry.
 ///
-/// ADR-094: `package_dir` is the agent's `.agent` package root —
+/// ADR-094: `package_dir` is the agent's `.bot` package root —
 /// required by the `load_skill` tool to read
 /// `<package_dir>/skills/<name>/SKILL.md`. Distinct from `agent_home`
 /// (which is the `work_dir` runtime state root).

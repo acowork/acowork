@@ -1,4 +1,4 @@
-//! acowork-pack CLI — the platform's own `.agent` packer.
+//! acowork-pack CLI — the platform's own `.bot` packer.
 //!
 //! This exists because the build scripts used to shell out to whatever zip
 //! tool the host had: `zip` on POSIX, `Compress-Archive` on Windows. Both
@@ -16,13 +16,13 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "acowork-pack")]
-#[command(about = "Build an unsigned .agent package from an agent directory")]
+#[command(about = "Build an unsigned .bot package from an agent directory")]
 struct Cli {
     /// Agent directory (must contain manifest.toml)
     #[arg(short, long)]
     agent_dir: PathBuf,
 
-    /// Output path for the unsigned .agent archive
+    /// Output path for the unsigned .bot archive
     #[arg(short, long)]
     output: PathBuf,
 

@@ -59,7 +59,7 @@ pub struct GatewayConfig {
     pub config_source_path: Option<String>,
     /// Vault directory for encrypted key storage
     pub vault_dir: String,
-    /// Packages directory for installed .agent packages
+    /// Packages directory for installed .bot packages
     pub packages_dir: String,
     /// Data directory for agent workspaces and the memory service
     pub data_dir: String,
@@ -1055,7 +1055,7 @@ impl GatewayConfig {
         Ok(base_dir.join("gateway.toml"))
     }
 
-    /// ADR-055 §3.2: the package registry — where uploaded `.agent`
+    /// ADR-055 §3.2: the package registry — where uploaded `.bot`
     /// source files are stored for distribution to nodes. The Node
     /// downloads them via `GET /api/packages/{agent_id}/download`.
     ///

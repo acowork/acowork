@@ -3,7 +3,7 @@
 //! The write-back (`save_publish_to_library`) is the only place where the
 //! Desktop touches an artifact the Node Agent produced. It does **not** change
 //! how the node writes: `build_package` keeps writing
-//! `{agent_id}-{version}.agent` into the node's own `packages_dir`
+//! `{agent_id}-{version}.bot` into the node's own `packages_dir`
 //! (`core/acowork-node/src/package/publish.rs`), the Gateway keeps sending an
 //! empty `output_dir` (`core/acowork-gateway/src/http/publish_api.rs`), and the
 //! Desktop merely copies that finished file into its own library directory
@@ -50,7 +50,7 @@ pub async fn prepare_publish(
         .map_err(|e| format!("Failed to prepare publish: {}", e))
 }
 
-/// Build a .agent package
+/// Build a .bot package
 #[tauri::command]
 pub async fn build_publish(
     state: State<'_, AppState>,
@@ -65,7 +65,7 @@ pub async fn build_publish(
         .map_err(|e| format!("Failed to build package: {}", e))
 }
 
-/// Export the built .agent file path
+/// Export the built .bot file path
 #[tauri::command]
 pub async fn export_package(
     state: State<'_, AppState>,
@@ -99,7 +99,7 @@ pub struct SaveToLibraryResult {
     /// Absolute path inside the library — `None` for `remote_skipped`
     /// (nothing was copied).
     pub path: Option<String>,
-    /// The artifact's file name (`{agent_id}-{version}.agent`); known in both
+    /// The artifact's file name (`{agent_id}-{version}.bot`); known in both
     /// outcomes because the node's output path carries it.
     pub file_name: String,
 }
@@ -126,7 +126,7 @@ fn file_name_of(path: &Path) -> String {
 /// 1. **Look the artifact up on this machine** (see [`plan_save`]): reachable →
 ///    it must pass the guard; unreachable → `remote_skipped` (B5) or, when the
 ///    Desktop believes the Gateway is local, a retryable error.
-/// 2. **Guard** the path: it must be a direct `.agent` file inside the node's
+/// 2. **Guard** the path: it must be a direct `.bot` file inside the node's
 ///    `packages_dir` — the frontend hands this value straight back from an IPC
 ///    response, so it must not become an arbitrary-file-copy primitive. A
 ///    reachable file that fails the guard is always an error, never a silent
@@ -256,7 +256,7 @@ pub(crate) fn plan_save(
     }
 }
 
-/// Guard on already-canonicalized paths: `path` must be an `.agent` file
+/// Guard on already-canonicalized paths: `path` must be an `.bot` file
 /// **directly inside** `root`.
 ///
 /// "Direct child" (rather than any descendant) mirrors what the node actually
@@ -275,7 +275,7 @@ pub(crate) fn check_artifact(path: &Path, root: &Path) -> Result<(), String> {
     }
     if !has_package_extension(path) {
         return Err(format!(
-            "Refusing to copy {}: not an .agent package",
+            "Refusing to copy {}: not an .bot package",
             path.display()
         ));
     }
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn a_built_package_in_the_node_dir_is_accepted() {
         let packages = Scratch::new("packages");
-        let built = packages.write("com.example.demo-1.0.0.agent");
+        let built = packages.write("com.example.demo-1.0.0.bot");
 
         match look_up_artifact(&built, packages.path()) {
             Lookup::Local(accepted) => {
@@ -382,14 +382,14 @@ mod tests {
         let packages = scratch.child("packages");
         std::fs::create_dir_all(&packages).unwrap();
         let elsewhere = Scratch::new("elsewhere");
-        let outside = elsewhere.write("com.example.demo-1.0.0.agent");
+        let outside = elsewhere.write("com.example.demo-1.0.0.bot");
 
         let err = rejection(&outside, &packages);
         assert!(err.contains("only files directly inside"), "{err}");
 
         // `..` traversal: canonicalization resolves it before the comparison,
         // so a path that is textually "inside" cannot pass.
-        let sibling = scratch.write("com.example.demo-1.0.0.agent");
+        let sibling = scratch.write("com.example.demo-1.0.0.bot");
         let sneaky = packages.join("..").join(
             sibling.file_name().expect("file name"),
         );
@@ -398,7 +398,7 @@ mod tests {
 
         // A nested file is not a build artifact (`output_dir.join(name)`).
         std::fs::create_dir_all(packages.join("nested")).unwrap();
-        let nested = packages.join("nested").join("com.example.demo-1.0.0.agent");
+        let nested = packages.join("nested").join("com.example.demo-1.0.0.bot");
         std::fs::write(&nested, b"PK\x03\x04").unwrap();
         let err = rejection(&nested, &packages);
         assert!(err.contains("only files directly inside"), "{err}");
@@ -414,13 +414,13 @@ mod tests {
         let other = packages.write("notes.txt");
 
         let err = rejection(&other, packages.path());
-        assert!(err.contains("not an .agent package"), "{err}");
+        assert!(err.contains("not an .bot package"), "{err}");
     }
 
     #[test]
     fn a_missing_artifact_reports_the_path_instead_of_panicking() {
         let packages = Scratch::new("missing");
-        let gone = packages.child("com.example.demo-1.0.0.agent");
+        let gone = packages.child("com.example.demo-1.0.0.bot");
 
         // Unreadable here is the *remote* signal, not a guard rejection: the
         // panel must be able to tell the two apart.
@@ -441,7 +441,7 @@ mod tests {
         for mode in [GatewayMode::Remote, GatewayMode::Relay] {
             let plan = plan_save(
                 mode,
-                "Z:\\acowork-does-not-exist\\packages\\com.example.demo-1.0.0.agent",
+                "Z:\\acowork-does-not-exist\\packages\\com.example.demo-1.0.0.bot",
                 unreachable_root,
             )
             .unwrap();
@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn remote_mode_with_a_reachable_artifact_still_copies() {
         let packages = Scratch::new("remote-but-local");
-        let built = packages.write("com.example.demo-1.0.0.agent");
+        let built = packages.write("com.example.demo-1.0.0.bot");
 
         for mode in [GatewayMode::Remote, GatewayMode::Relay] {
             let plan = plan_save(mode, &built.to_string_lossy(), packages.path()).unwrap();
@@ -473,7 +473,7 @@ mod tests {
     #[test]
     fn local_mode_with_an_unreadable_artifact_is_an_error() {
         let packages = Scratch::new("local-missing");
-        let gone = packages.child("com.example.demo-1.0.0.agent");
+        let gone = packages.child("com.example.demo-1.0.0.bot");
 
         let err = plan_save(GatewayMode::Local, &gone.to_string_lossy(), packages.path())
             .unwrap_err();
@@ -486,9 +486,9 @@ mod tests {
     #[test]
     fn plan_keeps_versions_side_by_side_and_overwrites_the_same_name() {
         let packages = Scratch::new("versions");
-        let v1 = packages.write("com.example.demo-1.0.0.agent");
-        let v1_again = packages.write("com.example.demo-1.0.0.agent");
-        let v2 = packages.write("com.example.demo-1.1.0.agent");
+        let v1 = packages.write("com.example.demo-1.0.0.bot");
+        let v1_again = packages.write("com.example.demo-1.0.0.bot");
+        let v2 = packages.write("com.example.demo-1.1.0.bot");
 
         let one = match plan_save(GatewayMode::Local, &v1.to_string_lossy(), packages.path())
             .unwrap()
@@ -517,7 +517,7 @@ mod tests {
         assert_ne!(one, two, "a new version is a new target");
         assert_eq!(
             one.file_name().map(|n| n.to_string_lossy().to_string()),
-            Some("com.example.demo-1.0.0.agent".to_string())
+            Some("com.example.demo-1.0.0.bot".to_string())
         );
     }
 
@@ -527,23 +527,23 @@ mod tests {
     fn result_reports_the_file_name_for_both_outcomes() {
         let saved = SaveToLibraryResult {
             status: SaveToLibraryStatus::Saved,
-            path: Some("/lib/com.example.demo-1.0.0.agent".to_string()),
-            file_name: "com.example.demo-1.0.0.agent".to_string(),
+            path: Some("/lib/com.example.demo-1.0.0.bot".to_string()),
+            file_name: "com.example.demo-1.0.0.bot".to_string(),
         };
-        assert_eq!(saved.file_name, "com.example.demo-1.0.0.agent");
+        assert_eq!(saved.file_name, "com.example.demo-1.0.0.bot");
 
         let skipped = SaveToLibraryResult::remote_skipped(
-            "/home/u/.acowork/acowork-node/packages/com.example.demo-1.0.0.agent",
+            "/home/u/.acowork/acowork-node/packages/com.example.demo-1.0.0.bot",
         );
         assert_eq!(skipped.status, SaveToLibraryStatus::RemoteSkipped);
         assert!(skipped.path.is_none());
-        assert_eq!(skipped.file_name, "com.example.demo-1.0.0.agent");
+        assert_eq!(skipped.file_name, "com.example.demo-1.0.0.bot");
 
         // Windows path form is what a remote node may report.
         let skipped = SaveToLibraryResult::remote_skipped(
-            "C:\\Users\\u\\.acowork\\acowork-node\\packages\\com.example.demo-1.0.0.agent",
+            "C:\\Users\\u\\.acowork\\acowork-node\\packages\\com.example.demo-1.0.0.bot",
         );
-        assert_eq!(skipped.file_name, "com.example.demo-1.0.0.agent");
+        assert_eq!(skipped.file_name, "com.example.demo-1.0.0.bot");
     }
 
     // ── B1–B4: the real pipeline on disk ──────────────────────────────────
@@ -554,7 +554,7 @@ mod tests {
     // node writes is what lands in the library, one version replaces itself,
     // and a second version sits beside it as its own row.
 
-    /// Write a real (minimal) `.agent` — ZIP + `manifest.toml`, the same wire
+    /// Write a real (minimal) `.bot` — ZIP + `manifest.toml`, the same wire
     /// shape `acowork-sign::packager` produces.
     fn write_package(path: &Path, version: &str) {
         use std::io::Write as _;
@@ -606,45 +606,45 @@ runtime_version = "0.1.0"
         let library = Scratch::new("flow-library");
 
         // B1: the name is what `build_package` produced.
-        write_package(&packages.child("com.example.demo-1.0.0.agent"), "1.0.0");
-        let saved = save_once(packages.path(), library.path(), "com.example.demo-1.0.0.agent");
+        write_package(&packages.child("com.example.demo-1.0.0.bot"), "1.0.0");
+        let saved = save_once(packages.path(), library.path(), "com.example.demo-1.0.0.bot");
         assert_eq!(
             saved.file_name().unwrap().to_string_lossy(),
-            "com.example.demo-1.0.0.agent"
+            "com.example.demo-1.0.0.bot"
         );
-        assert_eq!(saved, library.child("com.example.demo-1.0.0.agent"));
+        assert_eq!(saved, library.child("com.example.demo-1.0.0.bot"));
         assert_eq!(
             library_file_names(library.path()),
-            vec!["com.example.demo-1.0.0.agent".to_string()]
+            vec!["com.example.demo-1.0.0.bot".to_string()]
         );
         let first_len = std::fs::metadata(&saved).unwrap().len();
 
         // B2: a rebuilt (larger) package of the SAME version replaces it — the
         // library must not grow a second file for the same version.
         use std::io::Write as _;
-        let source = packages.child("com.example.demo-1.0.0.agent");
+        let source = packages.child("com.example.demo-1.0.0.bot");
         let mut file = std::fs::OpenOptions::new().append(true).open(&source).unwrap();
         file.write_all(b"\x00\x00\x00\x00").unwrap();
         drop(file);
         let rebuilt_len = std::fs::metadata(&source).unwrap().len();
         assert!(rebuilt_len > first_len);
-        let saved_again = save_once(packages.path(), library.path(), "com.example.demo-1.0.0.agent");
+        let saved_again = save_once(packages.path(), library.path(), "com.example.demo-1.0.0.bot");
         assert_eq!(saved_again, saved);
         assert_eq!(
             library_file_names(library.path()),
-            vec!["com.example.demo-1.0.0.agent".to_string()],
+            vec!["com.example.demo-1.0.0.bot".to_string()],
             "republishing one version must not add a file"
         );
         assert_eq!(std::fs::metadata(&saved_again).unwrap().len(), rebuilt_len);
 
         // B3: a new version is a new file and a new row.
-        write_package(&packages.child("com.example.demo-1.1.0.agent"), "1.1.0");
-        save_once(packages.path(), library.path(), "com.example.demo-1.1.0.agent");
+        write_package(&packages.child("com.example.demo-1.1.0.bot"), "1.1.0");
+        save_once(packages.path(), library.path(), "com.example.demo-1.1.0.bot");
         assert_eq!(
             library_file_names(library.path()),
             vec![
-                "com.example.demo-1.0.0.agent".to_string(),
-                "com.example.demo-1.1.0.agent".to_string(),
+                "com.example.demo-1.0.0.bot".to_string(),
+                "com.example.demo-1.1.0.bot".to_string(),
             ]
         );
 

@@ -5,7 +5,7 @@
  *   - REQ-021 / D9: opens on the LOCAL tab (the machine's file library) and
  *     renders it from a single local command; the Hub catalog is warmed in the
  *     background and never awaited (REQ-022).
- *   - REQ-023..030: one row per `.agent` file, fields from the manifest, a
+ *   - REQ-023..030: one row per `.bot` file, fields from the manifest, a
  *     broken file only breaks its own row, two versions stay two rows.
  *   - REQ-025 / A5: the trailing "+ add agent file" row keeps the v0.1
  *     pick-and-install path and does NOT copy the file into the library.
@@ -23,7 +23,7 @@
  *   - REQ-009: remote mode with nothing online cannot install, and says why.
  *   - REQ-012: a failed catalog read shows a retry, and the Local tab still
  *     works (the Hub being down must not lock the user out of installing).
- *   - REQ-011: a dropped file that is not `.agent` is refused client-side.
+ *   - REQ-011: a dropped file that is not `.bot` is refused client-side.
  *   - REQ-020: the window-level drop channel is handed back when the dialog
  *     goes away, otherwise the chat would stop receiving attachments.
  */
@@ -103,7 +103,7 @@ const SAFE_AGENT = {
   avatar: null,
   permissions: ["Read"],
   high_risk_permissions: [],
-  package: { file: "downloads/com.acowork.safe.agent", size_bytes: 2048, sha256: "aa" },
+  package: { file: "downloads/com.acowork.safe.bot", size_bytes: 2048, sha256: "aa" },
   signature: { status: "official-channel" },
   deprecated: null,
 };
@@ -128,8 +128,8 @@ const ONLINE_NODE = {
 const LOCAL_AVATAR = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
 
 const LOCAL_ROW = {
-  file_name: "com.acowork.demo-1.0.0.agent",
-  path: "C:\lib\com.acowork.demo-1.0.0.agent",
+  file_name: "com.acowork.demo-1.0.0.bot",
+  path: "C:\lib\com.acowork.demo-1.0.0.bot",
   agent_id: "com.acowork.demo",
   name: "Demo",
   version: "1.0.0",
@@ -144,11 +144,11 @@ const LOCAL_ROW = {
   error: null,
 };
 
-const LOCAL_ROW_V2 = { ...LOCAL_ROW, file_name: "com.acowork.demo-1.1.0.agent", path: "C:\lib\com.acowork.demo-1.1.0.agent", version: "1.1.0" };
+const LOCAL_ROW_V2 = { ...LOCAL_ROW, file_name: "com.acowork.demo-1.1.0.bot", path: "C:\lib\com.acowork.demo-1.1.0.bot", version: "1.1.0" };
 
 const LOCAL_ROW_BROKEN = {
-  file_name: "broken.agent",
-  path: "C:\lib\broken.agent",
+  file_name: "broken.bot",
+  path: "C:\lib\broken.bot",
   agent_id: null,
   name: null,
   version: null,
@@ -160,7 +160,7 @@ const LOCAL_ROW_BROKEN = {
   skills: [],
   avatar: null,
   permissions: [],
-  error: "Not a valid .agent package (ZIP): invalid Zip archive",
+  error: "Not a valid .bot package (ZIP): invalid Zip archive",
 };
 
 function mockCatalog(agents: unknown[]) {
@@ -172,7 +172,7 @@ function mockCatalog(agents: unknown[]) {
       return { agent_id: args?.agentId, instance_id: "inst-1", already_present: false };
     }
     if (command === "inspect_local_package") {
-      return { file_name: "picked.agent", size_bytes: 4096, agent_id: "com.acowork.local" };
+      return { file_name: "picked.bot", size_bytes: 4096, agent_id: "com.acowork.local" };
     }
     if (command === "list_local_agent_packages") return { rows: [], warning: null };
     if (command === "ensure_local_agent") {
@@ -767,7 +767,7 @@ describe("catalog failure (REQ-012)", () => {
       if (command === "fetch_hub_index") throw new Error("offline");
       if (command === "list_local_agent_packages") return { rows: [LOCAL_ROW], warning: null };
       if (command === "inspect_local_package") {
-        return { file_name: "picked.agent", size_bytes: 4096, agent_id: "com.acowork.local" };
+        return { file_name: "picked.bot", size_bytes: 4096, agent_id: "com.acowork.local" };
       }
       throw new Error(`unexpected command: ${command}`);
     });
@@ -777,9 +777,9 @@ describe("catalog failure (REQ-012)", () => {
 
     fireEvent.click(screen.getByText("agentHub.localAddFile"));
     await waitFor(() => expect(h.open).toHaveBeenCalled());
-    h.open.mockResolvedValue("C:\pkgs\picked.agent");
+    h.open.mockResolvedValue("C:\pkgs\picked.bot");
     fireEvent.click(screen.getByText("agentHub.localAddFile"));
-    await waitFor(() => expect(screen.getByText("picked.agent")).toBeDefined());
+    await waitFor(() => expect(screen.getByText("picked.bot")).toBeDefined());
     // The pending card is the last install button in the body; the row above it
     // belongs to the library file.
     const installs = screen.getAllByRole("button", { name: "agentHub.install" });
@@ -793,7 +793,7 @@ describe("local agent library (REQ-021..032)", () => {
       if (command === "fetch_hub_index") throw new Error("offline");
       if (command === "list_local_agent_packages") return { rows, warning };
       if (command === "inspect_local_package") {
-        return { file_name: "picked.agent", size_bytes: 4096, agent_id: "com.acowork.local" };
+        return { file_name: "picked.bot", size_bytes: 4096, agent_id: "com.acowork.local" };
       }
       if (command === "ensure_local_agent") {
         return { agent_id: "com.acowork.demo", instance_id: "inst-ensured", already_present: false };
@@ -822,7 +822,7 @@ describe("local agent library (REQ-021..032)", () => {
     expect(await screen.findByText("Demo")).toBeDefined();
     expect(screen.getByText("v1.0.0")).toBeDefined();
     expect(screen.getByText("com.acowork.demo")).toBeDefined();
-    expect(screen.getByText("com.acowork.demo-1.0.0.agent")).toBeDefined();
+    expect(screen.getByText("com.acowork.demo-1.0.0.bot")).toBeDefined();
     expect(screen.getByText("4.0 KB")).toBeDefined();
     expect(screen.getByText("agentHub.localPermissionCount")).toBeDefined();
   });
@@ -923,18 +923,18 @@ describe("local agent library (REQ-021..032)", () => {
       if (command === "fetch_hub_index") throw new Error("offline");
       if (command === "list_local_agent_packages") return { rows: [], warning: null };
       if (command === "inspect_local_package") {
-        return { file_name: "picked.agent", size_bytes: 4096, agent_id: "com.acowork.local" };
+        return { file_name: "picked.bot", size_bytes: 4096, agent_id: "com.acowork.local" };
       }
       throw new Error(`unexpected command: ${command}`);
     });
     renderOpen();
 
     await screen.findByText("agentHub.localEmpty");
-    h.open.mockResolvedValue("C:\pkgs\picked.agent");
+    h.open.mockResolvedValue("C:\pkgs\picked.bot");
     fireEvent.click(await screen.findByRole("button", { name: /agentHub.localAddFile/ }));
 
-    expect(await screen.findByText("picked.agent")).toBeDefined();
-    const pendingCard = screen.getByText("picked.agent").closest("div.grid");
+    expect(await screen.findByText("picked.bot")).toBeDefined();
+    const pendingCard = screen.getByText("picked.bot").closest("div.grid");
     expect(pendingCard?.className).toContain("lg:grid-cols-2");
   });
 
@@ -991,8 +991,8 @@ describe("local agent library (REQ-021..032)", () => {
     mockLibrary([LOCAL_ROW_BROKEN]);
     renderOpen();
 
-    expect(await screen.findByLabelText("broken.agent")).toBeDefined();
-    expect(screen.getByLabelText("broken.agent").textContent).toBe("B");
+    expect(await screen.findByLabelText("broken.bot")).toBeDefined();
+    expect(screen.getByLabelText("broken.bot").textContent).toBe("B");
   });
 
   // A6: the row button is disabled while its own install is in flight, so a
@@ -1075,7 +1075,7 @@ describe("local agent library (REQ-021..032)", () => {
     expect(installs.filter((b) => !b.hasAttribute("disabled"))).toHaveLength(1);
     // The broken row has no identity to show, but it is listed: the user put
     // that file there and has to be able to see it.
-    expect(screen.getByText("broken.agent")).toBeDefined();
+    expect(screen.getByText("broken.bot")).toBeDefined();
   });
 
   // REQ-028 / A4: an empty library explains itself and still offers the entry.
@@ -1115,20 +1115,47 @@ describe("local file tab (REQ-011 / REQ-020)", () => {
     return closed;
   }
 
-  it("refuses a dropped file that is not an .agent package", async () => {
+  it("refuses a dropped file that is not an .bot package", async () => {
     await openLocalTab();
     h.dropHandler!({ payload: ["C:\\notes\\todo.txt"] });
     expect(await screen.findByText("agentHub.notAgentFile")).toBeDefined();
     expect(h.invoke).not.toHaveBeenCalledWith("inspect_local_package", expect.anything());
   });
 
-  it("accepts a dropped .agent and installs it through the local path", async () => {
+  // D6: `.agent` is no longer a package. The client-side check is the first
+  // gate a dropped file meets, so it has to name the extension the app now
+  // ships — a `.bot` that lands here and a `.agent` that does not.
+  it("refuses a dropped .agent now that packages are .bot", async () => {
     await openLocalTab();
-    h.dropHandler!({ payload: ["C:\\pkgs\\picked.agent"] });
+    h.dropHandler!({ payload: ["C:\\pkgs\\legacy.agent"] });
+    expect(await screen.findByText("agentHub.notAgentFile")).toBeDefined();
+    expect(h.invoke).not.toHaveBeenCalledWith("inspect_local_package", expect.anything());
+  });
 
-    expect(await screen.findByText("picked.agent")).toBeDefined();
+  it("accepts a dropped .bot and installs it through the local path", async () => {
+    await openLocalTab();
+    h.dropHandler!({ payload: ["C:\\pkgs\\picked.bot"] });
+
+    expect(await screen.findByText("picked.bot")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "agentHub.install" }));
     await waitFor(() => expect(h.agent.installAgent).toHaveBeenCalled());
+  });
+
+  // The picker's `filters` is what decides whether a `.bot` file is even
+  // selectable in the OS dialog. Nothing else in the code path can compensate
+  // for a wrong value here, and the failure is invisible to every Rust test.
+  it("asks the file picker for .bot packages", async () => {
+    await openLocalTab();
+    h.open.mockResolvedValue(null);
+    fireEvent.click(screen.getByText("agentHub.localAddFile"));
+
+    await waitFor(() => expect(h.open).toHaveBeenCalled());
+    expect(h.open).toHaveBeenCalledWith(
+      expect.objectContaining({
+        multiple: false,
+        filters: [{ name: "agentList.filterAgentPackage", extensions: ["bot"] }],
+      }),
+    );
   });
 
   // The picked-file card is a one-shot: it names a file that, once installed,
@@ -1137,12 +1164,12 @@ describe("local file tab (REQ-011 / REQ-020)", () => {
   // that now stays open after a success.
   it("clears the pending picked file after its install succeeds", async () => {
     const closed = await openLocalTab();
-    h.dropHandler!({ payload: ["C:\\pkgs\\picked.agent"] });
+    h.dropHandler!({ payload: ["C:\\pkgs\\picked.bot"] });
 
     fireEvent.click(await screen.findByRole("button", { name: "agentHub.install" }));
     await waitFor(() => expect(h.agent.installAgent).toHaveBeenCalled());
 
-    await waitFor(() => expect(screen.queryByText("picked.agent")).toBeNull());
+    await waitFor(() => expect(screen.queryByText("picked.bot")).toBeNull());
     expect(closed).not.toContain("closed");
   });
 
@@ -1150,7 +1177,7 @@ describe("local file tab (REQ-011 / REQ-020)", () => {
   // package id instead would highlight an older instance of the same package.
   it("selects the instance the install acked, not the package id", async () => {
     await openLocalTab();
-    h.dropHandler!({ payload: ["C:\\pkgs\\picked.agent"] });
+    h.dropHandler!({ payload: ["C:\\pkgs\\picked.bot"] });
 
     fireEvent.click(await screen.findByRole("button", { name: "agentHub.install" }));
     await waitFor(() => expect(h.agent.selectAgent).toHaveBeenCalledWith("inst-local"));

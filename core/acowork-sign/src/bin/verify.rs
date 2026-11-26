@@ -6,9 +6,9 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "acowork-verify")]
-#[command(about = "Verify .agent package signatures")]
+#[command(about = "Verify .bot package signatures")]
 struct Cli {
-    /// .agent package path to verify
+    /// .bot package path to verify
     package: PathBuf,
 }
 

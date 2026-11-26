@@ -804,7 +804,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
     try {
       const selected = await open({
         multiple: false,
-        filters: [{ name: "Agent Package", extensions: ["agent"] }],
+        filters: [{ name: "Bot Package", extensions: ["bot"] }],
       });
       if (selected) {
         setInstallError(null);

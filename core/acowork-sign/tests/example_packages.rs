@@ -1,6 +1,6 @@
-//! Shipped `.agent` packages must match the source they were built from.
+//! Shipped `.bot` packages must match the source they were built from.
 //!
-//! `agents/agent-packages/*.agent` is a build artifact (ADR-104), and the
+//! `agents/agent-packages/*.bot` is a build artifact (ADR-104), and the
 //! repository has already paid for that twice: once when the packages still
 //! said "No shell tools" after the manifests stopped saying it, and once when
 //! the two benchmark agents were rewritten while users kept installing the
@@ -16,7 +16,7 @@
 //!
 //! The fix is always the same:
 //! `dev/common/build-agent.sh agents/<agent-dir>` (or `.ps1` on Windows),
-//! then commit the rebuilt `.agent`.
+//! then commit the rebuilt `.bot`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,12 @@ fn agents_dir() -> PathBuf {
 /// may be re-encoded by tooling without changing any behaviour, and a
 /// mismatch there would produce a failure nobody acts on.
 const COMPARED_DIRS: &[&str] = &["prompts", "skills"];
+
+/// How many agents ship a package today. Pinned on purpose: "not every source
+/// agent ships one" must not degenerate into "this test compared nothing".
+/// Adding a ninth shipping agent is a one-line edit here — the point is that
+/// silently losing a package cannot pass.
+const EXPECTED_SHIPPED_PACKAGES: usize = 8;
 
 /// `agent_id` from a manifest, read the same way the build script reads it.
 fn agent_id(manifest: &str) -> Option<String> {
@@ -74,6 +80,7 @@ fn shipped_packages_match_their_source_tree() {
     let packages = root.join("agent-packages");
 
     let mut checked = 0usize;
+    let mut compared: Vec<String> = Vec::new();
     let mut entries: Vec<_> = std::fs::read_dir(&root)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", root.display()))
         .filter_map(|e| e.ok())
@@ -90,13 +97,14 @@ fn shipped_packages_match_their_source_tree() {
                 agent_dir.display()
             );
         };
-        let package = packages.join(format!("{id}.agent"));
+        let package = packages.join(format!("{id}.bot"));
         if !package.is_file() {
             // Not every source agent ships a package (internal examples do
             // not); only the ones that do are held to this contract.
             continue;
         }
         checked += 1;
+        compared.push(package.file_name().unwrap().to_string_lossy().into_owned());
 
         let file = std::fs::File::open(&package)
             .unwrap_or_else(|e| panic!("cannot open {}: {e}", package.display()));
@@ -136,7 +144,7 @@ fn shipped_packages_match_their_source_tree() {
             "{}: packaged manifest.toml differs from the source — rebuild it with \
              `dev/common/build-agent.ps1 -AgentDir agents/{rel}` on Windows, or \
              `dev/common/build-agent.sh agents/{rel}` elsewhere (needs `zip`), \
-             then commit the regenerated .agent",
+             then commit the regenerated .bot",
             package.display(),
         );
 
@@ -182,8 +190,27 @@ fn shipped_packages_match_their_source_tree() {
         );
     }
 
+    // Proof that the loop really walked the shipped corpus: the count and the
+    // names are in the output (`-- --nocapture`), not just a silent assertion.
+    println!("compared {checked} shipped packages: {compared:?}");
+
+    // A leftover `.agent` beside the `.bot` files is the signature of a
+    // half-finished rename: the app would ship both and the stale one stays
+    // invisible until someone downloads it.
+    let stale: Vec<String> = std::fs::read_dir(&packages)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", packages.display()))
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.to_ascii_lowercase().ends_with(".agent"))
+        .collect();
     assert!(
-        checked > 0,
-        "no example package was compared — the corpus moved, fix this test"
+        stale.is_empty(),
+        "{} still carries {stale:?} — rebuild with dev/common/build-agent.sh, then delete the stale files",
+        packages.display()
+    );
+
+    assert!(
+        checked >= EXPECTED_SHIPPED_PACKAGES,
+        "compared only {checked} packages, expected at least {EXPECTED_SHIPPED_PACKAGES}: an agent that ships a package stopped being compared",
     );
 }

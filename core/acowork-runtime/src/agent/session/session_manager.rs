@@ -173,7 +173,7 @@ pub struct SessionManagerConfig {
     /// serial inference queue.
     pub session_configs: Option<crate::usecases::SharedSessionConfigs>,
 
-    /// ADR-063: the agent's `.agent` package directory (where
+    /// ADR-063: the agent's `.bot` package directory (where
     /// `prompts/<file>.md` lives). Populated by
     /// `build_session_manager_config` from `AgentBootContext.loaded.package_dir`;
     /// `enable_debug_mode` passes it to `RuntimeDebugService::new_with_agent`
@@ -500,7 +500,7 @@ pub struct SessionManager {
     latest_session: SharedLatestSession,
     /// ADR-047: Shared session config map for `SessionConfigService`.
     session_configs: crate::usecases::SharedSessionConfigs,
-    /// ADR-063: the agent's `.agent` package directory. See
+    /// ADR-063: the agent's `.bot` package directory. See
     /// `SessionManagerConfig::package_dir` for the rationale; copied out
     /// at construction so `enable_debug_mode` can hand it to
     /// `RuntimeDebugService::new_with_agent` without holding onto the
