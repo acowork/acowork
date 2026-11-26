@@ -23,7 +23,21 @@ use crate::types::{generate_doc_id, DocMeta, LibraryIndex, ROOT_DIR_ID};
 
 /// Walk `root` and return relative paths of every regular `.md` file,
 /// skipping hidden directories (`.trash`, `.requests`, …).
+///
+/// Imported files (pdf / docx / images) are deliberately excluded: they have
+/// no Markdown body, and `reconcile_on_startup` matches them by full file
+/// name via [`scan_all_files`].
 pub async fn scan_all_docs(root: &Path) -> Result<Vec<String>> {
+    Ok(scan_all_files(root)
+        .await?
+        .into_iter()
+        .filter(|rel| rel.ends_with(".md"))
+        .collect())
+}
+
+/// Walk `root` and return relative paths of **every** regular file outside
+/// hidden directories — Markdown documents and imported files alike.
+pub async fn scan_all_files(root: &Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -40,7 +54,7 @@ pub async fn scan_all_docs(root: &Path) -> Result<Vec<String>> {
                 stack.push(entry.path());
                 continue;
             }
-            if ft.is_file() && name_lossy.ends_with(".md") {
+            if ft.is_file() {
                 let rel = entry
                     .path()
                     .strip_prefix(root)
@@ -74,9 +88,15 @@ pub struct ReconcileReport {
 /// - Both present but `files[].name != disk filename (sans .md)` → rewrite `name`.
 pub async fn reconcile_on_startup(store: &LibraryStore) -> Result<ReconcileReport> {
     let mut report = ReconcileReport::default();
-    let on_disk = scan_all_docs(store.root()).await?;
-    // index by (dir_id, filename-without-.md)
+    let on_disk = scan_all_files(store.root()).await?;
+    // index by (dir_id, filename-without-.md) — Markdown documents only.
     let mut disk_index: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
+    // Imported files are keyed by their FULL file name (they keep their own
+    // extension), and only importable ones participate.
+    let mut disk_files: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    let mut disk_importables: std::collections::HashMap<(String, String), (String, String)> =
         std::collections::HashMap::new();
     for rel in &on_disk {
         let (dir_part, file_part) = split_relative(rel);
@@ -84,8 +104,20 @@ pub async fn reconcile_on_startup(store: &LibraryStore) -> Result<ReconcileRepor
             Some(p) => p.to_string(),
             None => ROOT_DIR_ID.to_string(),
         };
-        let stem = file_part.trim_end_matches(".md").to_string();
-        disk_index.insert((dir_id, stem), rel.clone());
+        if let Some(stem) = file_part.strip_suffix(".md") {
+            disk_index.insert((dir_id.clone(), stem.to_string()), rel.clone());
+            continue;
+        }
+        disk_files.insert((dir_id.clone(), file_part.to_string()));
+        let Some((stem, ext)) = file_part.rsplit_once('.') else {
+            continue;
+        };
+        if crate::types::import_kind(ext).is_some() {
+            disk_importables.insert(
+                (dir_id, stem.to_string()),
+                (file_part.to_string(), ext.to_ascii_lowercase()),
+            );
+        }
     }
 
     let all = store.list_all_indexes().await?;
@@ -121,6 +153,9 @@ pub async fn reconcile_on_startup(store: &LibraryStore) -> Result<ReconcileRepor
                 if renamed_one || f.deleted {
                     continue;
                 }
+                if f.is_file() {
+                    continue;
+                }
                 let key = (dir_id.clone(), f.name.clone());
                 if !disk_index.contains_key(&key) {
                     report.renamed.push(f.doc_id.clone());
@@ -137,8 +172,12 @@ pub async fn reconcile_on_startup(store: &LibraryStore) -> Result<ReconcileRepor
             if f.deleted {
                 continue;
             }
-            let key = (dir_id.clone(), f.name.clone());
-            if !disk_index.contains_key(&key) {
+            let alive = if f.is_file() {
+                disk_files.contains(&(dir_id.clone(), f.file_name()))
+            } else {
+                disk_index.contains_key(&(dir_id.clone(), f.name.clone()))
+            };
+            if !alive {
                 report.orphaned.push(f.doc_id.clone());
                 f.deleted = true;
                 f.updated_at = chrono::Utc::now();
@@ -151,6 +190,23 @@ pub async fn reconcile_on_startup(store: &LibraryStore) -> Result<ReconcileRepor
         for stem in unmatched_after {
             let now = chrono::Utc::now();
             let new_meta = DocMeta::new(generate_doc_id(), stem.clone(), None, now);
+            report.added.push(new_meta.doc_id.clone());
+            idx.files.push(new_meta);
+            changed = true;
+        }
+        // Imported files dropped into the library folder by hand get an
+        // entry too — a file the tree cannot show is a file the user thinks
+        // is lost.
+        for ((d, stem), (_, ext)) in disk_importables.iter() {
+            if *d != dir_id {
+                continue;
+            }
+            if idx.files.iter().any(|g| !g.deleted && &g.name == stem) {
+                continue;
+            }
+            let now = chrono::Utc::now();
+            let mut new_meta = DocMeta::new(generate_doc_id(), stem.clone(), None, now);
+            new_meta.ext = Some(ext.clone());
             report.added.push(new_meta.doc_id.clone());
             idx.files.push(new_meta);
             changed = true;
@@ -293,5 +349,45 @@ mod tests {
         store.save(&idx).await.unwrap();
         let report = reconcile_on_startup(&store).await.unwrap();
         assert_eq!(report, ReconcileReport::default());
+    }
+
+    // ── imported files ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn reconcile_keeps_live_imported_files_and_orphans_missing_ones() {
+        let (_tmp, store) = new_store();
+        store.ensure_root().await.unwrap();
+        fs::write(store.root().join("spec.pdf"), b"%PDF").await.unwrap();
+        let mut pdf = DocMeta::new("doc-aaaaaaaaaaaa".into(), "spec".into(), None, chrono::Utc::now());
+        pdf.ext = Some("pdf".into());
+        let mut gone = DocMeta::new("doc-bbbbbbbbbbbb".into(), "gone".into(), None, chrono::Utc::now());
+        gone.ext = Some("xlsx".into());
+        let mut idx = LibraryIndex::root();
+        idx.files.push(pdf);
+        idx.files.push(gone);
+        store.save(&idx).await.unwrap();
+
+        let report = reconcile_on_startup(&store).await.unwrap();
+        assert_eq!(report.added.len(), 0, "the pdf is already indexed: {report:?}");
+        assert_eq!(report.orphaned, vec!["doc-bbbbbbbbbbbb".to_string()]);
+        let after = store.load(ROOT_DIR_ID).await.unwrap();
+        let live = after.files.iter().find(|f| f.name == "spec").unwrap();
+        assert!(!live.deleted);
+        assert_eq!(live.ext.as_deref(), Some("pdf"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_synthesises_entries_for_stray_importable_files() {
+        let (_tmp, store) = new_store();
+        store.ensure_root().await.unwrap();
+        fs::write(store.root().join("dropped.png"), b"img").await.unwrap();
+        // Not an accepted type: stays out of the tree (no phantom entries).
+        fs::write(store.root().join("notes.bak"), b"x").await.unwrap();
+        let report = reconcile_on_startup(&store).await.unwrap();
+        assert_eq!(report.added.len(), 1);
+        let idx = store.load(ROOT_DIR_ID).await.unwrap();
+        assert_eq!(idx.files.len(), 1);
+        assert_eq!(idx.files[0].name, "dropped");
+        assert_eq!(idx.files[0].ext.as_deref(), Some("png"));
     }
 }

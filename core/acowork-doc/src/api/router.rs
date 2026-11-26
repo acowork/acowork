@@ -53,12 +53,23 @@ pub fn doc_router(state: DocState) -> Router {
         // ── docs ────────────────────────────────────────────────────
         .route("/docs", post(c::create_doc))
         .route("/docs", get(c::list_docs))
+        // Upload route: its body IS the file, so it carries its own (larger)
+        // wire ceiling instead of the document-content one. The route-level
+        // layer sits inside the router-wide `DefaultBodyLimit` and therefore
+        // wins for this method only.
+        .route(
+            "/docs/import",
+            post(c::import_doc).layer(axum::extract::DefaultBodyLimit::max(
+                crate::limit::UPLOAD_CEILING,
+            )),
+        )
         .route("/docs/{doc_id}", get(c::read_doc))
         .route("/docs/{doc_id}", put(c::update_doc))
         .route("/docs/{doc_id}", delete(c::delete_doc))
         .route("/docs/{doc_id}/title", patch(c::rename_doc))
         .route("/docs/{doc_id}/move", post(c::move_doc))
         .route("/docs/{doc_id}/path", get(c::doc_path))
+        .route("/docs/{doc_id}/file", get(c::doc_file))
         .route("/docs/{doc_id}/requests", get(r::list_doc_requests))
         // ── dirs ────────────────────────────────────────────────────
         .route("/dirs", post(d::create_dir))

@@ -10,11 +10,14 @@ use tokio::fs;
 use crate::error::{DocError, Result};
 use crate::path::{validate_doc_id, validate_doc_name, validate_dir_id};
 use crate::service::document::{
-    AppendDocumentInput, CreateDocumentInput, DocStat, DocumentService, UpdateDocumentInput,
+    AppendDocumentInput, CreateDocumentInput, CreateFileInput, DocStat, DocumentService,
+    UpdateDocumentInput,
 };
 use crate::store::library::LibraryStore;
 use crate::store::trash::TrashStore;
-use crate::types::{generate_doc_id, generate_trash_id, Ace, DocMeta, DocRead, LibraryIndex, TrashEntry};
+use crate::types::{
+    self, generate_doc_id, generate_trash_id, Ace, DocMeta, DocRead, LibraryIndex, TrashEntry,
+};
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
@@ -44,10 +47,16 @@ impl LibraryDocumentService {
 
     /// Write a `.md` file with the given content (UTF-8).
     async fn write_content(&self, path: &Path, content: &str) -> Result<()> {
+        self.write_bytes(path, content.as_bytes()).await
+    }
+
+    /// Write raw bytes (imported files, and rollback copies of a displaced
+    /// file body).
+    async fn write_bytes(&self, path: &Path, bytes: &[u8]) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
         }
-        fs::write(path, content.as_bytes()).await?;
+        fs::write(path, bytes).await?;
         Ok(())
     }
 
@@ -62,7 +71,7 @@ impl LibraryDocumentService {
             .cloned()
             .ok_or_else(|| DocError::DocNotFound(doc_id.to_string()))?;
         let dir_path = self.store.dir_path(&parent_dir_id)?;
-        let file_path = dir_path.join(format!("{}.md", entry.name));
+        let file_path = dir_path.join(entry.file_name());
         Ok((parent_dir_id, file_path, entry, idx))
     }
 
@@ -72,7 +81,7 @@ impl LibraryDocumentService {
         &self,
         target_idx: &LibraryIndex,
         target_before: Vec<DocMeta>,
-        displaced: &Option<(String, String)>,
+        displaced: &Option<(String, Vec<u8>)>,
     ) {
         let mut restored = target_idx.clone();
         restored.files = target_before;
@@ -87,15 +96,22 @@ impl LibraryDocumentService {
 impl DocumentService for LibraryDocumentService {
     async fn read(&self, doc_id: &str) -> Result<DocRead> {
         let (parent_dir_id, file_path, entry, _idx) = self.locate(doc_id).await?;
-        let content = fs::read_to_string(&file_path)
-            .await
-            .map_err(DocError::Io)?;
+        // An imported file has no Markdown body — its bytes are served by
+        // `GET /docs/{id}/file` (the editor renders a preview instead of a
+        // text buffer). Reading them as UTF-8 would just fail.
+        let content = if entry.is_file() {
+            String::new()
+        } else {
+            fs::read_to_string(&file_path)
+                .await
+                .map_err(DocError::Io)?
+        };
         // Path keyed by `dir_id` (see `DocStat::path`): the on-disk relative
         // path, which the MCP layer translates into the human path.
         let path = if parent_dir_id == crate::types::ROOT_DIR_ID {
-            format!("{}.md", entry.name)
+            entry.file_name()
         } else {
-            format!("{}/{}.md", parent_dir_id, entry.name)
+            format!("{}/{}", parent_dir_id, entry.file_name())
         };
         Ok(DocRead {
             meta: entry,
@@ -124,9 +140,9 @@ impl DocumentService for LibraryDocumentService {
             })?
             .len();
         let path = if parent_dir_id == crate::types::ROOT_DIR_ID {
-            format!("{}.md", entry.name)
+            entry.file_name()
         } else {
-            format!("{}/{}.md", parent_dir_id, entry.name)
+            format!("{}/{}", parent_dir_id, entry.file_name())
         };
         Ok(DocStat {
             meta: entry,
@@ -161,8 +177,52 @@ impl DocumentService for LibraryDocumentService {
         Ok(meta)
     }
 
+    async fn create_file(&self, input: CreateFileInput) -> Result<DocMeta> {
+        validate_dir_id(&input.parent_dir_id)?;
+        validate_doc_name(&input.name)?;
+        if types::import_kind(&input.ext).is_none() {
+            return Err(DocError::BadRequest(format!(
+                "unsupported file type: .{}",
+                input.ext
+            )));
+        }
+        let mut idx = self.store.load(&input.parent_dir_id).await?;
+        // Same uniqueness rule as a document: one entry per stem in a
+        // directory (two files can never share the `{name}` the tree, the
+        // rename UI and the trash slot all key off).
+        if idx.files.iter().any(|f| !f.deleted && f.name == input.name) {
+            return Err(DocError::NameConflict(input.name));
+        }
+        let now = self.now();
+        let mut meta = DocMeta::new(generate_doc_id(), input.name.clone(), None, now);
+        meta.ext = Some(input.ext.to_ascii_lowercase());
+        meta.creator = input.creator.clone();
+        let file_path = self
+            .store
+            .dir_path(&input.parent_dir_id)?
+            .join(meta.file_name());
+        // Bytes first, index second: an index entry pointing at a missing
+        // file is the one state `stat` reports as corruption.
+        self.write_bytes(&file_path, &input.bytes).await?;
+        idx.files.push(meta.clone());
+        self.store.save(&idx).await?;
+        crate::mqtt_publisher::notify_tree_changed(vec![input.parent_dir_id]);
+        Ok(meta)
+    }
+
+    async fn absolute_path(&self, doc_id: &str) -> Result<PathBuf> {
+        let (_parent_dir_id, file_path, _entry, _idx) = self.locate(doc_id).await?;
+        Ok(file_path)
+    }
+
     async fn update(&self, doc_id: &str, input: UpdateDocumentInput) -> Result<DocMeta> {
         let (parent_dir_id, file_path, mut entry, mut idx) = self.locate(doc_id).await?;
+        if entry.is_file() {
+            return Err(DocError::BadRequest(format!(
+                "{} is an imported file, not an editable document",
+                entry.file_name()
+            )));
+        }
         let prev_name = entry.name.clone();
         if entry.version != input.base_version {
             return Err(DocError::VersionConflict {
@@ -209,6 +269,12 @@ impl DocumentService for LibraryDocumentService {
 
     async fn append(&self, doc_id: &str, input: AppendDocumentInput) -> Result<DocMeta> {
         let (_parent_dir_id, file_path, mut entry, mut idx) = self.locate(doc_id).await?;
+        if entry.is_file() {
+            return Err(DocError::BadRequest(format!(
+                "{} is an imported file, not an editable document",
+                entry.file_name()
+            )));
+        }
         if let Some(base_version) = input.base_version
             && entry.version != base_version
         {
@@ -267,7 +333,11 @@ impl DocumentService for LibraryDocumentService {
             return Err(DocError::NameConflict(new_title.into()));
         }
         let dir_path = self.store.dir_path(&parent_dir_id)?;
-        let new_path = dir_path.join(format!("{}.md", new_title));
+        // Keep the extension: renaming an imported pdf must not turn it
+        // into `{new_title}.md`.
+        let mut renamed = entry.clone();
+        renamed.name = new_title.to_string();
+        let new_path = dir_path.join(renamed.file_name());
         fs::rename(&file_path, &new_path).await?;
         entry.name = new_title.to_string();
         entry.updated_at = self.now();
@@ -308,7 +378,9 @@ impl DocumentService for LibraryDocumentService {
             self.store.load(target_dir_id).await?
         };
         let target_dir_path = self.store.dir_path(target_dir_id)?;
-        let new_file_path = target_dir_path.join(format!("{name}.md"));
+        let mut dest = entry.clone();
+        dest.name = name.clone();
+        let new_file_path = target_dir_path.join(dest.file_name());
 
         // ── Overwrite: take custody of the destination *before* touching it ──
         //
@@ -333,7 +405,7 @@ impl DocumentService for LibraryDocumentService {
         // rename below is about to overwrite.
         let displaced_body = match &displaced {
             Some(meta) => {
-                let body = fs::read_to_string(&new_file_path).await.map_err(|e| {
+                let body = fs::read(&new_file_path).await.map_err(|e| {
                     DocError::CorruptIndex(format!(
                         "cannot replace {}: indexed but unreadable: {e}",
                         new_file_path.display()
@@ -344,6 +416,7 @@ impl DocumentService for LibraryDocumentService {
                     doc_id: Some(meta.doc_id.clone()),
                     original_dir_id: target_dir_id.to_string(),
                     original_name: meta.name.clone(),
+                    ext: meta.ext.clone(),
                     deleted_at: self.now(),
                     file_size_bytes: body.len() as u64,
                     creator: meta.creator.clone(),
@@ -386,7 +459,7 @@ impl DocumentService for LibraryDocumentService {
                 // the copy taken above.
                 let _ = fs::rename(&new_file_path, &file_path).await;
                 if let Some((_, body)) = &displaced_body {
-                    let _ = self.write_content(&new_file_path, body).await;
+                    let _ = self.write_bytes(&new_file_path, body).await;
                 }
                 self.rollback_replace(&target_idx, target_before, &displaced_body).await;
                 return Err(e);
@@ -402,13 +475,14 @@ impl DocumentService for LibraryDocumentService {
         // `TrashEntry` sidecar, drop the original file, and mark the
         // `library.json` entry deleted. The recycle-bin service (PR-2)
         // lists / restores / expires these slots.
-        let content = fs::read_to_string(&file_path).await?;
+        let content = fs::read(&file_path).await?;
         let now = self.now();
         let trash_entry = TrashEntry {
             trash_id: generate_trash_id(),
             doc_id: Some(doc_id.to_string()),
             original_dir_id: parent_dir_id.clone(),
             original_name: entry.name.clone(),
+            ext: entry.ext.clone(),
             deleted_at: now,
             file_size_bytes: content.len() as u64,
             // Snapshot the node's ACL ownership so a delete→restore
@@ -432,9 +506,9 @@ impl DocumentService for LibraryDocumentService {
     async fn path_of(&self, doc_id: &str) -> Result<String> {
         let (parent_dir_id, _file_path, entry, _idx) = self.locate(doc_id).await?;
         Ok(if parent_dir_id == crate::types::ROOT_DIR_ID {
-            format!("{}.md", entry.name)
+            entry.file_name()
         } else {
-            format!("{}/{}.md", parent_dir_id, entry.name)
+            format!("{}/{}", parent_dir_id, entry.file_name())
         })
     }
 
@@ -775,7 +849,7 @@ mod tests {
         assert_eq!(entries[0].doc_id.as_deref(), Some(dst.doc_id.as_str()));
         assert_eq!(entries[0].original_name, "PRD");
         let (_, body_path) = trash.find(&entries[0].trash_id).await.unwrap();
-        assert_eq!(trash.read_content(&body_path).await.unwrap(), "old body");
+        assert_eq!(trash.read_bytes(&body_path).await.unwrap(), b"old body");
         assert_eq!(
             std::fs::read_to_string(tmp.path().join(&sub.dir_id).join("PRD.md")).unwrap(),
             "new body"

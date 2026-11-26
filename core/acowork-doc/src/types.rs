@@ -135,6 +135,12 @@ pub struct DocMeta {
     /// [`LibraryIndex::acl`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acl: Option<Vec<Ace>>,
+    /// Original extension (lowercase, no dot) of an **imported file**. `None`
+    /// = a Markdown document (`{name}.md`). An imported file keeps its own
+    /// bytes on disk (`{name}.{ext}`) and is read-only: it has no Markdown
+    /// body to edit, and the bytes are served by `GET /docs/{id}/file`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext: Option<String>,
 }
 
 impl DocMeta {
@@ -154,8 +160,68 @@ impl DocMeta {
             deleted: false,
             creator: None,
             acl: None,
+            ext: None,
         }
     }
+
+    /// On-disk file name: `{name}.{ext}` for an imported file, `{name}.md`
+    /// for a Markdown document. The single place that rule lives — every
+    /// path the service builds goes through here.
+    pub fn file_name(&self) -> String {
+        format!("{}.{}", self.name, self.ext.as_deref().unwrap_or("md"))
+    }
+
+    /// Whether this entry is an imported file (bytes) rather than an
+    /// editable Markdown document.
+    pub fn is_file(&self) -> bool {
+        self.ext.is_some()
+    }
+}
+
+// ── Imported files (upload) ───────────────────────────────────────────────
+
+/// What an uploaded extension means for the library.
+pub struct ImportKind {
+    /// `Content-Type` used when the bytes are served back.
+    pub mime: &'static str,
+    /// Text formats become an ordinary Markdown document on import (the doc
+    /// library has no plain-text editor); everything else is stored verbatim
+    /// as a file entry.
+    pub as_text: bool,
+}
+
+/// The one extension table: what `POST /docs/import` accepts and how each
+/// kind is handled. Keep in sync with the Desktop's file picker `accept`
+/// list (`apps/acowork-desktop/src/lib/doc-types.ts`).
+pub const IMPORTABLE_EXTS: &[(&str, ImportKind)] = &[
+    ("pdf", ImportKind { mime: "application/pdf", as_text: false }),
+    ("doc", ImportKind { mime: "application/msword", as_text: false }),
+    ("docx", ImportKind { mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", as_text: false }),
+    ("xls", ImportKind { mime: "application/vnd.ms-excel", as_text: false }),
+    ("xlsx", ImportKind { mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_text: false }),
+    ("ppt", ImportKind { mime: "application/vnd.ms-powerpoint", as_text: false }),
+    ("pptx", ImportKind { mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation", as_text: false }),
+    ("csv", ImportKind { mime: "text/csv", as_text: false }),
+    ("md", ImportKind { mime: "text/markdown", as_text: true }),
+    ("markdown", ImportKind { mime: "text/markdown", as_text: true }),
+    ("txt", ImportKind { mime: "text/plain", as_text: true }),
+    ("png", ImportKind { mime: "image/png", as_text: false }),
+    ("jpg", ImportKind { mime: "image/jpeg", as_text: false }),
+    ("jpeg", ImportKind { mime: "image/jpeg", as_text: false }),
+    ("gif", ImportKind { mime: "image/gif", as_text: false }),
+    ("webp", ImportKind { mime: "image/webp", as_text: false }),
+    ("svg", ImportKind { mime: "image/svg+xml", as_text: false }),
+    ("bmp", ImportKind { mime: "image/bmp", as_text: false }),
+];
+
+/// Look up an extension (case-insensitive, dot optional) in
+/// [`IMPORTABLE_EXTS`].
+pub fn import_kind(ext: &str) -> Option<&'static ImportKind> {
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    IMPORTABLE_EXTS
+        .iter()
+        .find(|(e, _)| *e == ext)
+        .map(|(_, kind)| kind)
 }
 
 // ── Directory metadata ────────────────────────────────────────────────────
@@ -289,6 +355,11 @@ pub struct TrashEntry {
     pub original_dir_id: String,
     /// Document title (filename stem) at deletion time.
     pub original_name: String,
+    /// Extension of an imported **file** at deletion time (`None` = a
+    /// Markdown document). Restore re-creates it as a file entry with the
+    /// same extension instead of a Markdown document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext: Option<String>,
     /// Trash slot deletion timestamp (UTC).
     pub deleted_at: DateTime<Utc>,
     /// File size in bytes (`0` for directory entries).

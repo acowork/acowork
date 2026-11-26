@@ -64,13 +64,16 @@ impl LibrarySearchService {
         needle: &str,
     ) -> Result<Option<(i32, String)>> {
         let dir_path = self.store.dir_path(dir_id)?;
-        let body_path = dir_path.join(format!("{}.md", meta.name));
+        let body_path = dir_path.join(meta.file_name());
         let mut score = 0;
         let mut snip = String::new();
         if contains_ci(&meta.name, needle) {
             score += 10;
         }
-        if body_path.exists() {
+        // Imported files have no searchable body: their name still matches,
+        // their bytes are not UTF-8 text (reading them would fail the whole
+        // search).
+        if !meta.is_file() && body_path.exists() {
             let body = fs::read_to_string(&body_path).await?;
             if contains_ci(&body, needle) {
                 let count = body
@@ -115,9 +118,9 @@ impl SearchService for LibrarySearchService {
                 }
                 if let Some((score, snip)) = self.score(&dir_id, meta, keyword).await? {
                     let path = if dir_rel.is_empty() {
-                        format!("{}.md", meta.name)
+                        meta.file_name()
                     } else {
-                        format!("{}/{}.md", dir_rel, meta.name)
+                        format!("{}/{}", dir_rel, meta.file_name())
                     };
                     hits.push(SearchHit {
                         doc_id: meta.doc_id.clone(),

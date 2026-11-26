@@ -161,6 +161,35 @@ pub fn validate_doc_name(name: &str) -> Result<(), DocError> {
     Ok(())
 }
 
+/// Split an uploaded file name into `(stem, ext)` and validate both.
+///
+/// The extension must be in [`crate::types::IMPORTABLE_EXTS`] (the one table
+/// that also supplies the MIME type), and the stem obeys the same name rules
+/// as a document — a browser sends the basename, but `curl` can send
+/// anything, and this is the trust boundary.
+pub fn parse_import_file_name(file_name: &str) -> Result<(String, String), DocError> {
+    // Some clients send a whole path; only the basename is ours to store.
+    let base = file_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(file_name)
+        .trim();
+    let (stem, ext) = base.rsplit_once('.').ok_or_else(|| {
+        DocError::BadRequest(format!("file name has no extension: {base}"))
+    })?;
+    let ext = ext.trim().to_ascii_lowercase();
+    if stem.is_empty() {
+        return Err(DocError::BadRequest(format!("invalid file name: {base}")));
+    }
+    if crate::types::import_kind(&ext).is_none() {
+        return Err(DocError::BadRequest(format!(
+            "unsupported file type: .{ext} (accepted: pdf, docx, xlsx, pptx, csv, txt, md, common images)"
+        )));
+    }
+    validate_doc_name(stem)?;
+    Ok((stem.to_string(), ext))
+}
+
 /// Validate a library icon reference (`library.json` / `DirMeta` `icon`).
 ///
 /// The value is a short opaque UI key, not a path and not bytes; we only

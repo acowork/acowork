@@ -46,6 +46,23 @@ pub struct UpdateDocumentInput {
     pub content: String,
 }
 
+/// Input for [`DocumentService::create_file`] — one imported file.
+///
+/// Unlike a Markdown document, an imported file keeps its own extension and
+/// its bytes verbatim: the library stores it as `{name}.{ext}` and serves it
+/// back from `GET /docs/{id}/file`. `name` is the stem only; `ext` is
+/// lowercase and must be in [`crate::types::IMPORTABLE_EXTS`].
+#[derive(Debug, Clone)]
+pub struct CreateFileInput {
+    pub parent_dir_id: String,
+    pub name: String,
+    pub ext: String,
+    pub bytes: Vec<u8>,
+    /// Trusted identity of the caller (design §9). See
+    /// [`CreateDocumentInput::creator`].
+    pub creator: Option<String>,
+}
+
 /// Result of [`DocumentService::stat`] — metadata only, never the body.
 ///
 /// Exists so callers can read `version` / `size_bytes` without paying for an
@@ -95,6 +112,16 @@ pub trait DocumentService: Send + Sync {
     /// `doc_id` server-side; the title must be a legal filename (see
     /// `path::validate_doc_name`).
     async fn create(&self, input: CreateDocumentInput) -> Result<DocMeta>;
+
+    /// Import one **file** (pdf / docx / xlsx / pptx / image …) into
+    /// `parent_dir_id`, bytes verbatim. Same name rules and uniqueness as
+    /// [`DocumentService::create`]; the resulting entry carries
+    /// `DocMeta.ext` and is read-only (no Markdown body to update).
+    async fn create_file(&self, input: CreateFileInput) -> Result<DocMeta>;
+
+    /// Absolute on-disk path of one entry's file — the byte source for
+    /// `GET /docs/{id}/file`. Works for imported files and documents alike.
+    async fn absolute_path(&self, doc_id: &str) -> Result<std::path::PathBuf>;
 
     /// Apply a content update guarded by `base_version`. On mismatch
     /// returns `DocError::VersionConflict` with the current version so

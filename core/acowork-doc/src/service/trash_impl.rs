@@ -7,7 +7,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::error::Result;
 use crate::service::directory::DirectoryService;
-use crate::service::document::{CreateDocumentInput, DocumentService};
+use crate::service::document::{CreateDocumentInput, CreateFileInput, DocumentService};
 use crate::service::trash::TrashService;
 use crate::store::trash::TrashStore;
 use crate::types::{DocMeta, TrashEntry};
@@ -68,20 +68,40 @@ impl TrashService for LibraryTrashService {
         // succeed and hand back a document no listing can ever show. Fail
         // before touching the slot (the caller keeps it).
         self.dirs.read(&entry.original_dir_id).await?;
-        let content = self.store.read_content(&body).await?;
-        let created = self
-            .docs
-            .create(CreateDocumentInput {
-                parent_dir_id: entry.original_dir_id.clone(),
-                title: entry.original_name.clone(),
-                content,
-                import: None,
-                // Restore the original owner (design §9) so the restored
-                // doc keeps its creator-based manage gate instead of
-                // degrading to admin-only.
-                creator: entry.creator.clone(),
-            })
-            .await?;
+        // Bytes either way: an imported file goes back as a file entry with
+        // its extension, a document is decoded back into Markdown. The slot
+        // body was written as bytes for exactly this reason.
+        let bytes = self.store.read_bytes(&body).await?;
+        let created = match entry.ext.clone() {
+            Some(ext) => {
+                self.docs
+                    .create_file(CreateFileInput {
+                        parent_dir_id: entry.original_dir_id.clone(),
+                        name: entry.original_name.clone(),
+                        ext,
+                        bytes,
+                        // Restore the original owner (design §9) so the
+                        // restored entry keeps its creator-based manage gate.
+                        creator: entry.creator.clone(),
+                    })
+                    .await?
+            }
+            None => {
+                self.docs
+                    .create(CreateDocumentInput {
+                        parent_dir_id: entry.original_dir_id.clone(),
+                        title: entry.original_name.clone(),
+                        content: String::from_utf8(bytes).map_err(|_| {
+                            crate::error::DocError::CorruptIndex(format!(
+                                "trash slot {trash_id} is recorded as Markdown but holds non-UTF-8 bytes"
+                            ))
+                        })?,
+                        import: None,
+                        creator: entry.creator.clone(),
+                    })
+                    .await?
+            }
+        };
         // Reattach the snapshotted explicit ACL (if any) so a private node
         // stays private across the delete→restore round-trip; `None` was
         // never set so the doc simply inherits (no call needed).
@@ -336,12 +356,13 @@ mod tests {
                     doc_id: None,
                     original_dir_id: ROOT_DIR_ID.to_string(),
                     original_name: "stale".into(),
+                    ext: None,
                     deleted_at: old,
                     file_size_bytes: 1,
                     creator: None,
                     acl: None,
                 },
-                "x",
+                b"x",
             )
             .await
             .unwrap();
@@ -352,12 +373,13 @@ mod tests {
                     doc_id: None,
                     original_dir_id: ROOT_DIR_ID.to_string(),
                     original_name: "kept".into(),
+                    ext: None,
                     deleted_at: fresh,
                     file_size_bytes: 1,
                     creator: None,
                     acl: None,
                 },
-                "y",
+                b"y",
             )
             .await
             .unwrap();
