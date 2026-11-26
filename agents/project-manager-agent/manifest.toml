@@ -2,7 +2,7 @@
 # A professional project manager for requirements, planning, tracking, risk, and communication.
 
 agent_id = "com.acowork.project-manager"
-version = "1.2.5"
+version = "1.2.6"
 name = "PM"
 role = "Project Manager"
 description = "A professional project manager skilled in requirements analysis, task decomposition, progress tracking, risk assessment, and team coordination."
@@ -23,30 +23,24 @@ type = "FilesystemWrite"
 [[permissions]]
 type = "Network"
 
-# Tool opt-in declarations (ADR-029).
+# Tool opt-in declarations.
 # Project Manager focuses on requirements analysis, task decomposition,
 # progress tracking, risk assessment, and team coordination. Tools cover those
 # workflows:
-#   - pm_*  (hosted project service)              → THE task system of record:
-#                                                   projects, tasks, assignment,
-#                                                   approval gates, activity
-#   - doc_* (hosted document service)             → PRDs, plans, reports and notes:
-#                                                   versioned, shared, reviewable
-#   - mcp_memory__* (hosted memory MCP, ADR-101)  → project history & decisions
-#   - intent_send                                 → coordinate team member agents
-#   - ask_user_question, todo_write               → clarify requirements & track tasks
-#   - doc_reader                                   → one-off PDF/Office extraction
+#   - pm_*     (hosted project service) → THE task system of record:
+#                                          projects, tasks, assignment,
+#                                          approval gates, activity
+#   - doc_*    (hosted document service)→ PRDs, plans, reports and notes:
+#                                          versioned, shared, reviewable
+#   - memory                         → project history & decisions
+#   - intent_send                    → coordinate team member agents
+#   - ask_user_question, todo_write  → clarify requirements & track tasks
+#   - doc_reader                     → one-off PDF/Office extraction
 #
 # Shell tools are declared as a cross-platform detection set, not a core
 # workflow dependency: PM work happens through pm_* and doc_*, and the
 # declarations stay so a task that genuinely needs a local command can use one
 # after the user grants it.
-
-# --- Memory (ADR-101) ---
-# `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
-# here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
-# `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
-# (ADR-069).
 
 # --- Filesystem ---
 [[tools]]
@@ -60,13 +54,13 @@ name = "doc_reader"
 
 # --- Shell (platform-detected; declare all three for cross-platform opt-in) ---
 [[tools]]
-name = "bash"        # Windows (Git Bash installed)
+name = "bash"
 
 [[tools]]
-name = "powershell"  # Windows (always; pwsh preferred, falls back to Windows PowerShell 5.1)
+name = "powershell"
 
 [[tools]]
-name = "shell"       # Linux / macOS
+name = "shell"
 
 # --- Inter-agent ---
 [[tools]]
@@ -97,8 +91,8 @@ max_output_tokens = 8192
 exceeded_action = "warn"
 
 
-# ADR-104: behaviour defaults for agent_config.json. Seeded only into
-# fields the user has not set; never overwrites a user value.
+# Behaviour defaults for agent_config.json. Seeded only into fields the user
+# has not set; never overwrites a user value.
 [config]
 temperature = 0.5
 context_window = 200000
@@ -116,14 +110,17 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
-# ADR-104: recommended MCP servers. Recommendation, not installation —
-# the user confirms install/activation in the Tools panel (ADR-090).
+# Recommended MCP servers. A recommendation, not an installation — the user
+# confirms install/activation in the Tools panel.
 
 [[mcp_servers]]
 hosted = "pm"
 why = "Create and track tasks, dependencies and milestones in the project service"
-# ADR-104: the whitelist also decides which tools start enabled, so it is the
-# same set the skills declare in `tool_deps`.
+# This is the PM's own tool surface, so it is the full set: setting up
+# projects, keeping the member roster, and creating, dispatching and closing
+# tasks. Every other agent in a project gets only the participation slice of
+# this surface, so the separation between the person who plans the work and
+# the people who execute it is enforced by the declarations themselves.
 tools = [
   "pm_list_projects", "pm_get_project", "pm_create_project", "pm_update_project",
   "pm_add_project_member", "pm_list_agents",
@@ -139,6 +136,9 @@ why = "Keep meeting decisions and commitments across sessions"
 [[mcp_servers]]
 hosted = "doc"
 why = "PRDs, plans, reports and meeting notes go into the shared library, versioned and reviewable — not to local files"
+# The PM owns the project document tree: it creates the directories, so it is
+# also the only one that may rename or prune them. Documents it writes are
+# moved into place with `doc_move` rather than overwritten blind.
 tools = [
   "doc_list", "doc_read", "doc_stat", "doc_write", "doc_move",
   "doc_mkdir", "doc_list_requests", "doc_check_request",
@@ -163,4 +163,3 @@ skills = ["task-decomposition"]
 [capabilities.risk_assessment]
 description = "Identify, evaluate, and create mitigation plans for project risks"
 skills = ["risk-assessment"]
-

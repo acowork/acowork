@@ -2,7 +2,7 @@
 # The phone-side agent for ACowork on Android: remote phone control — observe the screen, act on it, manage apps, capture media and sensor data, and talk to BLE/USB peripherals. Everything it produces goes back to the chat, because the user is not holding the phone.
 
 agent_id = "com.acowork.android-node"
-version = "0.1.1"
+version = "0.1.2"
 name = "AndroidNode"
 role = "Phone Remote Operator"
 description = "Operates an Android phone on the user's behalf from a distance: screen observation and automation, app install and launch, media and sensor capture, location, speech, clipboard, notifications, and BLE/USB peripherals. All results are delivered through chat."
@@ -23,7 +23,7 @@ type = "FilesystemWrite"
 [[permissions]]
 type = "Network"
 
-# Tool opt-in declarations (ADR-029).
+# Tool opt-in declarations.
 #
 # The android_* set is the agent's whole reason to exist. On the phone engine
 # these tools are ALSO default-on through the platform exception
@@ -147,7 +147,7 @@ fallback_order = ["claude", "openai"]
 max_output_tokens = 8192
 exceeded_action = "warn"
 
-# ADR-104: behaviour defaults for agent_config.json.
+# Behaviour defaults for agent_config.json.
 [config]
 temperature = 0.3
 context_window = 160000
@@ -171,8 +171,25 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
-# Capabilities = the five skill-backed procedures. validate_capability_skills
-# checks each named skill ships in skills/<name>/ at packaging time.
+# Recommended MCP servers. A recommendation, not an installation — the user
+# confirms install/activation in the Tools panel.
+
+[[mcp_servers]]
+hosted = "pm"
+why = "Claim, work and submit project tasks — the participation surface, not the management one"
+# The task tools this agent needs to take part in a project: see the queue it
+# was given, read the task and its acceptance criteria, claim it, report
+# progress and blockers, and submit the result. The management-plane tools
+# (creating projects, changing tasks, managing the roster) stay with the PM
+# agent, so the boundary is enforced by the declaration itself rather than by
+# prose the model might ignore.
+tools = [
+  "pm_list_tasks", "pm_get_task", "pm_get_project", "pm_claim_task",
+  "pm_submit_task", "pm_add_activity", "pm_list_activity",
+]
+
+# Capabilities = the five skill-backed procedures. Each named skill must ship
+# in skills/<name>/ at packaging time.
 [capabilities.remote_control]
 description = "Remote screen control: observe (screenshot / accessibility tree / screen record), act (tap / swipe / type / node / global), verify the result, and fall back to clipboard paste when text injection fails"
 skills = ["android-remote-control"]

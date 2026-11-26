@@ -2,7 +2,7 @@
 # A multi-skilled senior engineer for code review, architecture, debugging, refactoring, testing, and documentation.
 
 agent_id = "com.acowork.senior-engineer"
-version = "1.2.7"
+version = "1.2.8"
 name = "SSE"
 role = "Senior Software Engineer"
 description = "An experienced senior software engineer capable of code review, architecture design, debugging, refactoring, testing, and documentation."
@@ -26,7 +26,7 @@ type = "Network"
 [[permissions]]
 type = "Shell"
 
-# Built-in tool opt-in declarations (ADR-029)
+# Built-in tool opt-in declarations.
 # Each [[tools]] entry seeds `agent_tools.json` with `enabled = true` on first start.
 # Tools NOT listed here are registered in code but kept disabled (opt-in model).
 #
@@ -37,18 +37,11 @@ type = "Shell"
 #                   access on every platform — `init_tools_config_from_manifest`
 #                   silently drops names that the runtime hasn't registered.
 
-# --- Memory (ADR-101) ---
-# `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
-# here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
-# `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
-# (ADR-069).
-
 # --- Filesystem ---
 # `file_read` is declared for the skills that inspect repository sources
-# (architecture-design, code-review, debugging, refactoring, testing — plan
-# §4.4 allowlist). `file_write` is declared here and nowhere else: these three
-# skills produce repository source, not documents, and `dev/ci.sh`
-# (`run_agent_skill_tool_redline`) fails on a fourth.
+# (architecture-design, code-review, debugging, refactoring, testing).
+# `file_write` is declared here and nowhere else: these skills produce
+# repository source, not documents.
 [[tools]]
 name = "file_read"
 
@@ -66,13 +59,13 @@ name = "file_write"
 
 # --- Shell (platform-detected; declare all three for cross-platform opt-in) ---
 [[tools]]
-name = "bash"        # Windows (Git Bash installed)
+name = "bash"
 
 [[tools]]
-name = "powershell"  # Windows (always; pwsh preferred, falls back to Windows PowerShell 5.1)
+name = "powershell"
 
 [[tools]]
-name = "shell"       # Linux / macOS
+name = "shell"
 
 # --- Inter-agent messaging ---
 [[tools]]
@@ -103,8 +96,8 @@ max_output_tokens = 8192
 exceeded_action = "warn"
 
 
-# ADR-104: behaviour defaults for agent_config.json. Seeded only into
-# fields the user has not set; never overwrites a user value.
+# Behaviour defaults for agent_config.json. Seeded only into fields the user
+# has not set; never overwrites a user value.
 [config]
 temperature = 0.3
 context_window = 200000
@@ -122,8 +115,8 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
-# ADR-104: recommended MCP servers. Recommendation, not installation —
-# the user confirms install/activation in the Tools panel (ADR-090).
+# Recommended MCP servers. A recommendation, not an installation — the user
+# confirms install/activation in the Tools panel.
 
 [[mcp_servers]]
 hosted = "memory"
@@ -132,15 +125,12 @@ why = "Recall architecture decisions and earlier debugging findings"
 [[mcp_servers]]
 hosted = "pm"
 why = "Claim, work and submit project tasks — the participation surface, not the management one"
-# ADR-104: the whitelist is the initial enabled set, so it is exactly the set the
-# package's skills declare in `tool_deps` (plan §4.3). Deliberately absent are the
-# management-plane tools — `pm_update_task`, `pm_create_project`,
-# `pm_update_project`, `pm_add_project_member`, `pm_list_agents` (plan D-1): the
-# boundary is enforced by the whitelist, not by skill prose.
-# `pm_create_task` is management-plane too (task creation is the PM's call, not
-# a participant's): a participant that files its own tasks competes with the
-# PM's own dispatch and duplicates work. Report through `pm_add_activity`
-# instead and let the PM raise the card.
+# The task tools this agent needs to take part in a project: see the queue it
+# was given, read the task and its acceptance criteria, claim it, report
+# progress and blockers, and submit the result. The management-plane tools
+# (creating projects, changing tasks, managing the roster) stay with the PM
+# agent, so the boundary is enforced by the declaration itself rather than by
+# prose the model might ignore.
 tools = [
   "pm_list_tasks", "pm_get_task", "pm_get_project", "pm_claim_task",
   "pm_submit_task", "pm_add_activity", "pm_list_activity",
@@ -149,13 +139,13 @@ tools = [
 [[mcp_servers]]
 hosted = "doc"
 why = "Deliverables go into the shared project document tree instead of local files"
-# Same rule as `pm` above. `doc_remove` / `doc_rmdir` are absent because deleting
-# is the owner's right (plan D-5), and `doc_mkdir` is absent because the project
-# tree has exactly one governor — the PM agent (plan D-2 / D-7): a participant
-# that mkdirs an area directory would end up the only one able to rename or prune
-# it. A missing area is reported through `pm_add_activity`, not self-created.
-# Code itself still lands in the repository through `file_write` — the document
-# tree carries the reasoning, the review verdict and the post-mortem.
+# The same reasoning as `pm` above: this agent reads and writes the shared
+# document tree, and moves a finished document to its final name. Deleting is
+# left out because removal is the owner's decision, and creating directories
+# is left out because the project tree has one owner — the PM agent builds it
+# once, so a participant never ends up in charge of a directory it created.
+# The code itself still lands in the repository through `file_write` — the
+# document tree carries the reasoning, the review verdict and the post-mortem.
 tools = [
   "doc_list", "doc_search", "doc_read", "doc_stat", "doc_write", "doc_move",
   "doc_list_requests", "doc_check_request",
@@ -179,9 +169,9 @@ description = "Debug and troubleshoot issues with systematic root-cause analysis
 # The participation capability is listed last because it is the one every other
 # capability in this package runs inside: a project task is claimed, its
 # deliverable published to the project document tree, and its result
-# submitted through PM. Declaring it is
-# what makes `validate_capability_skills` check `project-participation` at
-# packaging time and what makes it show in the capability panel (ADR-104).
+# submitted through the task service. Declaring it is what makes the
+# participation skill ship-checked at packaging time and what makes it show in
+# the capability panel.
 [capabilities.project_participation]
 description = "Claim, publish and submit work in a project: accept a dispatched task, publish its deliverable to the project document tree, record blockers and handoffs as activity, and submit the result"
 skills = ["project-participation"]

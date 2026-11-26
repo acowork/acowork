@@ -2,7 +2,7 @@
 # A documentation management agent for collection, organization, archiving, writing, format conversion, and knowledge base maintenance.
 
 agent_id = "com.acowork.document-manager"
-version = "1.1.6"
+version = "1.1.7"
 name = "Docs"
 role = "Document Manager"
 description = "A document management agent skilled in collecting, organizing, archiving, writing, reviewing, converting, and maintaining documentation and knowledge bases."
@@ -23,35 +23,29 @@ type = "FilesystemWrite"
 [[permissions]]
 type = "Network"
 
-# Tool opt-in declarations (ADR-029).
+# Tool opt-in declarations.
 # Document Manager focuses on collecting, organizing, archiving, writing,
 # reviewing, and converting documentation. Tools cover the full doc lifecycle:
 #   - doc_*    (hosted document service) → THE library and the system of record:
-#                                           read/write/move/trash/restore,
-#                                           review requests, versions
+#                                          read/write/move/trash/restore,
+#                                          review requests, versions
 #   - pm_*     (hosted project service)  → collection, conversion and archive
-#                                           chores as tasks with owners and dates
-#   - doc_reader              → one-off PDF/Word/Excel/PowerPoint extraction
+#                                          chores as tasks with owners and dates
+#   - doc_reader                         → one-off PDF/Word/Excel/PowerPoint extraction
 #   - http_request/web_fetch             → gather external references
-#   - mcp_memory__* (hosted memory MCP, ADR-101)   → knowledge-base persistence across sessions
-#   - intent_send             → coordinate with content-owner agents
-#   - ask_user_question, todo_write → clarify scope & track doc tasks
+#   - memory                             → knowledge-base persistence across sessions
+#   - intent_send                        → coordinate with content-owner agents
+#   - ask_user_question, todo_write      → clarify scope & track doc tasks
 #
 # Shell tools are declared as a cross-platform detection set, not a core
 # workflow dependency: document work goes through doc_* (format conversion
 # through the docling preset), so the declarations stay only so a job that
 # genuinely needs a local command can run one after the user grants it.
 
-# --- Memory (ADR-101) ---
-# `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
-# here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
-# `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
-# (ADR-069).
-
 # --- Filesystem ---
 # `file_read` is what the collection flow uses to inspect a workspace file before
-# handing its content to `doc_write`: doc_write's source_workspace / source_path
-# only record provenance, they do not read the file (design 32 §5.5).
+# handing its content to `doc_write`: `doc_write`'s source_workspace / source_path
+# only record provenance, they do not read the file.
 [[tools]]
 name = "file_read"
 
@@ -66,13 +60,13 @@ name = "doc_reader"
 
 # --- Shell (platform-detected; declare all three for cross-platform opt-in) ---
 [[tools]]
-name = "bash"        # Windows (Git Bash installed)
+name = "bash"
 
 [[tools]]
-name = "powershell"  # Windows (always; pwsh preferred, falls back to Windows PowerShell 5.1)
+name = "powershell"
 
 [[tools]]
-name = "shell"       # Linux / macOS
+name = "shell"
 
 # --- Network ---
 [[tools]]
@@ -110,8 +104,8 @@ max_output_tokens = 8192
 exceeded_action = "warn"
 
 
-# ADR-104: behaviour defaults for agent_config.json. Seeded only into
-# fields the user has not set; never overwrites a user value.
+# Behaviour defaults for agent_config.json. Seeded only into fields the user
+# has not set; never overwrites a user value.
 [config]
 temperature = 0.4
 context_window = 200000
@@ -129,14 +123,16 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
-# ADR-104: recommended MCP servers. Recommendation, not installation —
-# the user confirms install/activation in the Tools panel (ADR-090).
+# Recommended MCP servers. A recommendation, not an installation — the user
+# confirms install/activation in the Tools panel.
 
 [[mcp_servers]]
 hosted = "doc"
 why = "Read and write the shared document library instead of local files"
-# ADR-104: the whitelist also decides which tools start enabled, so it is the
-# same set the skills declare in `tool_deps` — no more, no less.
+# The library is this agent's main working surface, so it gets the full set
+# including the delete, trash and restore operations — an archivist needs to
+# be able to retire a document, and it is the only role that curates the
+# library's own structure.
 tools = [
   "doc_list", "doc_read", "doc_stat", "doc_search", "doc_write",
   "doc_move", "doc_remove", "doc_mkdir", "doc_rmdir",
@@ -147,11 +143,16 @@ tools = [
 [[mcp_servers]]
 hosted = "pm"
 why = "Collection, conversion and archive chores are reported on the task thread with owners and dates instead of living in notes"
-# `pm_create_task` is absent on purpose: task creation is the PM's call, not a
-# participant's. A participant that files its own tasks competes with the PM's
-# own dispatch and duplicates work. Report through `pm_add_activity` and let
-# the PM raise the card.
-tools = ["pm_add_activity"]
+# The task tools this agent needs to take part in a project: see the queue it
+# was given, read the task and its acceptance criteria, claim it, report
+# progress and blockers, and submit the result. Creating a task stays with
+# the PM agent — a participant that files its own cards competes with the
+# PM's own dispatch — so findings are reported through `pm_add_activity`
+# instead and the PM raises the card.
+tools = [
+  "pm_list_tasks", "pm_get_task", "pm_get_project", "pm_claim_task",
+  "pm_submit_task", "pm_add_activity", "pm_list_activity",
+]
 
 [[mcp_servers]]
 preset = "docling"
@@ -184,4 +185,3 @@ skills = ["knowledge-base-maintenance"]
 [capabilities.document_quality_review]
 description = "Review documents for accuracy, completeness, clarity, structure, consistency, links, and freshness"
 skills = ["document-quality-review"]
-

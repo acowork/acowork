@@ -2,7 +2,7 @@
 # A principal-level architect for system design, architecture review, technical planning, and risk assessment.
 
 agent_id = "com.acowork.software-architect"
-version = "1.1.6"
+version = "1.1.7"
 name = "Architect"
 role = "Software Architect"
 description = "A principal-level software architect skilled in requirements analysis, system design, architecture review, module boundaries, interface contracts, scalability, security, and technical planning."
@@ -26,30 +26,24 @@ type = "Network"
 [[permissions]]
 type = "Shell"
 
-# Tool opt-in declarations (ADR-029).
+# Tool opt-in declarations.
 # Software Architect investigates systems, reviews designs, and plans technical
 # work — the broadest tool set among user agents, mirroring the senior engineer's
 # shell + LSP needs for architecture review and infrastructure investigation:
-#   - file_*/doc_reader/glob_search/content_search → navigate and author designs
-#   - bash/powershell/shell                       → investigate infra, run analysis tools
-#   - http_request/web_fetch                     → research patterns & best practices
-#   - codebase                                    → LSP-based code intelligence for review
-#   - mcp_memory__* (hosted memory MCP, ADR-101)   → architecture decisions and trade-offs
-#   - intent_send                                 → coordinate with dev and review agents
-#   - ask_user_question, todo_write               → clarify requirements & track planning
+#   - file_read/file_edit/doc_reader → navigate and author designs
+#   - bash/powershell/shell          → investigate infra, run analysis tools
+#   - http_request/web_fetch         → research patterns & best practices
+#   - codebase                       → LSP-based code intelligence for review
+#   - memory                         → architecture decisions and trade-offs
+#   - intent_send                    → coordinate with dev and review agents
+#   - ask_user_question/todo_write   → clarify requirements & track planning
 # Shell tools are declared for all three names (platform-detected) so an
 # architect always has shell access on every platform.
 
-# --- Memory (ADR-101) ---
-# `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
-# here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
-# `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
-# (ADR-069).
-
 # --- Filesystem ---
 # `file_read` is declared because `system-design-review` and `technical-planning`
-# inspect repository sources (plan §4.4 allowlist). `file_write` is NOT declared:
-# every Architect deliverable is a document and goes out through `doc_write`.
+# inspect repository sources. `file_write` is NOT declared: every Architect
+# deliverable is a document and goes out through `doc_write`.
 [[tools]]
 name = "file_read"
 
@@ -71,13 +65,13 @@ name = "web_fetch"
 
 # --- Shell (platform-detected; declare all three for cross-platform opt-in) ---
 [[tools]]
-name = "bash"        # Windows (Git Bash installed)
+name = "bash"
 
 [[tools]]
-name = "powershell"  # Windows (always; pwsh preferred, falls back to Windows PowerShell 5.1)
+name = "powershell"
 
 [[tools]]
-name = "shell"       # Linux / macOS
+name = "shell"
 
 # --- Inter-agent ---
 [[tools]]
@@ -108,8 +102,8 @@ max_output_tokens = 8192
 exceeded_action = "warn"
 
 
-# ADR-104: behaviour defaults for agent_config.json. Seeded only into
-# fields the user has not set; never overwrites a user value.
+# Behaviour defaults for agent_config.json. Seeded only into fields the user
+# has not set; never overwrites a user value.
 [config]
 temperature = 0.4
 context_window = 200000
@@ -127,8 +121,8 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
-# ADR-104: recommended MCP servers. Recommendation, not installation —
-# the user confirms install/activation in the Tools panel (ADR-090).
+# Recommended MCP servers. A recommendation, not an installation — the user
+# confirms install/activation in the Tools panel.
 
 [[mcp_servers]]
 hosted = "memory"
@@ -137,15 +131,12 @@ why = "Retain ADRs, trade-off analyses and review outcomes over time"
 [[mcp_servers]]
 hosted = "pm"
 why = "Claim, work and submit project tasks — the participation surface, not the management one"
-# ADR-104: the whitelist is the initial enabled set, so it is exactly the set the
-# package's skills declare in `tool_deps` (plan §4.3). Deliberately absent are the
-# management-plane tools — `pm_update_task`, `pm_create_project`,
-# `pm_update_project`, `pm_add_project_member`, `pm_list_agents` (plan D-1): the
-# boundary is enforced by the whitelist, not by skill prose.
-# `pm_create_task` is management-plane too (task creation is the PM's call, not
-# a participant's): a participant that files its own tasks competes with the
-# PM's own dispatch and duplicates work. Report through `pm_add_activity`
-# instead and let the PM raise the card.
+# The task tools this agent needs to take part in a project: see the queue it
+# was given, read the task and its acceptance criteria, claim it, report
+# progress and blockers, and submit the result. The management-plane tools
+# (creating projects, changing tasks, managing the roster) stay with the PM
+# agent, so the boundary is enforced by the declaration itself rather than by
+# prose the model might ignore.
 tools = [
   "pm_list_tasks", "pm_get_task", "pm_get_project", "pm_claim_task",
   "pm_submit_task", "pm_add_activity", "pm_list_activity",
@@ -154,11 +145,11 @@ tools = [
 [[mcp_servers]]
 hosted = "doc"
 why = "Deliverables go into the shared project document tree instead of local files"
-# Same rule as `pm` above. `doc_remove` / `doc_rmdir` are absent because deleting
-# is the owner's right (plan D-5), and `doc_mkdir` is absent because the project
-# tree has exactly one governor — the PM agent (plan D-2 / D-7): a participant
-# that mkdirs an area directory would end up the only one able to rename or prune
-# it. A missing area is reported through `pm_add_activity`, not self-created.
+# The same reasoning as `pm` above: this agent reads and writes the shared
+# document tree, and moves a finished document to its final name. Deleting is
+# left out because removal is the owner's decision, and creating directories
+# is left out because the project tree has one owner — the PM agent builds it
+# once, so a participant never ends up in charge of a directory it created.
 tools = [
   "doc_list", "doc_search", "doc_read", "doc_stat", "doc_write", "doc_move",
   "doc_list_requests", "doc_check_request",
@@ -187,9 +178,9 @@ skills = ["architecture-risk-assessment"]
 # The participation capability is listed last because it is the one every other
 # capability in this package runs inside: a project task is claimed, its
 # deliverable published to the project document tree, and its result
-# submitted through PM. Declaring it is
-# what makes `validate_capability_skills` check `project-participation` at
-# packaging time and what makes it show in the capability panel (ADR-104).
+# submitted through the task service. Declaring it is what makes the
+# participation skill ship-checked at packaging time and what makes it show in
+# the capability panel.
 [capabilities.project_participation]
 description = "Claim, publish and submit work in a project: accept a dispatched task, publish its deliverable to the project document tree, record blockers and handoffs as activity, and submit the result"
 skills = ["project-participation"]

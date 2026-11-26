@@ -1,8 +1,8 @@
-# Senior Software Engineer Agent
-# A multi-skilled senior engineer for code review, architecture, debugging, refactoring, testing, and documentation.
+# Ponytail Agent
+# The best code is the code you never wrote.
 
 agent_id = "github.ponytail"
-version = "1.0.1"
+version = "1.0.2"
 name = "Ponytail"
 role = "Senior Software Engineer"
 description = "The best code is the code you never wrote."
@@ -26,7 +26,7 @@ type = "Network"
 [[permissions]]
 type = "Shell"
 
-# Built-in tool opt-in declarations (ADR-029)
+# Built-in tool opt-in declarations.
 # Each [[tools]] entry seeds `agent_tools.json` with `enabled = true` on first start.
 # Tools NOT listed here are registered in code but kept disabled (opt-in model).
 #
@@ -36,12 +36,6 @@ type = "Shell"
 #                   `powershell`, `shell`) so a senior engineer always has shell
 #                   access on every platform — `init_tools_config_from_manifest`
 #                   silently drops names that the runtime hasn't registered.
-
-# --- Memory (ADR-101) ---
-# `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
-# here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
-# `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
-# (ADR-069).
 
 # --- Filesystem ---
 [[tools]]
@@ -55,13 +49,13 @@ name = "doc_reader"
 
 # --- Shell (platform-detected; declare all three for cross-platform opt-in) ---
 [[tools]]
-name = "bash"        # Windows (Git Bash installed)
+name = "bash"
 
 [[tools]]
-name = "powershell"  # Windows (always; pwsh preferred, falls back to Windows PowerShell 5.1)
+name = "powershell"
 
 [[tools]]
-name = "shell"       # Linux / macOS
+name = "shell"
 
 # --- Inter-agent messaging ---
 [[tools]]
@@ -92,8 +86,8 @@ max_output_tokens = 8192
 exceeded_action = "warn"
 
 
-# ADR-104: behaviour defaults for agent_config.json. Seeded only into
-# fields the user has not set; never overwrites a user value.
+# Behaviour defaults for agent_config.json. Seeded only into fields the user
+# has not set; never overwrites a user value.
 [config]
 temperature = 0.3
 context_window = 200000
@@ -111,8 +105,22 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
-# ADR-104: recommended MCP servers. Recommendation, not installation —
-# the user confirms install/activation in the Tools panel (ADR-090).
+# Recommended MCP servers. A recommendation, not an installation — the user
+# confirms install/activation in the Tools panel.
+
+[[mcp_servers]]
+hosted = "pm"
+why = "Claim, work and submit project tasks — the participation surface, not the management one"
+# The task tools this agent needs to take part in a project: see the queue it
+# was given, read the task and its acceptance criteria, claim it, report
+# progress and blockers, and submit the result. The management-plane tools
+# (creating projects, changing tasks, managing the roster) stay with the PM
+# agent, so the boundary is enforced by the declaration itself rather than by
+# prose the model might ignore.
+tools = [
+  "pm_list_tasks", "pm_get_task", "pm_get_project", "pm_claim_task",
+  "pm_submit_task", "pm_add_activity", "pm_list_activity",
+]
 
 [[mcp_servers]]
 preset = "context7"
@@ -126,4 +134,3 @@ description = "Design system architecture with module breakdown and interface de
 
 [capabilities.debug_assist]
 description = "Debug and troubleshoot issues with systematic root-cause analysis"
-
