@@ -123,6 +123,14 @@ pub trait DocumentService: Send + Sync {
     /// `GET /docs/{id}/file`. Works for imported files and documents alike.
     async fn absolute_path(&self, doc_id: &str) -> Result<std::path::PathBuf>;
 
+    /// Overwrite one imported file entry with new bytes — the write-back of an
+    /// app that edited it in place (`PUT /docs/{id}/file`).
+    ///
+    /// Text documents are refused: they carry a versioned Markdown body and
+    /// are written through [`DocumentService::update`], whose `base_version`
+    /// guard this path would bypass.
+    async fn save_file(&self, doc_id: &str, bytes: Vec<u8>) -> Result<DocMeta>;
+
     /// Apply a content update guarded by `base_version`. On mismatch
     /// returns `DocError::VersionConflict` with the current version so
     /// the caller can decide whether to rebase. May optionally rename

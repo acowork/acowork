@@ -1016,6 +1016,54 @@ async fn import_file_round_trips_bytes_and_survives_the_trash() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn saving_a_file_entry_overwrites_its_bytes_in_place() {
+    let srv = spawn().await;
+    let dir_id = srv.mkdir("root", "资料").await;
+    let (status, body, _) = srv.upload(&dir_id, "报告.docx", b"PK\x03\x04first").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let doc_id = body["doc_id"].as_str().unwrap().to_string();
+
+    // The app's write-back: raw bytes onto the entry it opened.
+    let saved: Vec<u8> = b"PK\x03\x04second".to_vec();
+    let resp = srv
+        .client
+        .put(format!("{}/docs/{doc_id}/file", srv.base))
+        .body(saved.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (status, mime, bytes) = srv.file_bytes(&doc_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        mime.as_deref().unwrap_or_default().contains("wordprocessingml"),
+        "the extension still decides the MIME: {mime:?}"
+    );
+    assert_eq!(bytes, saved, "a save overwrites, it does not append");
+
+    // Same entry, not a second one — and it survived the index write.
+    let (_, tree) = srv.get(&format!("/tree?dir_id={dir_id}")).await;
+    assert_eq!(tree["files"].as_array().unwrap().len(), 1);
+    assert_eq!(tree["files"][0]["name"], "报告");
+
+    // A text document is written through the versioned update, so the byte
+    // route must refuse it instead of bypassing `base_version`.
+    let (_, txt, _) = srv.upload("root", "notes.txt", b"hi").await;
+    let txt_id = txt["doc_id"].as_str().unwrap().to_string();
+    let resp = srv
+        .client
+        .put(format!("{}/docs/{txt_id}/file", srv.base))
+        .body("overwritten")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let (_, read) = srv.get(&format!("/docs/{txt_id}")).await;
+    assert_eq!(read["content"], "hi", "the body must be untouched");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn import_text_file_becomes_an_editable_document() {
     let srv = spawn().await;
     let (status, body, _) = srv.upload("root", "notes.txt", b"# hi\nbody").await;

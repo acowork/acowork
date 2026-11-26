@@ -13,6 +13,9 @@
 //! - `POST   /docs/{id}/move`  move
 //! - `DELETE /docs/{id}`      soft-delete → .trash/
 //! - `GET    /docs/{id}/path`  on-disk relative path
+//! - `POST   /docs/import`     upload a file → file entry
+//! - `GET    /docs/{id}/file`  raw bytes of a file entry
+//! - `PUT    /docs/{id}/file`  overwrite a file entry (app write-back)
 //! - `GET    /docs/{id}/requests` per-doc review history
 //! - `POST   /dirs`           create subdir
 //! - `GET    /dirs/{id}`      read dir meta
@@ -69,7 +72,9 @@ pub fn doc_router(state: DocState) -> Router {
         .route("/docs/{doc_id}/title", patch(c::rename_doc))
         .route("/docs/{doc_id}/move", post(c::move_doc))
         .route("/docs/{doc_id}/path", get(c::doc_path))
-        .route("/docs/{doc_id}/file", get(c::doc_file))
+        .route("/docs/{doc_id}/file", get(c::doc_file).put(c::save_doc_file).layer(
+            axum::extract::DefaultBodyLimit::max(crate::limit::UPLOAD_CEILING),
+        ))
         .route("/docs/{doc_id}/requests", get(r::list_doc_requests))
         // ── dirs ────────────────────────────────────────────────────
         .route("/dirs", post(d::create_dir))

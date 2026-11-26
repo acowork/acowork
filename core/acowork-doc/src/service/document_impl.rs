@@ -215,6 +215,25 @@ impl DocumentService for LibraryDocumentService {
         Ok(file_path)
     }
 
+    async fn save_file(&self, doc_id: &str, bytes: Vec<u8>) -> Result<DocMeta> {
+        let (_parent_dir_id, file_path, mut entry, mut idx) = self.locate(doc_id).await?;
+        if !entry.is_file() {
+            return Err(DocError::BadRequest(format!(
+                "{} is a text document; write it through the versioned update",
+                entry.name
+            )));
+        }
+        // Bytes are the whole content: overwrite in place, no temp file — the
+        // entry's identity (doc_id, name, ext) does not move.
+        self.write_bytes(&file_path, &bytes).await?;
+        entry.updated_at = self.now();
+        if let Some(slot) = idx.files.iter_mut().find(|f| f.doc_id == doc_id) {
+            *slot = entry.clone();
+        }
+        self.store.save(&idx).await?;
+        Ok(entry)
+    }
+
     async fn update(&self, doc_id: &str, input: UpdateDocumentInput) -> Result<DocMeta> {
         let (parent_dir_id, file_path, mut entry, mut idx) = self.locate(doc_id).await?;
         if entry.is_file() {

@@ -302,6 +302,36 @@ pub async fn import_doc(
     Ok((StatusCode::CREATED, Json(DocMetaDto::from(meta))))
 }
 
+/// `PUT /api/docs/:doc_id/file` — overwrite one imported entry with raw bytes.
+///
+/// The write-back half of `GET …/file`: a hosted app (wordcraft / deckcraft …)
+/// opens the bytes, edits them, and hands them back with a `saveFile` message.
+/// Body is the file itself (`application/octet-stream`), so no base64 and no
+/// multipart — the entry already has a name and an extension.
+///
+/// Overwriting is an edit on the document, same gate as `PUT /docs/{id}`.
+pub async fn save_doc_file(
+    state: ApiState,
+    headers: HeaderMap,
+    Path(doc_id): Path<String>,
+    bytes: axum::body::Bytes,
+) -> ApiResult<Json<DocMetaDto>> {
+    validate_doc_id(&doc_id).map_err(ApiError::from)?;
+    let actor = actor_from(&headers);
+    state
+        .acl
+        .check(&actor, AclTarget::Doc(&doc_id), AclRole::Edit)
+        .await
+        .map_err(ApiError::from)?;
+    limit::ensure_document_size(bytes.len(), limit::UPLOAD_CEILING).map_err(ApiError::from)?;
+    let meta = state
+        .docs
+        .save_file(&doc_id, bytes.to_vec())
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(DocMetaDto::from(meta)))
+}
+
 /// `GET /api/docs/:doc_id/file` — the raw bytes of one entry.
 ///
 /// This is what the Desktop's document viewers (and the "save as" escape
