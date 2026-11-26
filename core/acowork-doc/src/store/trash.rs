@@ -42,23 +42,39 @@ impl TrashStore {
         Ok(())
     }
 
-    /// Drop a document's content into `.trash/{stamp}_{safe_name}.md`
+    /// Body file name of one slot — the single rule [`Self::record_doc`]
+    /// writes and [`Self::find`] reads back: `{stamp}_{safe_name}.{ext}`,
+    /// with `md` for a Markdown document.
+    fn body_path_for(&self, entry: &TrashEntry) -> PathBuf {
+        let stamp = entry.deleted_at.format("%Y%m%dT%H%M%S").to_string();
+        let safe_name = entry.original_name.replace(['\\', '/', '.'], "_");
+        self.dir().join(format!(
+            "{stamp}_{safe_name}.{}",
+            entry.ext.as_deref().unwrap_or("md")
+        ))
+    }
+
+    /// Drop a document's bytes into `.trash/{stamp}_{safe_name}[.{ext}]`
     /// and write the matching `.meta.json` sidecar. Returns the trash
     /// slot filename so the caller can later restore / purge.
+    ///
+    /// Bytes, not `&str`: an imported file (pdf / docx / image …) is not
+    /// UTF-8 and must survive a delete→restore round-trip unchanged.
     pub async fn record_doc(
         &self,
         entry: &TrashEntry,
-        content: &str,
+        content: &[u8],
     ) -> Result<String> {
         self.ensure().await?;
         // Cross-check: refuse to escape the library root.
-        let dest_dir = ensure_within_library(&self.root, &self.dir())?;
-        let stamp = entry.deleted_at.format("%Y%m%dT%H%M%S").to_string();
-        let safe_name = entry.original_name.replace(['\\', '/', '.'], "_");
-        let stamped = format!("{stamp}_{safe_name}.md");
-        let body_path = dest_dir.join(&stamped);
+        let _dest_dir = ensure_within_library(&self.root, &self.dir())?;
+        let body_path = self.body_path_for(entry);
+        let stamped = body_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let meta_path = body_path.with_extension("meta.json");
-        fs::write(&body_path, content.as_bytes()).await?;
+        fs::write(&body_path, content).await?;
         atomic_write_json(&meta_path, entry).await?;
         Ok(stamped)
     }
@@ -92,10 +108,7 @@ impl TrashStore {
         let entries = self.list_entries().await?;
         for entry in entries {
             if entry.trash_id == trash_id {
-                let dir = self.dir();
-                let stamp = entry.deleted_at.format("%Y%m%dT%H%M%S").to_string();
-                let safe_name = entry.original_name.replace(['\\', '/', '.'], "_");
-                let body = dir.join(format!("{stamp}_{safe_name}.md"));
+                let body = self.body_path_for(&entry);
                 if !body.exists() {
                     return Err(DocError::TrashMissing(trash_id.to_string()));
                 }
@@ -106,8 +119,8 @@ impl TrashStore {
     }
 
     /// Read the content file of a trash slot.
-    pub async fn read_content(&self, body_path: &Path) -> Result<String> {
-        Ok(fs::read_to_string(body_path).await?)
+    pub async fn read_bytes(&self, body_path: &Path) -> Result<Vec<u8>> {
+        Ok(fs::read(body_path).await?)
     }
 
     /// Drop a trash slot (meta + content).
@@ -172,14 +185,12 @@ impl TrashStore {
         new_original_name: &str,
     ) -> Result<()> {
         let (mut entry, body) = self.find(trash_id).await?;
-        let stamp = entry.deleted_at.format("%Y%m%dT%H%M%S").to_string();
-        let new_safe = new_original_name.replace(['\\', '/', '.'], "_");
-        let new_body = self.dir().join(format!("{stamp}_{new_safe}.md"));
+        entry.original_name = new_original_name.to_string();
+        let new_body = self.body_path_for(&entry);
         let new_meta = new_body.with_extension("meta.json");
         if body != new_body {
             fs::rename(&body, &new_body).await?;
         }
-        entry.original_name = new_original_name.to_string();
         atomic_write_json(&new_meta, &entry).await?;
         // Remove old meta if filename changed.
         let old_meta = body.with_extension("meta.json");
@@ -215,6 +226,7 @@ mod tests {
             file_size_bytes: 0,
             creator: None,
             acl: None,
+            ext: None,
         }
     }
 
@@ -223,7 +235,7 @@ mod tests {
         let (_tmp, store) = tmp_store();
         let now = Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
         let e = entry("tr-aaaaaaaaaaaa", "PRD", now);
-        store.record_doc(&e, "# hello").await.unwrap();
+        store.record_doc(&e, b"# hello").await.unwrap();
         let list = store.list_entries().await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].trash_id, "tr-aaaaaaaaaaaa");
@@ -235,18 +247,18 @@ mod tests {
         let (_tmp, store) = tmp_store();
         let now = Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
         let e = entry("tr-bbbbbbbbbbbb", "DOC", now);
-        store.record_doc(&e, "body").await.unwrap();
+        store.record_doc(&e, b"body").await.unwrap();
         let (meta, body) = store.find("tr-bbbbbbbbbbbb").await.unwrap();
         assert_eq!(meta.original_name, "DOC");
-        let content = store.read_content(&body).await.unwrap();
-        assert_eq!(content, "body");
+        let content = store.read_bytes(&body).await.unwrap();
+        assert_eq!(content, b"body");
     }
 
     #[tokio::test]
     async fn purge_removes_both_files() {
         let (_tmp, store) = tmp_store();
         let now = Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
-        store.record_doc(&entry("tr-cccccccccccc", "X", now), "y").await.unwrap();
+        store.record_doc(&entry("tr-cccccccccccc", "X", now), b"y").await.unwrap();
         store.purge("tr-cccccccccccc").await.unwrap();
         assert_eq!(store.list_entries().await.unwrap().len(), 0);
     }
@@ -256,8 +268,8 @@ mod tests {
         let (_tmp, store) = tmp_store();
         let old = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let recent = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
-        store.record_doc(&entry("tr-old00000000", "A", old), "x").await.unwrap();
-        store.record_doc(&entry("tr-new00000000", "B", recent), "y").await.unwrap();
+        store.record_doc(&entry("tr-old00000000", "A", old), b"x").await.unwrap();
+        store.record_doc(&entry("tr-new00000000", "B", recent), b"y").await.unwrap();
         let cutoff = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
         let removed = store.purge_expired(cutoff).await.unwrap();
         assert_eq!(removed, 1);

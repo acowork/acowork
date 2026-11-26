@@ -23,6 +23,7 @@ import {
   Plus,
   RefreshCw,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useDocTreeStore } from "../../stores/doc/treeStore";
@@ -37,6 +38,8 @@ import { DOC_ROOT_DIR_ID } from "../../lib/doc-types";
 import type { DirMeta, DocMeta, LibraryMeta } from "../../lib/doc-types";
 import { LibraryIcon } from "./LibraryIcon";
 import { DocLibraryDialog } from "./DocLibraryDialog";
+import { DOC_IMPORT_ACCEPT } from "../../lib/doc-api";
+import { focusedDocDirId } from "./docFocusDir";
 
 /** inline 编辑态：新建或重命名 */
 type InlineEdit =
@@ -65,6 +68,9 @@ export function DocTreeSidebar({ width }: { width?: number }) {
   const clearTreeError = useDocTreeStore((s) => s.clearError);
 
   const [editing, setEditing] = useState<InlineEdit>(null);
+  const [uploading, setUploading] = useState(false);
+  // 本机上传：隐藏的 file input 只负责弹选择框，落盘走 store.importFiles。
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null);
   // 文档库对话框：新建 / 编辑（名称、图标、描述、所有者）。
   const [libraryDialog, setLibraryDialog] = useState<
@@ -87,6 +93,30 @@ export function DocTreeSidebar({ width }: { width?: number }) {
     toast.addToast({ type: "error", message: treeError });
     clearTreeError();
   }, [treeError, toast, clearTreeError]);
+
+  /** 上传到「当前焦点目录」：选中的目录 / 选中文档所在目录 / 根。 */
+  const handleUploadFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const targetDirId = focusedDocDirId(
+      useDocTreeStore.getState().nodes,
+      useDocTreeStore.getState().selectedNode,
+    );
+    setUploading(true);
+    try {
+      const created = await useDocTreeStore.getState().importFiles(targetDirId, Array.from(files));
+      if (created.length > 0) {
+        toast.addToast({
+          type: "success",
+          message: t("doc.upload.uploaded", { count: created.length }),
+        });
+      }
+      // 失败原因已进 store.error（上面的 effect 会 toast）。
+    } finally {
+      setUploading(false);
+      // 允许重复选同一个文件（否则 change 不再触发）
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+    }
+  };
 
   const handleCreate = (kind: "dir" | "doc", parentDirId: string) => {
     if (!healthy) return;
@@ -125,6 +155,27 @@ export function DocTreeSidebar({ width }: { width?: number }) {
         >
           <Plus className="h-3.5 w-3.5" />
         </IconBtn>
+        <IconBtn
+          label={t("doc.upload.label")}
+          title={t("doc.upload.label")}
+          disabled={healthy === false || uploading}
+          onClick={() => uploadInputRef.current?.click()}
+        >
+          {uploading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+          ) : (
+            <Upload className="h-3.5 w-3.5" aria-hidden />
+          )}
+        </IconBtn>
+        <input
+          ref={uploadInputRef}
+          type="file"
+          multiple
+          accept={DOC_IMPORT_ACCEPT}
+          className="hidden"
+          aria-label={t("doc.upload.label")}
+          onChange={(e) => void handleUploadFiles(e.target.files)}
+        />
         <IconBtn
           label={t("common.refresh")}
           disabled={healthy === false || refreshingVisible}
@@ -783,6 +834,11 @@ function DocRow({
               文件只在选中时 medium，展开一层就忽粗忽细。选中态由行底色
               （accent/10 + accent 文字色）承担，见上方容器。 */}
           <span className="truncate font-medium">{doc.name}</span>
+          {/* 导入的文件条目：标出格式，否则同名的 a.pdf / a.docx 长得一样，
+              用户也看不出它不能被当文本编辑。 */}
+          {doc.ext ? (
+            <span className="shrink-0 text-[10px] uppercase text-text-tertiary">{doc.ext}</span>
+          ) : null}
         </button>
         <span className="hidden shrink-0 items-center group-hover:flex group-focus-within:flex">
           <IconBtn

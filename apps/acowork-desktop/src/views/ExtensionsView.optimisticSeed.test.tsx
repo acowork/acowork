@@ -43,7 +43,7 @@ vi.mock("../i18n/useTranslation", () => ({
 import { ExtensionsView } from "./ExtensionsView";
 import { writeCatalog } from "../lib/catalogCache";
 import { getGatewayUrl } from "../lib/config";
-import { DEFAULT_APP_GALLERY_INDEX_URL } from "../lib/appGallery";
+import { DEFAULT_APP_GALLERY_INDEX_URL, RECOMMENDED_APP_IDS } from "../lib/appGallery";
 import type { AppDto } from "../lib/apps-api";
 
 const FIGCRAFT: AppDto = {
@@ -278,5 +278,96 @@ describe("ExtensionsView app status", () => {
     await waitFor(() => expect(screen.getByLabelText("extensions.statusReady")).toBeTruthy(), {
       timeout: 4000,
     });
+  });
+});
+
+describe("ExtensionsView recommendations (the Apps home state)", () => {
+  /** An installed app with a real id — the `installed` half of the fixture. */
+  function installed(id: string): AppDto {
+    return { ...FIGCRAFT, id, name: id };
+  }
+
+  /** Every recommended id in the catalog, all with a downloadable package. */
+  function recommendedIndex() {
+    return {
+      schema_version: 1,
+      base_url: "https://gallery.acowork.ai/data",
+      apps: RECOMMENDED_APP_IDS.map((id) => ({
+        id,
+        name: id,
+        summary: `${id} summary`,
+        publisher: { id: "acowork", display_name: "ACowork" },
+        license: "MIT",
+        repository: `https://github.com/acowork/${id}-app`,
+        categories: [],
+        icon: "",
+        latest_version: "1.0.0",
+        package: {
+          url: `https://github.com/acowork/${id}-app/releases/download/v1/${id}.app.zip`,
+          sha256: "0".repeat(64),
+          size_bytes: 20_000_000,
+        },
+        readme_md: "",
+        source_path: `apps/acowork/${id}-app`,
+      })),
+    };
+  }
+
+  function mount(installedIds: string[]) {
+    h.listApps.mockResolvedValue(installedIds.map(installed));
+    h.fetchGalleryIndex.mockResolvedValue(recommendedIndex() as never);
+    h.listInstallJobs.mockResolvedValue([]);
+    // Echo the hint id the way the Gateway does, so the batch's own jobs map
+    // back onto the tiles they came from.
+    h.startAppInstallFromUrl.mockImplementation(
+      async (_url: string, _sha: string, hint: string) => ({
+        job_id: `job-${hint}`,
+        hint_id: hint,
+        phase: "download",
+        received_bytes: 0,
+        total_bytes: 20_000_000,
+        started_at: 1_700_000_000,
+      }),
+    );
+    return render(<ExtensionsView />);
+  }
+
+  beforeEach(() => {
+    localStorage.clear();
+    h.startAppInstallFromUrl.mockClear();
+  });
+
+  it("one click installs the missing ones only — never what is already there", async () => {
+    mount(["wordcraft", "pdfcraft"]);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "extensions.recommendedInstallAll" }),
+    );
+    await waitFor(() => expect(h.startAppInstallFromUrl).toHaveBeenCalledTimes(2));
+    // Catalog order, and the two installed apps are not re-downloaded.
+    expect(h.startAppInstallFromUrl.mock.calls.map((c) => c[2])).toEqual([
+      "gridcraft",
+      "deckcraft",
+    ]);
+  });
+
+  it("all four installed: the install button is gone, the tiles open instead", async () => {
+    mount([...RECOMMENDED_APP_IDS]);
+
+    expect(await screen.findByText("extensions.recommendedAllInstalled")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "extensions.recommendedInstallAll" })).toBeNull();
+    // One Open per tile — the left list has none while nothing is selected.
+    expect(screen.getAllByRole("button", { name: "extensions.open" })).toHaveLength(4);
+  });
+
+  it("a batch in flight disables the button instead of starting the downloads twice", async () => {
+    mount(["wordcraft", "pdfcraft"]);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "extensions.recommendedInstallAll" }),
+    );
+    const busy = await screen.findByRole("button", { name: "extensions.installing" });
+    expect((busy as HTMLButtonElement).disabled).toBe(true);
+    expect(h.startAppInstallFromUrl).toHaveBeenCalledTimes(2);
   });
 });

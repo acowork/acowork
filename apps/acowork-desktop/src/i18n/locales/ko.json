@@ -1030,6 +1030,7 @@
       "matchWholeWord": "단어 단위 검색"
     },
     "contextMenu": {
+      "addToDocLibrary": "문서 라이브러리에 추가",
       "addToChat": "채팅에 추가",
       "preview": "미리보기",
       "injectContext": "컨텍스트 주입",
@@ -2120,6 +2121,23 @@
     "title": "문서 라이브러리",
     "sidebarLabel": "문서",
     "treeLabel": "문서 트리",
+    "expandDir": "디렉터리 펼치기",
+    "collapseDir": "디렉터리 접기",
+    "upload": {
+      "label": "현재 디렉터리에 파일 업로드",
+      "uploaded": "파일 {{count}}개를 업로드했습니다"
+    },
+    "filePreview": {
+      "addToChatUnavailable": "문서 라이브러리 파일은 대화에 추가할 수 없습니다"
+    },
+    "importTarget": {
+      "title": "문서 라이브러리에 추가",
+      "file": "파일: {{name}}",
+      "library": "라이브러리",
+      "libraryRoot": "(라이브러리 루트)",
+      "confirm": "추가",
+      "noLibrary": "문서 라이브러리가 없습니다. 먼저 Doc 보기에서 만들어 주세요."
+    },
     "newDir": "새 폴더",
     "newDoc": "새 문서",
     "rename": "이름 바꾸기",
@@ -2376,7 +2394,11 @@
     "homepage": "홈페이지",
     "upstream": "업스트림",
     "noReadme": "README가 없습니다.",
-    "selectHint": "앱을 선택해 세부 정보를 보세요."
+    "recommendedTitle": "추천",
+    "recommendedSubtitle": "문서 미리보기와 편집에 가장 많이 쓰는 앱 4개.",
+    "recommendedInstallAll": "한 번에 설치 ({{count}})",
+    "recommendedAllInstalled": "추천 앱이 모두 설치되어 있습니다.",
+    "recommendedNoPackage": "설치 패키지 없음"
   },
   "deliverables": {
     "title": "이번 턴 산출물 ({{count}})",

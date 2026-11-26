@@ -39,6 +39,12 @@ export interface DocMeta {
   creator?: string | null;
   /** 显式 ACL；缺省 = 继承父目录链（设计 §9） */
   acl?: Ace[] | null;
+  /**
+   * 导入文件的原始扩展名（小写、不带点）。缺省 = 普通 Markdown 文档。
+   * 有值时表示这条目是**只读文件**（pdf/docx/图片…）：没有正文可编辑，
+   * 字节走 `GET /api/doc/docs/{doc_id}/file`，预览复用工作区文档预览组件。
+   */
+  ext?: string | null;
 }
 
 export interface DirMeta {

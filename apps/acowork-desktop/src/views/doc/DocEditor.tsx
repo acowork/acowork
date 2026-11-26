@@ -34,6 +34,7 @@ import { MarkdownToolbar } from "../../components/markdown/MarkdownToolbar";
 import { registerMarkdownTableNavigation } from "../../components/markdown/editorAid";
 import { cn } from "../../lib/utils";
 import { DocMarkdownView } from "./DocMarkdownView";
+import { DocFilePreview } from "./DocFilePreview";
 // 仅类型引用（懒加载边界：DocRichEditor 运行时经动态 import() 进入）。
 import type { DocRichEditor } from "../../components/doc/editor/DocRichEditor";
 
@@ -215,6 +216,16 @@ export function DocEditor() {
   }
 
   if (!doc) return null;
+
+  // 导入的文件条目（pdf / docx / 图片…）没有 Markdown 正文可编辑：整块让给
+  // 预览面板，用的就是右侧工作区那套 viewer（见 DocFilePreview）。
+  if (doc.meta.ext) {
+    return (
+      <div className="h-full min-h-0">
+        <DocFilePreview doc={doc.meta} />
+      </div>
+    );
+  }
 
   const handleSave = async () => {
     const ok = await save();

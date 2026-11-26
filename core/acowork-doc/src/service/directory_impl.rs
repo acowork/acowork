@@ -303,6 +303,7 @@ impl DirectoryService for LibraryDirectoryService {
             String,
             String,
             String,
+            Option<String>,
             std::path::PathBuf,
             Option<String>,
             Option<Vec<crate::types::Ace>>,
@@ -314,11 +315,12 @@ impl DirectoryService for LibraryDirectoryService {
                     continue;
                 }
                 let dir_path = self.store.dir_path(&d)?;
-                let file_path = dir_path.join(format!("{}.md", f.name));
+                let file_path = dir_path.join(f.file_name());
                 to_delete.push((
                     f.doc_id.clone(),
                     d.clone(),
                     f.name.clone(),
+                    f.ext.clone(),
                     file_path,
                     f.creator.clone(),
                     f.acl.clone(),
@@ -330,17 +332,20 @@ impl DirectoryService for LibraryDirectoryService {
                 }
             }
         }
-        for (doc_id, parent_dir_id, name, file_path, creator, acl) in &to_delete {
+        for (doc_id, parent_dir_id, name, ext, file_path, creator, acl) in &to_delete {
             if !file_path.exists() {
                 continue;
             }
-            match fs::read_to_string(file_path).await {
+            // Bytes, not text: the subtree may hold imported files
+            // (pdf / docx / images) that must survive into the trash.
+            match fs::read(file_path).await {
                 Ok(content) => {
                     let entry = TrashEntry {
                         trash_id: generate_trash_id(),
                         doc_id: Some(doc_id.clone()),
                         original_dir_id: parent_dir_id.clone(),
                         original_name: name.clone(),
+                        ext: ext.clone(),
                         deleted_at: now,
                         file_size_bytes: content.len() as u64,
                         // Snapshot ACL ownership for the delete→restore

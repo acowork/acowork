@@ -904,3 +904,137 @@ async fn library_create_rejects_duplicate_and_bad_icon() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(TestServer::error_code(&body), "bad_request");
 }
+// ── file import: upload → raw bytes → delete → restore ─────────────────
+
+impl TestServer {
+    /// `POST /docs/import?dir_id=…` with a hand-built multipart body (no
+    /// extra reqwest feature needed — the wire format is just bytes).
+    async fn upload(&self, dir_id: &str, file_name: &str, bytes: &[u8]) -> (StatusCode, Value, Vec<u8>) {
+        const BOUNDARY: &str = "acowork-doc-test-boundary";
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+        let resp = self
+            .client
+            .post(format!("{}/docs/import?dir_id={dir_id}", self.base))
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status();
+        let raw = resp.bytes().await.unwrap().to_vec();
+        let value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
+        (status, value, raw)
+    }
+
+    /// Raw bytes of one entry (the endpoint the viewers read).
+    async fn file_bytes(&self, doc_id: &str) -> (StatusCode, Option<String>, Vec<u8>) {
+        let resp = self
+            .client
+            .get(format!("{}/docs/{doc_id}/file", self.base))
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status();
+        let mime = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        (status, mime, resp.bytes().await.unwrap().to_vec())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn import_file_round_trips_bytes_and_survives_the_trash() {
+    let srv = spawn().await;
+    let dir_id = srv.mkdir("root", "资料").await;
+
+    // Non-UTF-8 bytes on purpose: a pdf is not text, and every path that
+    // touches it (store / read / trash / restore) must move bytes around.
+    let pdf: Vec<u8> = b"%PDF-1.4\n%\xff\xfe\x00binary".to_vec();
+    let (status, body, _) = srv.upload(&dir_id, "设计方案.pdf", &pdf).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let doc_id = body["doc_id"].as_str().unwrap().to_string();
+    assert_eq!(body["name"], "设计方案");
+    assert_eq!(body["ext"], "pdf", "extension must survive the round-trip");
+
+    // JSON read: no Markdown body, but the meta says it is a file.
+    let (status, body) = srv.get(&format!("/docs/{doc_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["content"], "");
+    assert_eq!(body["meta"]["ext"], "pdf");
+
+    // Raw bytes: byte-identical, MIME from the extension.
+    let (status, mime, bytes) = srv.file_bytes(&doc_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(mime.as_deref(), Some("application/pdf"));
+    assert_eq!(bytes, pdf);
+
+    // It is a normal tree entry.
+    let (_, tree) = srv.get(&format!("/tree?dir_id={dir_id}")).await;
+    assert_eq!(tree["files"][0]["ext"], "pdf");
+
+    // Editing it as Markdown is refused, not silently destructive.
+    let (status, body) = srv
+        .put(
+            &format!("/docs/{doc_id}"),
+            json!({ "base_version": 1, "content": "x" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // A same-stem upload collides (one entry per name in a directory).
+    let (status, body, _) = srv.upload(&dir_id, "设计方案.pdf", &pdf).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(TestServer::error_code(&body), "name_conflict");
+
+    // Delete → recycle bin → restore: bytes intact, extension intact.
+    let (status, _) = srv.delete(&format!("/docs/{doc_id}")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, trash) = srv.get("/trash").await;
+    assert_eq!(status, StatusCode::OK);
+    let trash_id = trash[0]["trash_id"].as_str().unwrap().to_string();
+    assert_eq!(trash[0]["original_name"], "设计方案");
+    let (status, restored) = srv
+        .post(&format!("/trash/{trash_id}/restore"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["ext"], "pdf");
+    let (_, _, back) = srv.file_bytes(restored["doc_id"].as_str().unwrap()).await;
+    assert_eq!(back, pdf, "restored bytes must be byte-identical");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn import_text_file_becomes_an_editable_document() {
+    let srv = spawn().await;
+    let (status, body, _) = srv.upload("root", "notes.txt", b"# hi\nbody").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["name"], "notes");
+    assert_eq!(body["ext"], Value::Null, "text becomes a Markdown document");
+    let doc_id = body["doc_id"].as_str().unwrap().to_string();
+    let (_, read) = srv.get(&format!("/docs/{doc_id}")).await;
+    assert_eq!(read["content"], "# hi\nbody");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn import_rejects_unsupported_and_traversing_names() {
+    let srv = spawn().await;
+    let (status, body, _) = srv.upload("root", "evil.exe", b"MZ").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(TestServer::error_code(&body), "bad_request");
+    // A whole path is reduced to its basename, never joined as-is.
+    let (status, body, _) = srv.upload("root", "../../escape.txt", b"x").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["name"], "escape");
+}

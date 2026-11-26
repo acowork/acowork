@@ -31,6 +31,16 @@ const JSON_ESCAPE_WORST_CASE: usize = 6;
 /// small argument objects).
 const ENVELOPE_SLACK: usize = 64 * 1024;
 
+/// Wire ceiling for one uploaded file (`POST /docs/import`).
+///
+/// A third number, not a reuse of the two above: an import body is the file
+/// itself (no JSON escaping), and a pdf / pptx is not a document that the
+/// `max_doc_size_bytes` knob was ever about. Deliberately equal to the
+/// Gateway's `GLOBAL_BODY_LIMIT` (`core/acowork-gateway/src/http/routes.rs`) —
+/// anything larger is cut upstream, so a bigger number here would only be
+/// unreachable reach.
+pub const UPLOAD_CEILING: usize = 64 * 1024 * 1024;
+
 /// Maximum size of an HTTP request body that may carry `content_max` bytes of
 /// document content once JSON-escaped.
 pub fn transport_ceiling(content_max: usize) -> usize {

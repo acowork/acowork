@@ -903,6 +903,7 @@
       "matchWholeWord": "Match whole word"
     },
     "contextMenu": {
+      "addToDocLibrary": "Add to document library",
       "addToChat": "Add to Chat",
       "preview": "Preview",
       "injectContext": "Inject Context",
@@ -2554,6 +2555,23 @@
     "title": "Docs",
     "sidebarLabel": "Docs",
     "treeLabel": "Document tree",
+    "expandDir": "Expand directory",
+    "collapseDir": "Collapse directory",
+    "upload": {
+      "label": "Upload a file to the current directory",
+      "uploaded": "Uploaded {{count}} file(s)"
+    },
+    "filePreview": {
+      "addToChatUnavailable": "Files in the document library can't be added to a chat"
+    },
+    "importTarget": {
+      "title": "Add to document library",
+      "file": "File: {{name}}",
+      "library": "Library",
+      "libraryRoot": "(library root)",
+      "confirm": "Add",
+      "noLibrary": "No document library yet — create one in the Doc view first."
+    },
     "newDir": "New folder",
     "newDoc": "New document",
     "rename": "Rename",
@@ -2821,7 +2839,11 @@
     "homepage": "Homepage",
     "upstream": "Upstream",
     "noReadme": "No README for this app.",
-    "selectHint": "Select an app to view details."
+    "recommendedTitle": "Recommended",
+    "recommendedSubtitle": "The four most-used document apps — preview and edit.",
+    "recommendedInstallAll": "Install all ({{count}})",
+    "recommendedAllInstalled": "All recommended apps are installed.",
+    "recommendedNoPackage": "No package available"
   },
   "deliverables": {
     "title": "Deliverables from this turn ({{count}})",

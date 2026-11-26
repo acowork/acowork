@@ -1028,6 +1028,7 @@
       "matchWholeWord": "全字匹配"
     },
     "contextMenu": {
+      "addToDocLibrary": "加入文件庫",
       "addToChat": "加入對話",
       "preview": "預覽",
       "injectContext": "注入上下文",
@@ -2110,6 +2111,23 @@
     "title": "文件庫",
     "sidebarLabel": "文件庫",
     "treeLabel": "文件目錄樹",
+    "expandDir": "展開目錄",
+    "collapseDir": "摺疊目錄",
+    "upload": {
+      "label": "上傳檔案到目前目錄",
+      "uploaded": "已上傳 {{count}} 個檔案"
+    },
+    "filePreview": {
+      "addToChatUnavailable": "文件庫檔案無法加入對話"
+    },
+    "importTarget": {
+      "title": "加入文件庫",
+      "file": "檔案：{{name}}",
+      "library": "文件庫",
+      "libraryRoot": "（庫根目錄）",
+      "confirm": "加入",
+      "noLibrary": "還沒有文件庫，請先在文件檢視裡新建一個。"
+    },
     "newDir": "新增資料夾",
     "newDoc": "新增文件",
     "rename": "重新命名",
@@ -2366,7 +2384,11 @@
     "homepage": "首頁",
     "upstream": "上游專案",
     "noReadme": "此應用尚無說明文件。",
-    "selectHint": "選擇一個應用以檢視詳細資料。"
+    "recommendedTitle": "推薦",
+    "recommendedSubtitle": "文件預覽與編輯，最常用的四個應用。",
+    "recommendedInstallAll": "一鍵安裝（{{count}} 個）",
+    "recommendedAllInstalled": "推薦應用已全部安裝。",
+    "recommendedNoPackage": "安裝包不可用"
   },
   "deliverables": {
     "title": "本輪產出（{{count}}）",
