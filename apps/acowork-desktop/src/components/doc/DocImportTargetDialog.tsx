@@ -14,6 +14,7 @@ import { ChevronRight, Folder, Loader2 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { listLibraries, getTree } from "../../lib/doc-api";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import type { DirMeta, DocTreeNode } from "../../lib/doc-types";
 
 interface Props {
@@ -165,7 +166,10 @@ export function DocImportTargetDialog({ fileName, onCancel, onConfirm }: Props) 
                 <span className="px-1 pb-1 text-10 uppercase tracking-wide text-text-tertiary">
                   {t("doc.importTarget.library")}
                 </span>
-                <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border-divider p-1">
+                <OverlayScrollbar
+                  fill="flex"
+                  className="rounded-md border border-border-divider p-1"
+                >
                   {libraries.map((lib) => (
                     <button
                       key={lib.dir_id}
@@ -182,11 +186,14 @@ export function DocImportTargetDialog({ fileName, onCancel, onConfirm }: Props) 
                       {lib.name}
                     </button>
                   ))}
-                </div>
+                </OverlayScrollbar>
               </div>
 
               {/* 目录选择（默认 = 库本身） */}
-              <div className="min-h-0 flex-1 overflow-auto rounded-md border border-border-divider p-1">
+              <OverlayScrollbar
+                fill="flex"
+                className="rounded-md border border-border-divider p-1"
+              >
                 <div
                   className={cn(
                     "flex items-center gap-1 rounded-md px-1 py-1 text-xs",
@@ -216,7 +223,7 @@ export function DocImportTargetDialog({ fileName, onCancel, onConfirm }: Props) 
                   </button>
                 </div>
                 {libraryId ? renderDirRows(libraryId, 1) : null}
-              </div>
+              </OverlayScrollbar>
             </div>
           )}
         </div>
