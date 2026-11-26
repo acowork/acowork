@@ -600,6 +600,38 @@ impl GatewayClient {
         parse_gateway_response(resp).await
     }
 
+    /// `POST /api/agents/{instance_id}/upgrade` — replace the package content
+    /// of an EXISTING instance (ADR-055 §3.2).
+    ///
+    /// The route variable is the INSTANCE identity, not the package id
+    /// (ADR-073), and the whole package is re-uploaded. The Gateway spools it
+    /// into the package registry and dispatches the node-side upgrade, which
+    /// swaps every file under `{agent_id}/{instance_id}/` except `workspace/`:
+    /// sessions, settings and the instance's own name survive.
+    ///
+    /// Answers 202 — the async completion signal is the retained inventory
+    /// entry carrying the new version, so callers converge through
+    /// [`GatewayClient::wait_for_agent_version_change`]. The node refuses to
+    /// upgrade a RUNNING instance, so the caller stops it first
+    /// (`commands::agent_library::upgrade_instance`).
+    pub async fn upgrade_agent(
+        &self,
+        instance_id: &str,
+        package_bytes: &[u8],
+        node_id: &str,
+    ) -> Result<GenericMessageResponse> {
+        let url = format!("{}/api/agents/{}/upgrade", self.base_url, instance_id);
+        let resp = self
+            .send(|| {
+                Ok(self
+                    .client
+                    .post(&url)
+                    .multipart(upload_form(package_bytes, node_id)?))
+            })
+            .await?;
+        parse_gateway_response(resp).await
+    }
+
     /// ADR-059 §6 — wait until the agent appears in the Gateway
     /// inventory (`GET /api/agents/{id}` returns 200).
     ///
@@ -625,6 +657,48 @@ impl GatewayClient {
                 anyhow::bail!(
                     "Agent '{}' did not appear in the Gateway inventory within {:.0}s",
                     agent_id,
+                    timeout.as_secs_f64()
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    }
+
+    /// Wait until an instance's inventory version differs from `previous` —
+    /// the upgrade's completion signal (`GET /api/agents/{id}`).
+    ///
+    /// "Differs", not "equals the version the caller uploaded": the bytes are
+    /// the node's to parse, so a caller whose idea of the new version is wrong
+    /// must still terminate this wait instead of timing out after an upgrade
+    /// that actually succeeded. A 404 is expected while the node swaps the
+    /// instance directory (`state.remove_installed` → reinstall), so it is
+    /// treated as "not yet" rather than an error.
+    pub async fn wait_for_agent_version_change(
+        &self,
+        instance_id: &str,
+        previous: &str,
+        timeout: std::time::Duration,
+    ) -> Result<AgentDetailResponse> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let resp = self
+                .send(|| {
+                    Ok(self
+                        .client
+                        .get(format!("{}/api/agents/{}", self.base_url, instance_id)))
+                })
+                .await?;
+            if resp.status().is_success() {
+                let detail: AgentDetailResponse = parse_gateway_response(resp).await?;
+                if detail.version != previous {
+                    return Ok(detail);
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "Instance '{}' still reports version '{}' after {:.0}s",
+                    instance_id,
+                    previous,
                     timeout.as_secs_f64()
                 );
             }

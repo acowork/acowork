@@ -11,13 +11,14 @@
  *
  * Deliberately absent, and not to be added here:
  *   - any signature / channel wording (D13 / REQ-031 / A10);
- *   - an "installed" badge (D3 / REQ-026): existence is the Gateway's answer,
- *     the client does not compute state;
  *   - de-duplication by `agent_id` (REQ-030): one file is one row, so two
  *     versions of a package stay visible side by side.
  *
- * The row primary button is `ensure` (idempotent); the row menu's "install
- * another instance" is `/install` (multi-instance is legal, ADR-073).
+ * The action bar is the Hub card's (AgentInstallActions): 安装 adds an instance
+ * — idempotent `/ensure` while the target node holds none, `/install` after —
+ * and 升级 replaces the instances whose version is older than this file
+ * (REQ-035–038). Both are computed by the dialog, which owns the target node
+ * and the inventory; this component only renders them.
  *
  * The row is drawn with the Hub card's skeleton — avatar block, name + role,
  * two-line description, chip row, divider, action bar — because the two tabs are
@@ -26,7 +27,7 @@
  * `skills/`), so the Local card is not the poorer one: a shipped `.agent`
  * carries the same things its published Hub entry does (see `read_package`).
  */
-import { AlertTriangle, Loader2, MoreHorizontal, Plus, X } from "lucide-react";
+import { AlertTriangle, Plus, X } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import {
   formatSizeBytes,
@@ -37,6 +38,7 @@ import {
 } from "../../lib/agentHub";
 import { InlinedAgentAvatar } from "../common/AgentAvatar";
 import { cn } from "../../lib/utils";
+import { AgentInstallActions, type InstallAction } from "./AgentInstallActions";
 
 interface LocalAgentLibraryProps {
   /** `null` = the first enumeration has not answered yet. */
@@ -46,10 +48,23 @@ interface LocalAgentLibraryProps {
   /** Installs are serialized: everything is disabled while one is in flight. */
   disabled: boolean;
   disabledReason?: string;
-  /** `path` of the row whose install is in flight — only it renders busy. */
+  /** `path` of the row whose action is in flight — only it renders busy. */
   busyPath: string | null;
-  onInstall: (row: LocalAgentRow) => void;
-  onInstallAnother: (row: LocalAgentRow, e: React.MouseEvent) => void;
+  /** Which action that is: the row shows 升级 or 安装 as busy accordingly. */
+  busyAction: InstallAction | null;
+  /**
+   * What the target node already holds of this row's package, and whether the
+   * row's 安装 button is the idempotent one. Supplied by the dialog because it
+   * owns the node selection and the inventory (REQ-035/REQ-005).
+   */
+  installStateOf: (row: LocalAgentRow) => {
+    instanceCount: number;
+    outdatedIds: string[];
+    installIdempotent: boolean;
+  };
+  /** `ensure` = the idempotent `/ensure`; `false` = land one more instance. */
+  onInstall: (row: LocalAgentRow, ensure: boolean) => void;
+  onUpgrade: (row: LocalAgentRow, instanceIds: string[]) => void;
   onAddFile: () => void;
   /**
    * Rendered between the rows and the add entry: the file the user just picked
@@ -66,8 +81,10 @@ export function LocalAgentLibrary({
   disabled,
   disabledReason,
   busyPath,
+  busyAction,
+  installStateOf,
   onInstall,
-  onInstallAnother,
+  onUpgrade,
   onAddFile,
   pending,
 }: LocalAgentLibraryProps) {
@@ -107,17 +124,23 @@ export function LocalAgentLibrary({
             always present — an empty library still shows it. */}
         <AddAgentCard onClick={onAddFile} disabled={disabled} disabledReason={disabledReason} />
         {pending}
-        {rows.map((row) => (
-          <LocalAgentCard
-            key={row.path}
-            row={row}
-            busy={busyPath === row.path}
-            disabled={disabled}
-            disabledReason={disabledReason}
-            onInstall={() => onInstall(row)}
-            onMore={(e) => onInstallAnother(row, e)}
-          />
-        ))}
+        {rows.map((row) => {
+          const state = installStateOf(row);
+          return (
+            <LocalAgentCard
+              key={row.path}
+              row={row}
+              instanceCount={state.instanceCount}
+              outdatedCount={state.outdatedIds.length}
+              installIdempotent={state.installIdempotent}
+              busy={busyPath === row.path ? busyAction : null}
+              disabled={disabled}
+              disabledReason={disabledReason}
+              onInstall={() => onInstall(row, state.installIdempotent)}
+              onUpgrade={() => onUpgrade(row, state.outdatedIds)}
+            />
+          );
+        })}
       </div>
     </div>
   );
@@ -157,18 +180,25 @@ function AddAgentCard({
 
 function LocalAgentCard({
   row,
+  instanceCount,
+  outdatedCount,
+  installIdempotent,
   busy,
   disabled,
   disabledReason,
   onInstall,
-  onMore,
+  onUpgrade,
 }: {
   row: LocalAgentRow;
-  busy: boolean;
+  instanceCount: number;
+  outdatedCount: number;
+  installIdempotent: boolean;
+  /** The action in flight on THIS row, or `null` (REQ-014). */
+  busy: InstallAction | null;
   disabled: boolean;
   disabledReason?: string;
   onInstall: () => void;
-  onMore: (e: React.MouseEvent) => void;
+  onUpgrade: () => void;
 }) {
   const { t } = useTranslation();
   const broken = row.error !== null;
@@ -204,17 +234,6 @@ function LocalAgentCard({
             <p className="mt-0.5 line-clamp-2 text-xs text-text-tertiary">{row.description}</p>
           )}
         </div>
-        <button
-          type="button"
-          onClick={onMore}
-          disabled={blocked}
-          title={blockedReason}
-          aria-label={t("agentHub.moreActions")}
-          aria-haspopup="menu"
-          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
-        >
-          <MoreHorizontal className="h-4 w-4" />
-        </button>
       </div>
 
       {/* REQ-024: the file name is what the user sees in the folder and the
@@ -254,17 +273,19 @@ function LocalAgentCard({
           {permissionCount > 0 && (
             <span>{t("agentHub.localPermissionCount", { count: permissionCount })}</span>
           )}
+          {instanceCount > 0 && (
+            <span>{t("agentHub.instancesOnNode", { count: instanceCount })}</span>
+          )}
         </div>
-        <button
-          type="button"
-          onClick={onInstall}
+        <AgentInstallActions
+          outdatedCount={outdatedCount}
+          installIdempotent={installIdempotent}
+          installing={busy}
           disabled={blocked}
-          title={blockedReason}
-          className="btn-accent flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-          {busy ? t("agentHub.installing") : t("agentHub.install")}
-        </button>
+          disabledReason={blockedReason}
+          onInstall={onInstall}
+          onUpgrade={onUpgrade}
+        />
       </div>
     </article>
   );

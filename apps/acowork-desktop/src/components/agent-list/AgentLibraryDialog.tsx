@@ -27,12 +27,21 @@
  * the toast — and the footer Close button, the header `×`, Esc and the
  * overlay are the only ways out.
  *
- * Because the surface stays up, a primary button must not change meaning
- * under the cursor. A package installed during THIS visit keeps the
- * idempotent `ensure` on its primary button; the instance count rising does
- * not turn it into "install another" (REQ-005 — two clicks on the primary
- * button must not create two instances). A second instance is the `⋯`
- * menu's explicit job (REQ-006).
+ * Because the surface stays up, a button must not change meaning under the
+ * cursor. A package installed during THIS visit keeps the idempotent `ensure`
+ * on its 安装 button; the instance count rising does not turn it into "install
+ * another" (REQ-005 — two clicks on the same button must not create two
+ * instances).
+ *
+ * Two actions, never one re-labelled (REQ-035–038, components/agent-list/
+ * AgentInstallActions.tsx):
+ *   - 安装 adds an instance. Idempotent `/ensure` while the target node holds
+ *     none, `/install` once it does.
+ *   - 升级 replaces the instances whose version is older than this package
+ *     (`/agents/{instance_id}/upgrade`, per instance, `workspace/` preserved).
+ *     It only appears when such an instance exists — `/ensure` cannot stand in
+ *     for it, because presence is answered by package id and a newer package
+ *     would be a silent no-op.
  *
  * Drop handling rides the window-level `desktop://file-drop` channel rather
  * than HTML5 `dataTransfer`, because the install path reads a file from an
@@ -41,7 +50,7 @@
  * does not ALSO land in the chat as an attachment (lib/fileDropClaim.ts).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Loader2, MoreHorizontal, Search, ShieldAlert, X } from "lucide-react";
+import { AlertTriangle, Loader2, Search, ShieldAlert, X } from "lucide-react";
 import { open as openFilePicker } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -59,7 +68,6 @@ import { ErrorBox } from "../common/ErrorBox";
 import { NoNodeBanner } from "../nodes/NoNodeBanner";
 import { useNodeTopologyRefresh } from "../nodes/useNodeTopologyRefresh";
 import { usableNodesOf, noNodeDetailOf, noNodeDetailKey } from "../nodes/nodeAvailability";
-import { ContextMenu, useContextMenu, type ContextMenuItem } from "../common/ContextMenu";
 import { claimFileDrop, releaseFileDrop } from "../../lib/fileDropClaim";
 import {
   countInstancesOnNode,
@@ -75,24 +83,21 @@ import {
   installFromHub,
   inspectLocalPackage,
   listLocalAgentPackages,
+  outdatedInstancesOnNode,
   readCachedHubIndex,
   searchHubAgents,
+  upgradeFromHub,
+  upgradeLocalAgent,
   type HubAgent,
+  type InstalledInstanceRef,
   type LocalAgentList,
   type LocalAgentRow,
   type LocalPackageInfo,
 } from "../../lib/agentHub";
 import { LocalAgentLibrary } from "./LocalAgentLibrary";
+import { AgentInstallActions, type InstallAction } from "./AgentInstallActions";
 
 type Tab = "library" | "local";
-
-/**
- * What a row's "⋯" menu acts on. The Hub card and the local file row choose
- * the same item (`installAnother`) through different APIs — `/install` from the
- * catalog entry, and the file path from the library — so the payload has to
- * keep them apart.
- */
-type RowMenuPayload = { kind: "hub"; agentId: string } | { kind: "local"; path: string };
 
 /** Identity for this dialog in the window-level drop registry. */
 const DROP_OWNER = "agent-library-dialog";
@@ -162,7 +167,13 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
   // card "Installing" reads as N parallel installs and hides which one moved.
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [confirmTarget, setConfirmTarget] = useState<{ agent: HubAgent; ensure: boolean } | null>(null);
+  // The high-risk gate (REQ-007) holds the action it is gating, not its
+  // parameters: an upgrade and an install both have to pass through it, and a
+  // newer package can add a high-risk permission the user never accepted.
+  const [confirmTarget, setConfirmTarget] = useState<{
+    agent: HubAgent;
+    run: () => void;
+  } | null>(null);
   const [targetNodeId, setTargetNodeId] = useState<string | null>(null);
   const [localPath, setLocalPath] = useState<string | null>(null);
   const [localInfo, setLocalInfo] = useState<LocalPackageInfo | null>(null);
@@ -178,17 +189,15 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
   // a skeleton instead of a premature "empty" (REQ-028).
   const [libraryList, setLibraryList] = useState<LocalAgentList | null>(null);
   const [libraryError, setLibraryError] = useState<string | null>(null);
-  // `path` of the library row whose ensure is in flight.
+  // `path` of the library row whose action is in flight.
   const [installingPath, setInstallingPath] = useState<string | null>(null);
+  // Which of the two actions `installingId` / `installingPath` belongs to —
+  // install and upgrade are different buttons on the same card, so the busy
+  // label has to stay on the one that was pressed.
+  const [installingAction, setInstallingAction] = useState<InstallAction | null>(null);
 
   const libraryTabRef = useRef<HTMLButtonElement>(null);
   const localTabRef = useRef<HTMLButtonElement>(null);
-  // One menu instance serves both tabs; the payload says which kind of row
-  // produced it (a Hub card or a local file row).
-  const cardMenu = useContextMenu<RowMenuPayload>();
-  // Stable identity (the hook memoizes `close`), so the reset effect below can
-  // depend on it without re-running on every render.
-  const cardMenuClose = cardMenu.close;
   // Nothing behind this dialog may take a dismiss gesture while the high-risk
   // confirmation is up — it has no focus trap, so Tab can reach the header `×`
   // and clicking it would leave `confirmTarget` set for the next visit.
@@ -223,6 +232,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     setLocalError(null);
     setLibraryError(null);
     setInstallingPath(null);
+    setInstallingAction(null);
     setConfirmTarget(null);
     setInstallingId(null);
     setStartingNode(false);
@@ -230,8 +240,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     // again, and the primary button starts from the node's real instance
     // count (REQ-005).
     setInstalledHere(new Set());
-    cardMenuClose();
-  }, [open, cardMenuClose]);
+  }, [open]);
 
   // ── Target node (REQ-008 / REQ-009) ───────────────────────────────────
   // ADR-113: "usable" is pure protocol state — online, control plane
@@ -341,14 +350,64 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     [catalog, query],
   );
 
-  // Instances already living on the target node, per package (REQ-018).
-  const instanceEntries = useMemo(
+  // Instances already living on the target node, per package (REQ-018) —
+  // with their own version, because an upgrade verdict is per instance
+  // (ADR-073: one node may host several instances of a package, each at a
+  // different version).
+  const instanceEntries = useMemo<InstalledInstanceRef[]>(
     () =>
       Object.values(agentsMap).map((entry) => ({
+        instance_id: entry.meta.instance_id,
         agent_id: entry.meta.agent_id,
         node_id: entry.meta.node_id ?? null,
+        version: entry.meta.version ?? "",
       })),
     [agentsMap],
+  );
+
+  /**
+   * What the target node holds of one package, and of which version — the
+   * facts the two action buttons are derived from (REQ-036).
+   *
+   * Per instance, never a package-level verdict: two instances of one package
+   * may sit at different versions on the same node (ADR-073), and only the
+   * older ones are what an upgrade replaces.
+   */
+  const instancesOf = useCallback(
+    (agentId: string | null, candidateVersion: string | null) => {
+      if (!agentId || !targetNodeId) return { instanceCount: 0, outdated: [] as InstalledInstanceRef[] };
+      return {
+        instanceCount: countInstancesOnNode(instanceEntries, agentId, targetNodeId),
+        outdated: outdatedInstancesOnNode(
+          instanceEntries,
+          agentId,
+          targetNodeId,
+          candidateVersion,
+        ),
+      };
+    },
+    [instanceEntries, targetNodeId],
+  );
+
+  /**
+   * The same answer for a Local tab row, plus the visit-scoped pin: a package
+   * THIS VISIT installed through `ensure` keeps that idempotent meaning, so a
+   * second click on the same row cannot land a second instance (REQ-005).
+   */
+  const installStateOf = useCallback(
+    (row: LocalAgentRow) => {
+      const { instanceCount, outdated } = instancesOf(row.agent_id, row.version);
+      const pinned =
+        row.agent_id !== null &&
+        targetNodeId !== null &&
+        installedHere.has(`${targetNodeId} ${row.agent_id}`);
+      return {
+        instanceCount,
+        outdatedIds: outdated.map((i) => i.instance_id),
+        installIdempotent: pinned || instanceCount === 0,
+      };
+    },
+    [installedHere, instancesOf, targetNodeId],
   );
 
   // ── Local library (REQ-021..032) ──────────────────────────────────────
@@ -427,6 +486,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
       if (!pkg || !targetNodeId) return;
       setBusy(true);
       setInstallingId(agent.agent_id);
+      setInstallingAction("install");
       setActionError(null);
       try {
         const result = await installFromHub({
@@ -465,6 +525,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
       } finally {
         setBusy(false);
         setInstallingId(null);
+        setInstallingAction(null);
       }
     },
     [addToast, finishInstall, targetNodeId, t],
@@ -475,20 +536,79 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
       if (busy || targetBlocked || !agent.package) return;
       const risks = highRiskItemsOf(agent);
       if (risks.length > 0) {
-        // Never leave the card menu open underneath the confirmation.
-        cardMenu.close();
-        setConfirmTarget({ agent, ensure });
+        setConfirmTarget({ agent, run: () => void runHubInstall(agent, ensure) });
         return;
       }
       void runHubInstall(agent, ensure);
     },
-    [busy, cardMenu, runHubInstall, targetBlocked],
+    [busy, runHubInstall, targetBlocked],
+  );
+
+  /**
+   * Replace every OUTDATED instance of a Hub package on the target node.
+   *
+   * One upgrade per instance, sequentially: the Rust side stops the instance
+   * when it is running, swaps the package content, waits for the inventory to
+   * report the new version and starts it again. A failure names the instance
+   * it failed on and does not silently skip the rest — but it does stop, so a
+   * broken package is not pushed onto N instances in a row.
+   */
+  const runHubUpgrade = useCallback(
+    async (agent: HubAgent, instanceIds: string[]) => {
+      const pkg = agent.package;
+      if (!pkg || instanceIds.length === 0) return;
+      setBusy(true);
+      setInstallingId(agent.agent_id);
+      setInstallingAction("upgrade");
+      setActionError(null);
+      const name = hubDisplayNameOf(agent);
+      try {
+        for (const instanceId of instanceIds) {
+          const result = await upgradeFromHub({
+            agentId: agent.agent_id,
+            packageFile: pkg.file,
+            sha256: pkg.sha256,
+            instanceId,
+          });
+          addToast({
+            type: "success",
+            message: t("agentHub.upgraded", { name, version: result.to_version }),
+          });
+        }
+        await fetchAgents();
+      } catch (e) {
+        setActionError(t("agentHub.errorUpgrade", { error: String(e) }));
+      } finally {
+        setBusy(false);
+        setInstallingId(null);
+        setInstallingAction(null);
+      }
+    },
+    [addToast, fetchAgents, t],
+  );
+
+  /**
+   * The 升级 button's entry point. Same high-risk gate as an install: the
+   * replacement package may declare permissions the running version never
+   * asked for, and accepting them silently would be the wrong default.
+   */
+  const requestHubUpgrade = useCallback(
+    (agent: HubAgent, instanceIds: string[]) => {
+      if (busy || targetBlocked || !agent.package || instanceIds.length === 0) return;
+      if (highRiskItemsOf(agent).length > 0) {
+        setConfirmTarget({ agent, run: () => void runHubUpgrade(agent, instanceIds) });
+        return;
+      }
+      void runHubUpgrade(agent, instanceIds);
+    },
+    [busy, runHubUpgrade, targetBlocked],
   );
 
   const runLocalInstall = useCallback(async () => {
     if (!localPath || busy || targetBlocked || !targetNodeId) return;
     setBusy(true);
     setInstallingId(LOCAL_INSTALL_KEY);
+    setInstallingAction("install");
     setActionError(null);
     try {
       const instanceId = await useAgentStore.getState().installAgent(
@@ -515,6 +635,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     } finally {
       setBusy(false);
       setInstallingId(null);
+      setInstallingAction(null);
     }
   }, [addToast, busy, localInfo, localPath, selectAgent, targetBlocked, targetNodeId, t]);
 
@@ -538,65 +659,84 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     [t],
   );
 
-  // A library row's primary button: idempotent `/ensure` for the file at
-  // `row.path`. Re-clicking converges on the instance that is already there
-  // instead of adding another (D11 / REQ-026) — `already_present` comes from
-  // the Gateway, so the toast is its answer, not a guess.
-  const runLibraryEnsure = useCallback(
-    async (row: LocalAgentRow) => {
+  // A library row's 安装 button. With no instance of the file's package on the
+  // target node it is the idempotent `/ensure`, so a double click converges
+  // instead of multiplying (D11 / REQ-026) and `already_present` comes from the
+  // Gateway, not from a guess. Once an instance exists it is the explicit
+  // `/install` — multi-instance is legal (ADR-073) and "already there, nothing
+  // happened" reads as a broken button.
+  const runLibraryInstall = useCallback(
+    async (row: LocalAgentRow, ensure: boolean) => {
       if (busy || targetBlocked || !targetNodeId) return;
       setBusy(true);
       setInstallingPath(row.path);
+      setInstallingAction("install");
       setActionError(null);
+      const name = row.name ?? row.file_name;
       try {
-        const result = await ensureLocalAgent({ packagePath: row.path, nodeId: targetNodeId });
-        // ADR-073 / F8: select the instance the ack named. The package id is
-        // ambiguous as soon as the node hosts two instances.
-        await finishInstall(result.instance_id);
-        const name = row.name ?? row.file_name;
-        addToast({
-          type: result.already_present ? "info" : "success",
-          message: result.already_present
-            ? t("agentHub.alreadyPresent", { name })
-            : t("agentHub.installed", { name }),
-        });
+        if (ensure) {
+          const result = await ensureLocalAgent({ packagePath: row.path, nodeId: targetNodeId });
+          // ADR-073 / F8: select the instance the ack named. The package id is
+          // ambiguous as soon as the node hosts two instances.
+          await finishInstall(result.instance_id);
+          addToast({
+            type: result.already_present ? "info" : "success",
+            message: result.already_present
+              ? t("agentHub.alreadyPresent", { name })
+              : t("agentHub.installed", { name }),
+          });
+        } else {
+          const instanceId = await useAgentStore
+            .getState()
+            .installAgent(row.path, targetNodeId);
+          if (instanceId) selectAgent(instanceId);
+          addToast({ type: "success", message: t("agentHub.installed", { name }) });
+        }
       } catch (e) {
         setActionError(t("agentHub.errorInstall", { error: String(e) }));
       } finally {
         setBusy(false);
         setInstallingPath(null);
+        setInstallingAction(null);
       }
     },
-    [addToast, busy, finishInstall, targetBlocked, targetNodeId, t],
+    [addToast, busy, finishInstall, selectAgent, targetBlocked, targetNodeId, t],
   );
 
-  // A library row's "⋯ → install another instance": the NON-idempotent path
-  // (REQ-027). Same file, same `install_agent` call the v0.1 local flow used —
-  // multi-instance is legal (ADR-073), so this is the one action that is
-  // *supposed* to multiply.
-  const runLibraryInstallAnother = useCallback(
-    async (row: LocalAgentRow) => {
-      if (busy || targetBlocked || !targetNodeId) return;
+  /**
+   * Replace every OUTDATED instance of the row's package with this file.
+   *
+   * Sequential, one instance per call: `upgrade_local_agent` stops the instance
+   * when it is running, swaps the package content (keeping `workspace/`),
+   * waits for the new version and starts it again. A failure names the
+   * instance and stops the loop.
+   */
+  const runLibraryUpgrade = useCallback(
+    async (row: LocalAgentRow, instanceIds: string[]) => {
+      if (busy || targetBlocked || instanceIds.length === 0) return;
       setBusy(true);
       setInstallingPath(row.path);
+      setInstallingAction("upgrade");
       setActionError(null);
+      const name = row.name ?? row.file_name;
       try {
-        const instanceId = await useAgentStore
-          .getState()
-          .installAgent(row.path, targetNodeId);
-        if (instanceId) selectAgent(instanceId);
-        addToast({
-          type: "success",
-          message: t("agentHub.installed", { name: row.name ?? row.file_name }),
-        });
+        for (const instanceId of instanceIds) {
+          const result = await upgradeLocalAgent({ packagePath: row.path, instanceId });
+          addToast({
+            type: "success",
+            message: t("agentHub.upgraded", { name, version: result.to_version }),
+          });
+        }
+        await fetchAgents();
       } catch (e) {
-        setActionError(t("agentHub.errorInstall", { error: String(e) }));
+        setActionError(t("agentHub.errorUpgrade", { error: String(e) }));
       } finally {
         setBusy(false);
         setInstallingPath(null);
+        setInstallingAction(null);
       }
     },
-    [addToast, busy, selectAgent, targetBlocked, targetNodeId, t],
+    [addToast, busy, fetchAgents, targetBlocked, t],
   );
 
   const pickLocalFile = useCallback(async () => {
@@ -659,52 +799,6 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
       unlisten?.();
     };
   }, [open]);
-
-  // ── Row "⋯" menu (D2: `/install` for an extra instance) ───────────────
-  const menuPayload = cardMenu.payload;
-  const menuAgent =
-    menuPayload?.kind === "hub"
-      ? (catalog ?? []).find((a) => a.agent_id === menuPayload.agentId)
-      : undefined;
-  const menuRow =
-    menuPayload?.kind === "local"
-      ? (libraryList?.rows ?? []).find((r) => r.path === menuPayload.path)
-      : undefined;
-  const menuItems = useMemo<ContextMenuItem<RowMenuPayload>[]>(() => {
-    if (menuRow) {
-      return [
-        {
-          key: "installAnother",
-          label: t("agentHub.installAnother"),
-          // A broken file cannot be installed at all — the row says why.
-          disabled: busy || targetBlocked || menuRow.error !== null,
-          title: targetBlockReason ?? noNodeReason ?? menuRow.error ?? undefined,
-          onClick: () => void runLibraryInstallAnother(menuRow),
-        },
-      ];
-    }
-    if (!menuAgent) return [];
-    return [
-      {
-        key: "installAnother",
-        label: t("agentHub.installAnother"),
-        disabled: busy || targetBlocked || !menuAgent.package,
-        title: targetBlockReason ?? noNodeReason ?? undefined,
-        onClick: () => requestHubInstall(menuAgent, false),
-      },
-    ];
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    menuAgent,
-    menuRow,
-    busy,
-    targetBlocked,
-    targetBlockReason,
-    noNodeReason,
-    requestHubInstall,
-    runLibraryInstallAnother,
-    t,
-  ]);
 
   if (!open) return null;
 
@@ -836,23 +930,19 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
               ) : (
                 <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                   {visibleAgents.map((agent) => {
-                    // Plan A routing (PRD D2): the primary button is idempotent
-                    // only while the package has NO instance on the target
-                    // node. Once it has one, another click lands another
-                    // instance — multi-instance is legal (ADR-073) and "already
-                    // installed, nothing happened" reads as a broken button.
-                    // With no target there is nothing to count.
-                    const instanceCount = targetNodeId
-                      ? countInstancesOnNode(instanceEntries, agent.agent_id, targetNodeId)
-                      : 0;
-                    // The exception: a package THIS VISIT installed through
-                    // `ensure` keeps the idempotent button. The dialog stays
-                    // open after a success (REQ-013), so the user may click
-                    // the same card again — and the button must not become
-                    // "install another" under the cursor, or that second
-                    // click lands a second instance (REQ-005). "Install
-                    // another" is the `⋯` menu's explicit job (REQ-006).
-                    // Keyed by node too — moving the target starts over.
+                    // Three states, all read off the target node's own
+                    // instances (REQ-036): no instance → idempotent install;
+                    // instances but none older → install one more; an older
+                    // instance → upgrade it, with "install another" beside it.
+                    const { instanceCount, outdated } = instancesOf(
+                      agent.agent_id,
+                      agent.version,
+                    );
+                    // A package THIS VISIT installed through `ensure` keeps
+                    // its idempotent meaning (REQ-005): the dialog stays open,
+                    // so the same button may be clicked twice and must not
+                    // create a second instance under the cursor. Keyed by node
+                    // — moving the target starts over.
                     const pinned = targetNodeId
                       ? installedHere.has(`${targetNodeId} ${agent.agent_id}`)
                       : false;
@@ -863,14 +953,15 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
                         agent={agent}
                         baseUrl={baseUrl}
                         instanceCount={instanceCount}
-                        idempotent={idempotent}
-                        installing={installingId === agent.agent_id}
+                        outdatedCount={outdated.length}
+                        installIdempotent={idempotent}
+                        installing={
+                          installingId === agent.agent_id ? installingAction : null
+                        }
                         disabled={busy || targetBlocked}
                         disabledReason={targetBlockReason ?? noNodeReason ?? undefined}
                         onInstall={() => requestHubInstall(agent, idempotent)}
-                        onMore={(e) =>
-                          cardMenu.openAt(e, { kind: "hub", agentId: agent.agent_id })
-                        }
+                        onUpgrade={() => requestHubUpgrade(agent, outdated.map((i) => i.instance_id))}
                       />
                     );
                   })}
@@ -885,10 +976,10 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
                 disabled={busy || targetBlocked}
                 disabledReason={targetBlockReason ?? noNodeReason ?? undefined}
                 busyPath={installingPath}
-                onInstall={(row) => void runLibraryEnsure(row)}
-                onInstallAnother={(row, e) =>
-                  cardMenu.openAt(e, { kind: "local", path: row.path })
-                }
+                busyAction={installingAction}
+                installStateOf={installStateOf}
+                onInstall={(row, ensure) => void runLibraryInstall(row, ensure)}
+                onUpgrade={(row, instanceIds) => void runLibraryUpgrade(row, instanceIds)}
                 onAddFile={() => void pickLocalFile()}
                 pending={
                   localInfo ? (
@@ -980,18 +1071,8 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
         onConfirm={() => {
           const target = confirmTarget;
           setConfirmTarget(null);
-          if (target) void runHubInstall(target.agent, target.ensure);
+          if (target) target.run();
         }}
-      />
-
-      <ContextMenu<RowMenuPayload>
-        isOpen={cardMenu.isOpen}
-        menuProps={cardMenu.menuProps}
-        items={menuItems}
-        payload={cardMenu.payload}
-        selectionAtOpen={cardMenu.selectionAtOpen}
-        onClose={cardMenu.close}
-        compact
       />
     </div>
   );
@@ -1053,31 +1134,36 @@ interface HubAgentCardProps {
   agent: HubAgent;
   baseUrl: string;
   instanceCount: number;
-  /** The primary button stays on the idempotent `ensure`. A package the
-   *  node already holds would otherwise flip the button to "install
-   *  another" — legal (ADR-073) but the wrong default for a second click
-   *  on the same button (REQ-005). */
-  idempotent: boolean;
-  /** This card's own install is in flight — the only one that may render as
-   *  "installing". Every other card is disabled instead (REQ-014 serializes
-   *  installs; it does not make them all look busy). */
-  installing: boolean;
+  /** Instances on the target node older than this catalog version — the set
+   *  the 升级 button replaces, and the reason it is on screen at all. */
+  outdatedCount: number;
+  /** The 安装 button stays on the idempotent `ensure`. A package the node
+   *  already holds would otherwise flip the button to "install another" —
+   *  legal (ADR-073) but the wrong default for a second click on the same
+   *  button (REQ-005). */
+  installIdempotent: boolean;
+  /** This card's own action is in flight — the only one that may render as
+   *  busy, and it says which of the two it is. Every other card is disabled
+   *  instead (REQ-014 serializes installs; it does not make them all look
+   *  busy). */
+  installing: InstallAction | null;
   disabled: boolean;
   disabledReason?: string;
   onInstall: () => void;
-  onMore: (e: React.MouseEvent) => void;
+  onUpgrade: () => void;
 }
 
 function HubAgentCard({
   agent,
   baseUrl,
   instanceCount,
-  idempotent,
+  outdatedCount,
+  installIdempotent,
   installing,
   disabled,
   disabledReason,
   onInstall,
-  onMore,
+  onUpgrade,
 }: HubAgentCardProps) {
   const { t } = useTranslation();
   const name = hubDisplayNameOf(agent);
@@ -1101,16 +1187,6 @@ function HubAgentCard({
           </div>
           <p className="mt-0.5 line-clamp-2 text-xs text-text-tertiary">{agent.description}</p>
         </div>
-        <button
-          type="button"
-          onClick={onMore}
-          disabled={blocked}
-          title={blockedReason}
-          aria-label={t("agentHub.moreActions")}
-          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
-        >
-          <MoreHorizontal className="h-4 w-4" />
-        </button>
       </div>
 
       {chips.length > 0 && (
@@ -1138,20 +1214,15 @@ function HubAgentCard({
             <span>{t("agentHub.instancesOnNode", { count: instanceCount })}</span>
           )}
         </div>
-        <button
-          type="button"
-          onClick={onInstall}
+        <AgentInstallActions
+          outdatedCount={outdatedCount}
+          installIdempotent={installIdempotent}
+          installing={installing}
           disabled={blocked}
-          title={blockedReason}
-          className="btn-accent flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {installing ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-          {installing
-            ? t("agentHub.installing")
-            : idempotent
-              ? t("agentHub.install")
-              : t("agentHub.installAnother")}
-        </button>
+          disabledReason={blockedReason}
+          onInstall={onInstall}
+          onUpgrade={onUpgrade}
+        />
       </div>
     </article>
   );
@@ -1190,6 +1261,11 @@ function HubAvatar({ src, initial, name }: { src: string | null; initial: string
  * library's file count does not move. It is rendered as a pending row above the
  * add entry, and it installs from its own button: the footer is the dismiss
  * control for both tabs, so no install is committed there.
+ *
+ * No 升级 button here, by design: `inspect_local_package` reports the package id
+ * and size, not its version, so this card cannot tell whether the file is newer
+ * than what the node runs. Installing it as a new instance stays honest; the
+ * upgrade path is the library row, whose version comes from the full manifest.
  */
 function PickedFileCard({
   info,
