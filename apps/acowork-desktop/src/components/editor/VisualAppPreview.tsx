@@ -10,6 +10,8 @@ import { Loader2, AlertCircle } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { listApps, type AppDto } from "../../lib/apps-api";
 import { saveHostedAppFile } from "../../lib/workspaceFileSave";
+import { DOC_FILE_AGENT_ID, primeWorkspaceFileBlob } from "../../lib/workspaceFileBlob";
+import { saveDocFile } from "../../lib/doc-api";
 import { useWorkspaceFileBlob } from "../../hooks/useWorkspaceFileBlob";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { AppFrame } from "../apps/AppFrame";
@@ -55,17 +57,28 @@ export function VisualAppPreview({ file }: { file: VisualPreviewFile }) {
     );
 
     /**
-     * Write-back (ADR-121): the app's Save lands on the workspace file the tab
-     * was opened on; a Save As / Export asks the user where the new file goes.
+     * Write-back (ADR-121): the app's Save lands on whatever the surface
+     * opened — a workspace file in the editor tab, a library entry in the doc
+     * pane. Save As / Export always asks the user where the new file goes, so
+     * that stays the workspace dialog on both surfaces.
      */
-    /** `undefined` outside the editor: an imported doc entry has no writable
-     *  workspace file behind it, so the app must not be offered a Save that
-     *  would 404. */
+    const docId = file.agentId === DOC_FILE_AGENT_ID ? file.workspaceId : null;
+    /** Only an editor tab needs the save-bounce stamp; a doc entry has no fs
+     *  event behind it to bounce off. */
     const editorTabId = file.id;
     const onSaveFile = useCallback(
         async ({ name, bytes, saveAs }: { name: string; bytes: Uint8Array; saveAs: boolean }) => {
+            if (docId && !saveAs) {
+                // The document library owns these bytes: save back onto the
+                // entry, not into a workspace the entry does not live in.
+                await saveDocFile(docId, bytes);
+                primeWorkspaceFileBlob(file.agentId, file.workspaceId, file.relPath, bytes);
+                return;
+            }
             await saveHostedAppFile({
-                bound: { agentId: file.agentId, workspaceId: file.workspaceId, relPath: file.relPath },
+                // A doc entry has no workspace file to default the Save As
+                // dialog to; `null` lets it use the selected agent's workspace.
+                bound: docId ? null : { agentId: file.agentId, workspaceId: file.workspaceId, relPath: file.relPath },
                 saveAs,
                 name,
                 bytes,
@@ -75,7 +88,7 @@ export function VisualAppPreview({ file }: { file: VisualPreviewFile }) {
             // re-opens it on screen — the "save refreshes the whole app" bug.
             if (editorTabId) useFileEditorStore.getState().noteHostedAppSave(editorTabId);
         },
-        [file.agentId, file.workspaceId, file.relPath, editorTabId],
+        [file.agentId, file.workspaceId, file.relPath, docId, editorTabId],
     );
 
     useEffect(() => {
@@ -159,7 +172,7 @@ export function VisualAppPreview({ file }: { file: VisualPreviewFile }) {
             app={app}
             search={visualPreviewSearch(app, file.relPath)}
             openFile={openFile}
-            onSaveFile={editorTabId ? onSaveFile : undefined}
+            onSaveFile={onSaveFile}
         />
     );
 }

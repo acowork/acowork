@@ -57,7 +57,7 @@ async function request<T>(
     "X-Actor": actor,
     ...(rest.headers as Record<string, string> | undefined),
   };
-  if (rest.body && !(rest.body instanceof FormData)) {
+  if (rest.body && !(rest.body instanceof FormData) && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
 
@@ -237,6 +237,20 @@ export function importDoc(dirId: string, file: File): Promise<DocMeta> {
   return request<DocMeta>(`/docs/import?dir_id=${encodeURIComponent(dirId)}`, {
     method: "POST",
     body: form,
+  });
+}
+
+/**
+ * `PUT /api/docs/:doc_id/file` — 用新字节覆盖一个导入文件条目。
+ *
+ * app 预览（wordcraft / deckcraft …）的保存回写给字节，不给 JSON：条目已经有
+ * 名字和扩展名，没有要解析的东西，原始 body 就是文件本身。
+ */
+export function saveDocFile(docId: string, bytes: Uint8Array): Promise<DocMeta> {
+  return request<DocMeta>(`/docs/${encodeURIComponent(docId)}/file`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: new Uint8Array(bytes),
   });
 }
 

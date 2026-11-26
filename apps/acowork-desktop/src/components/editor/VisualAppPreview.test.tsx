@@ -20,6 +20,8 @@ const h = vi.hoisted(() => ({
         onSaveFile?: (f: { name: string; bytes: Uint8Array; saveAs: boolean }) => Promise<void>;
     }>,
     saveHostedAppFile: vi.fn(async () => undefined),
+    saveDocFile: vi.fn(async () => ({})),
+    primeBlob: vi.fn(),
     listApps: vi.fn(),
     blob: {
         blob: null as Blob | null,
@@ -50,6 +52,19 @@ vi.mock("../../lib/apps-api", () => ({
 vi.mock("../../lib/workspaceFileSave", () => ({
     saveHostedAppFile: h.saveHostedAppFile,
 }));
+
+vi.mock("../../lib/doc-api", () => ({
+    saveDocFile: h.saveDocFile,
+}));
+
+// The doc branch primes the viewer cache; the cache itself is jsdom-hostile
+// (object URLs), and what matters here is which endpoint got the bytes.
+vi.mock("../../lib/workspaceFileBlob", async () => {
+    const actual = await vi.importActual<typeof import("../../lib/workspaceFileBlob")>(
+        "../../lib/workspaceFileBlob",
+    );
+    return { ...actual, primeWorkspaceFileBlob: h.primeBlob };
+});
 
 vi.mock("../../hooks/useWorkspaceFileBlob", () => ({
     useWorkspaceFileBlob: () => h.blob,
@@ -109,6 +124,9 @@ beforeEach(() => {
     h.frames.length = 0;
     h.listApps.mockReset();
     h.listApps.mockResolvedValue([figcraftApp]);
+    h.saveHostedAppFile.mockClear();
+    h.saveDocFile.mockClear();
+    h.primeBlob.mockClear();
     h.blob.blob = new Blob([new Uint8Array([1, 2, 3])]);
     h.blob.loading = false;
     h.blob.error = null;
@@ -154,5 +172,50 @@ describe("VisualAppPreview", () => {
 
         expect(h.saveHostedAppFile).toHaveBeenCalledTimes(1);
         expect(noted).toHaveBeenCalledWith("a1:ws1:designs/home.figcraft");
+    });
+    it("saves a doc-library entry back into the library, not into a workspace", async () => {
+        h.listApps.mockResolvedValue([{ ...figcraftApp, canvas_extensions: ["docx"] }]);
+        // The pane opened a library file — its Save must overwrite that entry.
+        // Routing it through `saveHostedAppFile` would ask for a workspace the
+        // file does not live in and answer "no workspace file to save into".
+        render(
+            <VisualAppPreview
+                file={{ agentId: "__doc__", workspaceId: "doc-7", relPath: "季度报告.docx", fileName: "季度报告.docx" }}
+            />,
+        );
+        await waitFor(() => expect(h.frames[h.frames.length - 1]?.onSaveFile).toBeTruthy());
+
+        const bytes = new Uint8Array([7, 7]);
+        await act(async () => {
+            await h.frames[h.frames.length - 1].onSaveFile!({ name: "季度报告.docx", bytes, saveAs: false });
+        });
+
+        expect(h.saveDocFile).toHaveBeenCalledWith("doc-7", bytes);
+        expect(h.saveHostedAppFile).not.toHaveBeenCalled();
+        expect(h.primeBlob).toHaveBeenCalledWith("__doc__", "doc-7", "季度报告.docx", bytes);
+    });
+    it("sends a doc entry's Save As to the workspace dialog", async () => {
+        h.listApps.mockResolvedValue([{ ...figcraftApp, canvas_extensions: ["docx"] }]);
+        render(
+            <VisualAppPreview
+                file={{ agentId: "__doc__", workspaceId: "doc-7", relPath: "季度报告.docx", fileName: "季度报告.docx" }}
+            />,
+        );
+        await waitFor(() => expect(h.frames[h.frames.length - 1]?.onSaveFile).toBeTruthy());
+
+        const bytes = new Uint8Array([8]);
+        await act(async () => {
+            await h.frames[h.frames.length - 1].onSaveFile!({ name: "导出.docx", bytes, saveAs: true });
+        });
+
+        expect(h.saveDocFile).not.toHaveBeenCalled();
+        // `bound: null` is the point: the dialog picks a workspace, instead of
+        // defaulting to one the library entry cannot be found in.
+        expect(h.saveHostedAppFile).toHaveBeenCalledWith({
+            bound: null,
+            saveAs: true,
+            name: "导出.docx",
+            bytes,
+        });
     });
 });
