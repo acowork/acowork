@@ -247,7 +247,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
                   void handleApprove();
                 }}
                 onKeyDown={(e) => e.stopPropagation()}
-                className="rounded bg-ok-solid px-2 py-0.5 text-10 font-medium text-white hover:bg-ok-solid/90 disabled:cursor-not-allowed disabled:opacity-40"
+                className="rounded bg-accent-strong px-2 py-0.5 text-10 font-medium text-white transition-[filter] hover:brightness-90 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 ✓ {t("pm.review.approve")}
               </button>

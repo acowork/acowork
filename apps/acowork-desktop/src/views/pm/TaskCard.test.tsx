@@ -106,6 +106,17 @@ describe("TaskCard card grammar", () => {
   });
 });
 
+describe("TaskCard 批准按钮", () => {
+  // 批准是主操作，跟全局高亮色走（换强调色/深色主题一起变）；绿色是状态色，
+  // 钉在按钮上等于把主题甩掉了。
+  it("uses the global highlight token, not the ok status color", () => {
+    renderCard({ status: "submitted" });
+    const approve = screen.getByRole("button", { name: /pm\.review\.approve/ });
+    expect(approve.className).toContain("bg-accent-strong");
+    expect(approve.className).not.toContain("bg-ok-solid");
+  });
+});
+
 describe("TaskCard 查看执行", () => {
   // 这颗按钮的关键就是"哪些状态有东西可看"：三种跑过的状态都出，没跑过的
   // 状态不出（否则点了只会弹"未找到执行会话"）。
