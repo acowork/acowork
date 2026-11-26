@@ -7,8 +7,8 @@ which project rules a reviewer will hold you to.
 If you only want to report a bug or propose a design change, read
 [Reporting issues](#reporting-issues) — you do not need to install anything.
 
-ACowork is a **decentralized AI agent runtime platform**. Every agent is a declarative
-`.agent` package (manifest + prompts + skills, no binary), loaded by a universal Runtime
+ACowork is a **decentralized AI bot runtime platform**. Every bot is a declarative
+`.bot` package (manifest + prompts + skills, no binary), loaded by a universal Runtime
 binary and managed by a Gateway. Before you write code, read
 [`AGENTS.md`](AGENTS.md) — it is the source of truth for architecture and conventions,
 and this document assumes it.
@@ -25,7 +25,7 @@ and this document assumes it.
 - [Writing code](#writing-code)
 - [Commit messages](#commit-messages)
 - [Documentation rules](#documentation-rules)
-- [Adding or changing an agent package](#adding-or-changing-an-agent-package)
+- [Adding or changing a bot package](#adding-or-changing-a-bot-package)
 - [Review process](#review-process)
 - [License and contribution terms](#license-and-contribution-terms)
 
@@ -64,7 +64,7 @@ it also runs the frontend smoke suite, which boots a real Gateway and is not a p
 | Rust core | Bug fixes, error handling, new API surface | `core/acowork-*/src/` |
 | Desktop / Mobile UI | React components, i18n fixes, perf work | `apps/acowork-desktop/src/`, `apps/acowork-mobile/src/` |
 | i18n | Adding a locale, fixing a missing key | `apps/acowork-desktop/src/i18n/locales/` |
-| Agent packages | New example agents, better skill docs | `agents/` |
+| Bot packages | New example bots, better skill docs | `agents/` |
 | Docs | ADR translations, protocol reference corrections | `docs/` |
 
 ---
@@ -75,7 +75,7 @@ Open an issue on the tracker with:
 
 - **What you did** and **what you expected** to happen.
 - **What actually happened**, including the exact error text.
-- **How to reproduce** — a minimal `.agent` package, a curl command, or a log excerpt.
+- **How to reproduce** — a minimal `.bot` package, a curl command, or a log excerpt.
 - **Environment** — OS, ACowork version/commit, and whether the Gateway runs in `local` or
   `multi_user` auth mode.
 
@@ -181,7 +181,7 @@ Everything below is what CI runs. Run it **before** you open a PR.
 |---|---|---|
 | `redlines` | `./dev/ci.sh redlines` | every architecture red line (the table below is the list), in seconds, before anything compiles |
 | `core` | `./dev/ci.sh check` → `clippy` → `test` → `integration`, plus a strict `cargo test -p acowork-embed --features download-ort` | compile, lints, unit + cross-crate e2e; `check` also verifies `VERSION` against all seven generated copies |
-| `packages` | `cargo test -p acowork-sign --test example_packages`, `cargo test -p acowork-core --test hub_interop -- --ignored`, `sync-official.py --check --report-only` | a shipped `.agent` that does not match its source; a hub mirror that drifted |
+| `packages` | `cargo test -p acowork-sign --test example_packages`, `cargo test -p acowork-core --test hub_interop -- --ignored`, `sync-official.py --check --report-only` | a shipped `.bot` that does not match its source; a hub mirror that drifted |
 | `web` | `npm ci && npm run test && npm run build` (desktop + mobile) | 350 desktop + 38 mobile test files, i18n coverage, the scroll-container backlog |
 
 `dev/ci.sh test` downgrades a missing ONNX Runtime to a warning, which is right on a laptop
@@ -214,7 +214,7 @@ discussed.
 |---|---|---|
 | `run_node_redline` | `acowork-node` must not depend on `acowork-gateway` | ADR-055 §6.20 |
 | `run_mqtt_redline` | `ErrorKind::MqttState` may not appear outside `acowork-mqtt-session` | ADR-065 §7 #1 |
-| `run_gateway_fs_redline` | Gateway may not read agent-private files directly | ADR-009 §5 |
+| `run_gateway_fs_redline` | Gateway may not read bot-private files directly | ADR-009 §5 |
 | `run_user_boundary_redline` | Gateway may not touch user-domain data paths | ADR-084 决策 1 |
 | `run_meta_layout_redline` | Session meta files have exactly one owner | ADR-024 |
 | `run_session_full_read_redline` | No full session-log read on a request path | ADR-096 |
@@ -225,7 +225,7 @@ discussed.
 | `run_lsp_registry_redline` | LSP registry ownership | ADR-091 |
 | `run_ort_api_redline` | `ort` API level must not exceed the oldest supported ONNX Runtime | — |
 | `run_chat_projection_redline` | the chat projection keeps its registry fallback, write contract and row shapes | Design 31 §6 |
-| `run_agent_skill_tool_redline` | an agent may not reach for a raw file tool where a skill owns the write | docs/plan §8 |
+| `run_agent_skill_tool_redline` | a bot may not reach for a raw file tool where a skill owns the write | docs/plan §8 |
 | `run_css_theme_redline` | a UI colour must come from a theme token, never a literal or a `var()` fallback | — |
 | `run_app_framework_redline` | the Gateway may not read a hosted app's private data (ADR-116) | ADR-116 |
 | `run_desktop_ipc_scope_redline` | a capability is scoped by webview label, and a preview webview holds none | ADR-118 §D4 |
@@ -242,8 +242,8 @@ The two red lines with **frozen ceilings** are worth understanding before you to
 relevant files:
 
 - **Gateway filesystem ceiling** (ADR-009) — the Gateway is *communication + resource
-  management + reverse proxy*. Agent-private data (skills, prompts, conversations,
-  per-agent embedding, `{install_path}/assets`) is read and written **only through
+  management + reverse proxy*. Bot-private data (skills, prompts, conversations,
+  per-bot embedding, `{install_path}/assets`) is read and written **only through
   Runtime HTTP**. `install_path` is node-local, so a Gateway-side filesystem read works
   on a single machine and breaks across hosts.
 - **Session meta layout ceiling** (ADR-024) — `conversations/meta/{session_id}.json` has
@@ -314,7 +314,7 @@ generate the most review comments.
 > **Gateway = communication + resource management + reverse proxy.** Nothing else.
 
 If your change makes the Gateway read a file, write a file, or open a database that
-belongs to an agent or a user, it belongs in the Runtime or in `acowork-user` instead.
+belongs to a bot or a user, it belongs in the Runtime or in `acowork-user` instead.
 The Gateway reaches those through `http/proxy.rs` and `http/user_proxy.rs`.
 
 ### Memory is the service's, not the Runtime's
@@ -468,9 +468,9 @@ change — not as a follow-up.
 
 ---
 
-## Adding or changing an agent package
+## Adding or changing a bot package
 
-Agent packages live in `agents/` and are declarative: `manifest.toml` + `prompts/` +
+Bot packages live in `agents/` and are declarative: `manifest.toml` + `prompts/` +
 `skills/` + `assets/`. They contain **no executable code**.
 
 ```bash
@@ -493,7 +493,7 @@ verifies the signature.
   signs for local development; the platform key type is reserved for official builds.
 - The signature covers the whole ZIP content (local files + central directory + end of
   directory), so there is no unsigned region.
-- Agent upgrade safety: the new package's signature certificate fingerprint must match
+- Bot upgrade safety: the new package's signature certificate fingerprint must match
   the installed version, otherwise the upgrade is rejected.
 
 ### Manifest rules

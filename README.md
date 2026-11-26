@@ -2,7 +2,7 @@
   <img src="assets/brand-mark.svg" alt="ACowork" width="331">
 </p>
 
-<h3 align="center">One platform for humans & AI agents to ship work together</h3>
+<h3 align="center">One platform for humans & AI bots to ship work together</h3>
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" /></a>
@@ -23,14 +23,14 @@
   <table>
     <tr>
       <td width="50%" align="center" valign="top">
-        <img src="./assets/1.jpg" alt="Multi-Agent Collaboration &amp; Memory" width="100%" />
+        <img src="./assets/1.jpg" alt="Multi-Bot Collaboration &amp; Memory" width="100%" />
         <br />
-        <em>Collaborate with multiple agents — seperated chat session and execute session.</em>
+        <em>Collaborate with multiple bots — seperated chat session and execute session.</em>
       </td>
       <td width="50%" align="center" valign="top">
         <img src="./assets/2.jpg" alt="Debug Panel &amp; Context Snapshots" width="100%" />
         <br />
-        <em>People and AI agents work together in one group</em>
+        <em>People and AI bots work together in one group</em>
       </td>
     </tr>
   </table>
@@ -40,43 +40,43 @@
 
 ## ✨ Highlights
 
-ACowork is a **multi-user, distributed, AI-native collaboration platform**. People, AI agents, projects, and
+ACowork is a **multi-user, distributed, AI-native collaboration platform**. People, AI bots, projects, and
 documents share one runtime — so a team can plan work, write specs, review code, and ship features alongside
-their agents the same way they would alongside a human teammate.
+their bots the same way they would alongside a human teammate.
 
 | | |
 |---|---|
-| 👥 **Multi-user, not single-actor** | Real accounts, roles, sessions, per-user audit. Humans and agents share the same chat / project / doc surface — no "AI side panel" silo. |
-| 🌐 **Distributed agents, one control plane** | Gateway brokers MQTT + HTTP reverse proxy; Node Agents run on every host that hosts Runtimes (GPU box / workstation / cloud VM) — single-host and multi-host share one protocol path. |
-| 🗂️ **AI-native project & document management** | `acowork-pm` and `acowork-doc` are first-class services; agents read, write, and collaborate on tasks and documents through REST + MCP — including real-time multi-user editing (Yjs CRDT). |
+| 👥 **Multi-user, not single-actor** | Real accounts, roles, sessions, per-user audit. Humans and bots share the same chat / project / doc surface — no "AI side panel" silo. |
+| 🌐 **Distributed bots, one control plane** | Gateway brokers MQTT + HTTP reverse proxy; Node Services run on every host that hosts Runtimes (GPU box / workstation / cloud VM) — single-host and multi-host share one protocol path. |
+| 🗂️ **AI-native project & document management** | `acowork-pm` and `acowork-doc` are first-class services; bots read, write, and collaborate on tasks and documents through REST + MCP — including real-time multi-user editing (Yjs CRDT). |
 | 🚀 **One binary, one machine or many** | Start a single host for personal use; enroll `acowork-node` on more machines and the same binary spans your team. No local-vs-remote code branches in Gateway. |
 | 🧩 **Two-stage sessions** | Chat to shape the plan, Execute to run it end-to-end. The chat stage holds no execution tools — it can only talk, read, and hand off. |
 | ⚙️ **Universal protocol** | One contract for runtimes, nodes, and devices. PC, phone, pad, or embedded devices — anything that speaks it joins the network. |
-| 🔒 **Process-level isolation** | Every Agent runs as an independent OS process with its own filesystem, memory database, and sandboxed tool execution. |
-| 🧠 **Biomimetic memory** | Layered memory on a per-Agent SQLite store — episodic / knowledge / procedural / autobiographical, retrieved by vector + FTS5 hybrid search. |
-| 🛡️ **Multi-tier permission system** | Admin/user roles · per-node, per-agent, and per-session visibility with explicit user grants. Least privilege, by default. |
+| 🔒 **Process-level isolation** | Every Bot runs as an independent OS process with its own filesystem, memory database, and sandboxed tool execution. |
+| 🧠 **Biomimetic memory** | Layered memory on a per-Bot SQLite store — episodic / knowledge / procedural / autobiographical, retrieved by vector + FTS5 hybrid search. |
+| 🛡️ **Multi-tier permission system** | Admin/user roles · per-node, per-bot, and per-session visibility with explicit user grants. Least privilege, by default. |
 | 🛠️ **Full-stack dev loop** | Desktop App (Tauri v2) supports DevMode: conversational debug, skill hot-reload, step & resume, publishing wizard. |
 
-Every Agent is still an independent **"digital being"**: its own runtime process, private memory, workspace, and
-configuration. **Tune prompt, tools, and memory = build an agent.** Personal and sensitive data is
-automatically stripped during packaging, so you can share an agent's capabilities freely without leaking your
+Every Bot is still an independent **"digital being"**: its own runtime process, private memory, workspace, and
+configuration. **Tune prompt, tools, and memory = build a bot.** Personal and sensitive data is
+automatically stripped during packaging, so you can share a bot's capabilities freely without leaking your
 private memories.
 
 ---
 
 ## 🏛️ Architecture
 
-Humans drive it from Desktop or Mobile; agents and domain services reach it over the same protocol path. Under the
-Gateway sits a flat three-tier chain: **Gateway** → **Node Agent** → **Runtime**.
+Humans drive it from Desktop or Mobile; bots and domain services reach it over the same protocol path. Under the
+Gateway sits a flat three-tier chain: **Gateway** → **Node Service** → **Runtime**.
 
 | Tier | Count | Responsibility |
 |---|---|---|
 | **Clients** · Desktop App · Mobile App | per device | Tauri v2 UI over HTTP + MQTT — same surface, same account |
 | **Gateway** · `acowork-gateway` | 1 per cluster | HTTP `:19876`, MQTT `:19875`, reverse proxy, package manager, intent routing, global resources |
-| **Node Agent** · `acowork-node` | 1 per host | process table, local package store, reverse proxy `:19900`, LSP supervisor |
+| **Node Service** · `acowork-node` | 1 per host | process table, local package store, reverse proxy `:19900`, LSP supervisor |
 | **Runtime** · `acowork-runtime` | 1 per `.agent` | loads the package, LLM loop, tool execution, loopback HTTP |
 
-Four co-resident services sit on the same path, exposed to humans and agents alike over REST + MCP:
+Four co-resident services sit on the same path, exposed to humans and bots alike over REST + MCP:
 `acowork-user` (accounts · roles) · `acowork-pm` (projects · tasks) · `acowork-doc` (document library) ·
 `acowork-memory` (memory service).
 
@@ -116,7 +116,7 @@ Talk to a Gateway over its address.
 Two common cases, same setting:
 
 - **This machine** — `http://127.0.0.1:19876`. If no Gateway is listening there, the app
-  starts one for you. The Gateway auto-spawns one local Node Agent, so a single machine is a
+  starts one for you. The Gateway auto-spawns one local Node Service, so a single machine is a
   complete deployment.
 - **Another machine** — start a Gateway there:
 
@@ -150,7 +150,7 @@ The relay address is always `https://` — it carries the WSS MQTT bridge. Opera
 flip the tunnel at runtime with `POST /api/relay/enable`, which needs a signed-in account
 token.
 
-Agents are created through the **Create Agent wizard** in the app.
+Bots are created through the **Create Bot wizard** in the app.
 
 ---
 
@@ -218,8 +218,8 @@ Apache-2.0 — see [`LICENSE`](./LICENSE) for details.
 ---
 
 <p align="center">
-  <b>ACowork — AI Agents Collaboration Platform</b><br>
-  <i>An all-in-one platform for humans and AI agents.</i>
+  <b>ACowork — AI Bots Collaboration Platform</b><br>
+  <i>An all-in-one platform for humans and AI bots.</i>
 </p>
 
 

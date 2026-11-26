@@ -1,5 +1,7 @@
 # Architecture Decision Records (English)
 
+> **Terminology note**: The ADRs in this directory were written in the "Agent" era; the product has since been renamed to **Bot**. Every "Agent" below refers to what is now called a Bot. **Identifiers** such as `agent_id`, the `agents/` directory, and `.agent` packages are left unchanged.
+
 > The English parallel set of the ACowork ADRs. The **Chinese version is the source of truth**;
 > these files are translations maintained alongside it. When the two disagree, the Chinese
 > document governs.

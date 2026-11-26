@@ -31,7 +31,7 @@
 | H | SQLite 记忆层 `auto_generate_limitation_nodes` | Autobiographical Limitation（批量） | 与 B2 同一逻辑的重复实现 |
 | I（2026-09） | `generalization.rs::detect_simple_patterns` / `run_generalization` | ProceduralNode | 伪规则归纳（字符串全等计数 + action/tool_calls 文本特征 hack）；LLM 端已改由 `EpisodicDistiller::promote_procedures` 承担 |
 | J（2026-09） | `MemoryManager::run_post_compaction_tasks` / `run_relationship_generation` / `run_history_compression` | Autobiographical Relationship / History | Relationship 30 天规则第二生产者违反 single-producer 原则且不经 opt-in；History 自动合并下线（回归测试 `post_compaction_tasks_do_not_write_relationship_nodes` 锁定） |
-| C（2026-09-10） | 会话/压缩蒸馏 `EpisodeDistiller::write_summary_to_provider` | Episodic（摘要即蒸馏） | compaction 与 session 关闭尾蒸馏不再写记忆（方法已删，仅注释残留：`episode_distill.rs` 模块头、`loop_context.rs`、`loop_session.rs`）——记忆持久化下放给 Agent 自身（`prompts/system.md` 指导 LLM 主动 `memory_store`） |
+| C（2026-09-10） | 会话/压缩蒸馏 `EpisodeDistiller::write_summary_to_provider` | Episodic（摘要即蒸馏） | compaction 与 session 关闭尾蒸馏不再写记忆（方法已删，仅注释残留：`episode_distill.rs` 模块头、`loop_context.rs`、`loop_session.rs`）——记忆持久化下放给 Bot 自身（`prompts/system.md` 指导 LLM 主动 `memory_store`） |
 
 ## 有效写入入口（ADR-068 2026-09 revision + 2026-10 校对）
 
@@ -55,7 +55,7 @@
 - 调用方不再声明的键 → **不删除**：bootstrap 只拥有它声明的键，不拥有"缺席"的含义。
 
 为什么必须收敛而不是只播种一次：其中的 `name` 是**实例名**，权威位置在实例自己的 `workspace/config/agent_config.json`，
-所有者随时可以改名。一次性播种会让 Agent 继续用旧名字自称，而人看到的是新名字——这正是 ADR-073 禁止的"鸡同鸭讲"。
+所有者随时可以改名。一次性播种会让 Bot 继续用旧名字自称，而人看到的是新名字——这正是 ADR-073 禁止的"鸡同鸭讲"。
 
 包的 `[memory]` 策略仍是**仅首次导入**生效：一旦用户在面板上改动过，重启不得覆盖（`consolidation.json` 是权威）。
 

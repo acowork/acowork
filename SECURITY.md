@@ -1,6 +1,6 @@
 # Security Policy
 
-ACowork is a decentralized AI agent runtime platform that executes agent packages,
+ACowork is a decentralized AI bot runtime platform that executes bot packages,
 manages user accounts, and stores credentials and conversations on the user's machine.
 A vulnerability here can mean code execution, credential theft, or cross-user data
 exposure. Please report it responsibly.
@@ -92,8 +92,8 @@ Node Agent                     per-machine daemon, process table, reverse proxy 
 Agent Runtime                  MQTT client + localhost HTTP, hosts agent processes
 ```
 
-Each Agent is a **declarative `.agent` package** — a manifest, prompts, and skills. It
-contains **no executable code**. The Runtime is a trusted binary; the agent package is
+Each Bot is a **declarative `.bot` package** — a manifest, prompts, and skills. It
+contains **no executable code**. The Runtime is a trusted binary; the bot package is
 data.
 
 ### What is protected
@@ -102,8 +102,8 @@ data.
 |---|---|
 | User account passwords | Argon2id (m=64 MiB, t=3, p=4), stored as a self-describing PHC string. Verification is constant-time. |
 | Stored API keys / secrets | `acowork-vault`: a password-derived master key (Argon2id) encrypts values with ChaCha20-Poly1305. The master key is never persisted in plaintext. |
-| Agent packages | Ed25519 signature over the **entire ZIP content** (local files + central directory + end of directory) — there is no unsigned region. Unsigned or invalidly signed packages are rejected at install. |
-| Agent upgrades | The new package's certificate fingerprint must match the installed version. |
+| Bot packages | Ed25519 signature over the **entire ZIP content** (local files + central directory + end of directory) — there is no unsigned region. Unsigned or invalidly signed packages are rejected at install. |
+| Bot upgrades | The new package's certificate fingerprint must match the installed version. |
 | User chat sessions | Isolated per user (`user_id`), with server-side single-point enforcement. |
 | Cross-user requests | Three-tier ownership model (ADR-087): `view` / `use` / `manage`, enforced at the Gateway's reverse-proxy entry, **fail-closed** — an unregistered route defaults to `manage`. |
 
@@ -111,17 +111,17 @@ data.
 
 This is the part that matters when triaging a report:
 
-- **ACowork does not sandbox the agent's own reasoning.** An agent's prompts and skills
-  are executed by the LLM. Prompt injection against an agent is a **model** problem, not
-  a cryptographic one. The mitigations are the permission model (an agent can only do
+- **ACowork does not sandbox the bot's own reasoning.** A bot's prompts and skills
+  are executed by the LLM. Prompt injection against a bot is a **model** problem, not
+  a cryptographic one. The mitigations are the permission model (a bot can only do
   what it declares and the user approved) and the Approval Gate for risky operations.
-- **The OS-user boundary is not enforced against the agent's tools.** WASM custom tools
+- **The OS-user boundary is not enforced against the bot's tools.** WASM custom tools
   run in a Wasmtime sandbox and cannot read host memory. Shell access, where granted, is
   a deliberate, declared, user-approved grant — it runs with the OS user's own
   authority. See [Shell safety](#shell-safety-is-a-declared-grant-not-a-sandbox).
 - **ACowork does not verify the identity of a package publisher.** A valid signature
   proves the package was signed by the holder of a particular private key. It does not
-  prove who that person is, and it does not prove the agent behaves well.
+  prove who that person is, and it does not prove the bot behaves well.
 - **The `local` auth mode has no user isolation by design.** Do not report "user A can
   see user B's data in `local` mode" — that is the documented trust boundary, not a
   vulnerability. It *is* a vulnerability if `multi_user` mode leaks across users.
@@ -135,7 +135,7 @@ This is the part that matters when triaging a report:
 Shell execution is the highest-risk capability in the system, and it is governed by the
 permission model rather than by a kernel sandbox.
 
-- An agent must **declare** every permission it needs. The runtime enforces the
+- A bot must **declare** every permission it needs. The runtime enforces the
   declaration, and the user can refuse a permission at install time.
 - Network access is **deny by default** and must be declared per domain
   (e.g. `network:https://api.openai.com`).
@@ -143,7 +143,7 @@ permission model rather than by a kernel sandbox.
   Approval Gate for user confirmation.
 - The audit log records what ran, under whose identity.
 
-If you find a path where an agent reaches a capability it did **not** declare, or
+If you find a path where a bot reaches a capability it did **not** declare, or
 reaches one the user **refused**, that is a reportable vulnerability — regardless of
 whether the underlying operation was "only" a file read.
 
@@ -164,7 +164,7 @@ If you run ACowork for yourself or for a team:
   process does not also compromise the user's other files.
 - **Treat the Vault as the crown jewel.** It is unlocked by the user's password. A
   weak password weakens every stored key.
-- **Verify package signatures** before distributing `.agent` packages. Do not disable
+- **Verify package signatures** before distributing `.bot` packages. Do not disable
   signature verification for convenience.
 - **Keep the relay tier in mind.** The cloud relay is a thin BYO relay, not a
   trusted component — it forwards traffic; it is not a place to put secrets.
@@ -194,7 +194,7 @@ If you run ACowork for yourself or for a team:
 - **Do not log secrets.** Not API keys, not tokens, not password material — not even
   at `debug` level.
 - **Do not add a `println!` that prints a config, a header, or an `AuthContext`.**
-- **Agent packages must not contain executable code, obfuscation, or binary blobs**, and
+- **Bot packages must not contain executable code, obfuscation, or binary blobs**, and
   must not fetch and execute remote code at runtime. Declare a tool instead.
 - **Keep `acowork-eval` out of shipping binaries.** It is a dev-dependency by design.
 
@@ -208,15 +208,15 @@ If you run ACowork for yourself or for a team:
 | Gateway / Runtime filesystem isolation | [ADR-009](docs/adr/zh/ADR-009-gateway-workspace-isolation.md) |
 | Multi-user account system | [ADR-076](docs/adr/zh/ADR-076-multi-user-account-system.md) |
 | User domain as a standalone process | [ADR-084](docs/adr/zh/ADR-084-user-standalone-process.md) |
-| Node / Agent owner permission model | [ADR-087](docs/adr/zh/ADR-087-node-agent-owner-permissions.md) |
+| Node / Bot owner permission model | [ADR-087](docs/adr/zh/ADR-087-node-agent-owner-permissions.md) |
 | Remote runtime / node topology | [ADR-055](docs/adr/zh/ADR-055-remote-runtime-node-topology.md) |
-| Agent package format & signing | [`docs/design/zh/02-agent-package.md`](docs/design/zh/02-agent-package.md) |
+| Bot package format & signing | [`docs/design/zh/02-agent-package.md`](docs/design/zh/02-agent-package.md) |
 
 ---
 
-## Reporting a security issue in an agent package
+## Reporting a security issue in a bot package
 
-If you publish `.agent` packages separately, the same rules apply: report privately,
+If you publish `.bot` packages separately, the same rules apply: report privately,
 do not disclose the exploit details publicly, and give the maintainers time to ship a
 fix or withdraw the package before disclosing.
 

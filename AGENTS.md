@@ -91,7 +91,7 @@ core/                  # Rust workspace — members are the source of truth: cor
   acowork-memory/      # Memory service — lib + bin: MCP + panel REST (ADR-101)
   acowork-mqtt-session/# MQTT session / event multiplexing (Gateway <-> Runtime)
   acowork-pm/          # Project & task management service (REST API + MCP tools)
-  acowork-node/        # Node Agent — per-machine daemon hosting Runtime processes (ADR-055)
+  acowork-node/        # Node Service — per-machine daemon hosting Runtime processes (ADR-055)
   acowork-doc/         # Online document library service (REST API + MCP tools)
   acowork-user/        # User domain service — accounts, credentials, roles, profiles (ADR-084)
   acowork-relay/       # Cloud thin relay — BYO self-hosted tier, not bundled into Desktop builds
@@ -156,7 +156,7 @@ Gateway (keep-alive process, Rust)
         |
         | MQTT pub/sub :19875
         v
-Node Agent (acowork-node, ADR-055) — per-machine daemon
+Node Service (acowork-node, ADR-055) — per-machine daemon
   MQTT control plane (acowork/nodes/#) · process table (spawn/kill/reap Runtime)
   Local package mgr · identity/enrollment · reverse proxy :19900
         |
