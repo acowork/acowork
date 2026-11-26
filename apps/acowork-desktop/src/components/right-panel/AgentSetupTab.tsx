@@ -199,6 +199,15 @@ export function AgentSetupTab() {
   const [avatarBusy, setAvatarBusy] = useState(false);
 
   /**
+   * Ordering guard for `avatarConfig`: bumped by every avatar-config read
+   * *and* by every confirmed write. A `PUT` answered while the panel's
+   * mount read is still in flight would otherwise be undone when that older
+   * read lands — the "first pick after opening the panel does nothing"
+   * report. Last answer wins, and the mount read's is the stale one.
+   */
+  const avatarConfigSeqRef = useRef(0);
+
+  /**
    * What the header avatar paints *right now*.
    *
    * Seeded from the store's `AgentInfo` — already effective, because the
@@ -334,9 +343,13 @@ export function AgentSetupTab() {
     let cancelled = false;
     setAvatarAssets([]);
     setAvatarConfig(null);
+    const seq = ++avatarConfigSeqRef.current;
 
     fetchAvatarConfig(selectedAgentId)
-      .then((cfg) => { if (!cancelled) setAvatarConfig(cfg); })
+      // A pick answered by `PUT` while this read was in flight makes the
+      // read stale: applying it would revert the pick the user just made
+      // (see `avatarConfigSeqRef`).
+      .then((cfg) => { if (!cancelled && seq === avatarConfigSeqRef.current) setAvatarConfig(cfg); })
       .catch((err) => { if (!cancelled) log.debug("[AgentSetup] Avatar config fetch failed:", err); });
 
     fetchAvatarAssets(selectedAgentId)
@@ -678,6 +691,7 @@ export function AgentSetupTab() {
     setAvatarBusy(true);
     try {
       const cfg = await updateAvatarConfig(selectedAgentId, { avatar: relativePath, builtin_avatar: "" });
+      avatarConfigSeqRef.current += 1;
       setAvatarConfig(cfg);
       applyConfirmedIdentity(cfg);
     } catch (err) {
@@ -693,6 +707,7 @@ export function AgentSetupTab() {
     setAvatarBusy(true);
     try {
       const cfg = await updateAvatarConfig(selectedAgentId, { avatar: "", builtin_avatar: iconId });
+      avatarConfigSeqRef.current += 1;
       setAvatarConfig(cfg);
       applyConfirmedIdentity(cfg);
     } catch (err) {
@@ -741,6 +756,9 @@ export function AgentSetupTab() {
     setAvatarBusy(true);
     try {
       await deleteAvatarFile(selectedAgentId, relativePath);
+      // The reference the delete route just cleared wins over the panel's
+      // still-in-flight mount read (`avatarConfigSeqRef`).
+      avatarConfigSeqRef.current += 1;
       // Refresh both — backend clears avatar field if deleted file was current
       const [assetsResp, cfg] = await Promise.all([
         fetchAvatarAssets(selectedAgentId),
