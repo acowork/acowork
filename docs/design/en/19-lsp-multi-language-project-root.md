@@ -37,7 +37,7 @@ acowork's LSP relay currently only passes one rootUri and does not use the file 
 2. **Automatic discovery**: Derive project root from file path + language automatically, no manual config
 3. **Minimal changes**: Leverage existing LSP Pool key isolation; do not modify pool layer
 4. **Declarative extension**: Adding a new language requires only one line in config
-5. **Dual-path support**: Both WebSocket relay path (editor interaction) and Codebase RPC path (Agent Runtime code intelligence)
+5. **Dual-path support**: Both WebSocket relay path (editor interaction) and Codebase RPC path (Bot Runtime code intelligence)
 
 ## 3. Core Concepts: Project Root vs Workspace Root
 
@@ -490,7 +490,7 @@ ensure_initialized(entry, project_root)
 | Multiple projects for same language (e.g. two tsconfig.json) | Pool key includes project_root; auto-isolated into separate LSP processes |
 | File directly under monorepo root (no project marker) | Fallback to workspace root |
 | Rust workspace Cargo.toml vs crate Cargo.toml | Nearest Cargo.toml; rust-analyzer handles workspace boundaries |
-| Agent Runtime codebase RPC params have no file URI | Fallback to `req.workspace_root` |
+| Bot Runtime codebase RPC params have no file URI | Fallback to `req.workspace_root` |
 | Marker file check fails (permission/IO error) | `exists()` exception treated as not found, continue walking up |
 | Rootless languages (JSON/YAML/HTML/CSS/Markdown) | No discovery; use workspace root directly |
 | Tauri fs plugin unavailable (non-Tauri env) | `discoverProjectRoot` catches exception, fallback to workspace root |
@@ -519,5 +519,5 @@ The following components **do not need modification**:
 | Rust unaffected | Open .rs files under `core/acowork-core/src/`; confirm rust-analyzer works normally |
 | Multi-project isolation | (If multiple tsconfig.json exist) Open files from different projects; confirm separate LSP processes |
 | Rootless languages | Open .json / .yaml files; confirm LSP connects normally |
-| Codebase RPC | Agent Runtime sends `textDocument/definition` request; confirm correct results |
+| Codebase RPC | Bot Runtime sends `textDocument/definition` request; confirm correct results |
 | Fallback scenario | Open files directly under monorepo root (no marker); confirm fallback to workspace root |

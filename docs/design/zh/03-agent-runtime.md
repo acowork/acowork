@@ -1,10 +1,10 @@
-﻿# Agent Runtime（统一执行引擎）
+﻿# Bot Runtime（统一执行引擎）
 
 > 版本：v3.6 | 更新日期：2026-05-06
 
 ---
 
-Agent Runtime 是平台提供的唯一二进制可执行文件，类似 Android 的 ART 虚拟机。Gateway 为每个 Agent 启动一个 Agent Runtime 进程，将 .agent 包路径和 Gateway endpoint 作为启动参数传入。
+Bot Runtime 是平台提供的唯一二进制可执行文件，类似 Android 的 ART 虚拟机。Gateway 为每个 Bot 启动一个 Bot Runtime 进程，将 .bot 包路径和 Gateway endpoint 作为启动参数传入。
 
 > **v3.7 变更（2026-05-28）**：上下文压缩策略大幅简化——见 [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md)。核心变更：放弃程序化折叠策略（Tool Result 折叠、内容折叠 Phase 1），上下文压缩回归 LLM 摘要作为唯一正常路径手段。日常压缩流程简化为：70% 告警 → 80% LLM 摘要（完整上下文，不折叠） → 95% emergency_trim 安全网。
 
@@ -21,7 +21,7 @@ Agent Runtime 是平台提供的唯一二进制可执行文件，类似 Android 
 
 ## 1. 启动方式
 
-**设计约束：** Agent Runtime 空闲内存占用目标控制在 ~5-10 MB。该目标约束 Runtime 的模块设计——懒初始化（SqliteStore、Wasmtime Engine 等重量级模块按需加载）、最小化默认缓存、零后台轮询线程。
+**设计约束：** Bot Runtime 空闲内存占用目标控制在 ~5-10 MB。该目标约束 Runtime 的模块设计——懒初始化（SqliteStore、Wasmtime Engine 等重量级模块按需加载）、最小化默认缓存、零后台轮询线程。
 
 > **验证方式**：Phase 3 将通过 `MemoryMetrics` 结构在 Debug 模式下实时报告内存占用，并提供 `/metrics` 端点供 Desktop App 展示。Phase 2 通过 Rust 标准库 `alloc::alloc::GlobalStats`（nightly）或外部 `jemalloc` 统计进行开发阶段验证。目标约束的验证不在 Phase 2 功能范围内。
 
@@ -37,9 +37,9 @@ acowork-runtime \
 
 | 参数 | 必需 | 说明 |
 |------|------|------|
-| `--agent-id` | 是 | Agent 标识符，与 manifest 中一致 |
-| `--package-path` | 是 | .agent 包路径（解压后的目录或 ZIP 文件） |
-| `--work-dir` | 是 | Agent 工作区目录（含 data/、config/、memory/） |
+| `--agent-id` | 是 | Bot 标识符，与 manifest 中一致 |
+| `--package-path` | 是 | .bot 包路径（解压后的目录或 ZIP 文件） |
+| `--work-dir` | 是 | Bot 工作区目录（含 data/、config/、memory/） |
 | `--mqtt-port` | 否 | Gateway 嵌入式 MQTT broker 端口（与 Gateway 通讯；见 ADR-033） |
 | `--http-port` | 否 | Runtime localhost HTTP 端口（Desktop 反向代理发现；见 ADR-033） |
 | `--config-dir` | 否 | 用户配置目录（默认取 work-dir/config/） |
@@ -110,7 +110,7 @@ Agent Runtime 二进制
 
 ## 3. 主循环
 
-Agent Runtime 的核心是 LLM 交互循环：
+Bot Runtime 的核心是 LLM 交互循环：
 
 ```
 用户消息 / Intent / 定时触发 / 中断消息注入
@@ -226,19 +226,19 @@ Prompt Builder 按以下顺序拼接上下文，越靠前优先级越高（LLM �
 
 | 顺序 | 部分 | 来源 | 说明 |
 |------|------|------|------|
-| 1 | System Prompt | `prompts/system.md` + `prompts/rules.md` | Agent 身份定义（角色通用属性）+ 业务场景规则（系统记录、工具边界、交付位置、审批门、工作流）。段序由运行时固定为 `system.md` → `rules.md` → 其余按文件名，见 [ADR-120](../../adr/zh/ADR-120-system-and-rules-prompt-split.md)；不可被后续覆盖 |
-| 2 | Identity Context | Gateway 注入 | 用户身份信息（name、city 等），Agent "认识"用户 |
-| 2.5 | Autobiographical | AutobiographicalNode（`label=Autobiographical`） | Agent 自我认知（Identity/Capability/Limitation），注入上限 200 token。History Manager 在构建上下文时检测 History 节点数量，超过 10 条时自动触发规则引擎合并（按时间线拼接事件描述、去重、截断至 200 token，零 LLM 调用），合并由 Runtime 的后台任务执行，不需要用户干预。Phase 3 可升级为 LLM 语义摘要 |
+| 1 | System Prompt | `prompts/system.md` + `prompts/rules.md` | Bot 身份定义（角色通用属性）+ 业务场景规则（系统记录、工具边界、交付位置、审批门、工作流）。段序由运行时固定为 `system.md` → `rules.md` → 其余按文件名，见 [ADR-120](../../adr/zh/ADR-120-system-and-rules-prompt-split.md)；不可被后续覆盖 |
+| 2 | Identity Context | Gateway 注入 | 用户身份信息（name、city 等），Bot "认识"用户 |
+| 2.5 | Autobiographical | AutobiographicalNode（`label=Autobiographical`） | Bot 自我认知（Identity/Capability/Limitation），注入上限 200 token。History Manager 在构建上下文时检测 History 节点数量，超过 10 条时自动触发规则引擎合并（按时间线拼接事件描述、去重、截断至 200 token，零 LLM 调用），合并由 Runtime 的后台任务执行，不需要用户干预。Phase 3 可升级为 LLM 语义摘要 |
 | 2.8 | Workspace Context | Gateway 推送 | 工作区环境信息（当前选中 + 高权重 Top2，最多 3 个） |
 | 3 | Tool Definitions | `manifest.toml [tools]` | 转换为 JSON Schema 格式的工具描述，供 LLM 调用 |
-| 4 | Capability Overview | Gateway 推送 | 已安装 Agent 及其能力摘要，供 LLM 知道可以向谁协作 |
-| 5 | Skill Instructions | `skills/*/SKILL.md` + SQLite 经验层 | 可选技能指令，扩展 Agent 的行为模式。详见 [13-skill-system.md](./13-skill-system.md) |
+| 4 | Capability Overview | Gateway 推送 | 已安装 Bot 及其能力摘要，供 LLM 知道可以向谁协作 |
+| 5 | Skill Instructions | `skills/*/SKILL.md` + SQLite 经验层 | 可选技能指令，扩展 Bot 的行为模式。详见 [13-skill-system.md](./13-skill-system.md) |
 | 6 | Memory Context | `MemoryManager.retrieve()` + `MemoryManager.inject()` | 记忆检索与注入。通过 MemoryStore trait 的 `hybrid_search` + `graph_expand` 检索 SQLite 记忆通道；若 manifest 声明 RAG（`rag_client: Option<Arc<RagClient>>`），并行查询 RAG 通道（用户消息作 query，top_k=3，超时 5s 降级）；结果按来源标注 `[Memory]` / `[RAG:<name>]`，按 token 预算裁剪注入。详见 [05-memory.md](./05-memory.md) §10、[00-prd.md](./00-prd.md) §1.13.1 |
 | 7 | Conversation History | History Manager | 当前对话的完整消息序列 |
 
 #### 2.8 Workspace Context（工作区上下文）
 
-Gateway 通过 IPC 推送工作区环境信息到 Runtime。该上下文包含 Agent 的主工作区路径和用户授权的项目目录列表。
+Gateway 通过 IPC 推送工作区环境信息到 Runtime。该上下文包含 Bot 的主工作区路径和用户授权的项目目录列表。
 
 **筛选策略**：为避免工作区列表过长导致上下文膨胀，采用动态筛选：
 - 当前选中的工作区（`is_current = true`）始终包含
@@ -265,7 +265,7 @@ All listed directories are authorized for access at the indicated permission lev
 ```
 
 **触发时机**：
-- Agent 启动时 Gateway 主动推送一次
+- Bot 启动时 Gateway 主动推送一次
 - 用户通过 Desktop App 切换当前工作区时实时推送更新
 
 **Token 预算分配与截断策略：** 当上下文总长度接近模型限制时，采用三阶段策略：
@@ -280,7 +280,7 @@ System Prompt（1）、Identity Context（2）、Autobiographical（2.5）、Wor
 
 #### 3.1.1 包级 LLM Prompt 覆盖（ADR-063）
 
-> **ADR-063**：Agent 包可声明 9 个 LLM prompt override 文件（`prompts/<name>.md`），覆盖
+> **ADR-063**：Bot 包可声明 9 个 LLM prompt override 文件（`prompts/<name>.md`），覆盖
 > 内置常量（`crate::prompt::*` 与 `acowork-memory` 模块的 LLM 指令）。这些文件**不参与**
 > §3.1 的主 prompt 拼接（它们的语义是"任务指令性 prompt"而非"身份定义"），只通过
 > `load_optional_prompt` 在对应 LLM 调用点注入。
@@ -372,15 +372,15 @@ enabled = true  # No Progress 需要计算结果哈希，成本略高，可按�
 
 ### 3.3 InboundQueue（消息注入队列）
 
-AgentLoop 维护一个 `mpsc::channel` 作为入站消息队列，允许外部在循环运行期间向 Agent 注入消息。每轮迭代开始前（步骤⓪）drain 队列，将待处理消息合并到对话历史。
+AgentLoop 维护一个 `mpsc::channel` 作为入站消息队列，允许外部在循环运行期间向 Bot 注入消息。每轮迭代开始前（步骤⓪）drain 队列，将待处理消息合并到对话历史。
 
 **消息类型：**
 
 | 类型 | 来源 | 处理方式 |
 |------|------|---------|
-| `UserMessage` | Desktop App / CLI（用户在 Agent 运行中追加内容）| 作为新的 `user` 消息追加到 History |
+| `UserMessage` | Desktop App / CLI（用户在 Bot 运行中追加内容）| 作为新的 `user` 消息追加到 History |
 | `SystemNotification` | Gateway push（identity_update / capability_update）| 作为 `system` 消息追加，LLM 下轮可见 |
-| `IntentMessage` | 其他 Agent（通过 Gateway 路由）| 作为 `user` 消息（包含 Intent 元数据）追加 |
+| `IntentMessage` | 其他 Bot（通过 Gateway 路由）| 作为 `user` 消息（包含 Intent 元数据）追加 |
 
 **设计要点：**
 
@@ -676,7 +676,7 @@ Permission Check 通过 → Approval Gate 检查
             └─ 超时 (默认 60s) → 视为拒绝，返回超时错误给 LLM
 ```
 
-**Approval Gate 不阻塞 LLM 推理：** 当等待用户确认时，Runtime 进程不退出，其他 Agent 不受影响。超时后 LLM 收到拒绝结果，可以自主调整策略（换工具、换参数）。
+**Approval Gate 不阻塞 LLM 推理：** 当等待用户确认时，Runtime 进程不退出，其他 Bot 不受影响。超时后 LLM 收到拒绝结果，可以自主调整策略（换工具、换参数）。
 
 **Desktop App 不可用时：** 如果 Desktop App 未连接（纯 CLI 模式），Approval 降级为 manifest 配置的默认策略：`approval_fallback = "allow" | "deny"`。默认 `deny`（安全优先）。Gateway 转发失败（HTTP 超时/错误/Desktop App 响应格式异常）时同样按 `approval_fallback` 策略处理，并记录错误日志。
 

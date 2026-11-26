@@ -2,11 +2,11 @@
 
 > Version: v3.5 | Last Updated: 2026-10-23
 
-> **v3.5 change (implemented)**: `memory_recall` / `memory_store` are no longer built-in tools — memory was split out into a Gateway-hosted standalone service, `acowork-memory`, and Agents reach it through the MCP tools `mcp_memory__memory_recall` / `mcp_memory__memory_store` ([ADR-101](../../adr/en/ADR-101-memory-standalone-mcp-service.md)). The `memory:read` / `memory:write` permission entries were removed along with them, as was the "main loop step ② MemoryManager.retrieve() auto-inject" described in §4 / §4.2.1 of this document (auto-inject, ADR-101 decision 5) — memory is now fetched only by an explicit tool call. Those sections are kept as a historical design record; actual behaviour follows ADR-101.
+> **v3.5 change (implemented)**: `memory_recall` / `memory_store` are no longer built-in tools — memory was split out into a Gateway-hosted standalone service, `acowork-memory`, and Bots reach it through the MCP tools `mcp_memory__memory_recall` / `mcp_memory__memory_store` ([ADR-101](../../adr/en/ADR-101-memory-standalone-mcp-service.md)). The `memory:read` / `memory:write` permission entries were removed along with them, as was the "main loop step ② MemoryManager.retrieve() auto-inject" described in §4 / §4.2.1 of this document (auto-inject, ADR-101 decision 5) — memory is now fetched only by an explicit tool call. Those sections are kept as a historical design record; actual behaviour follows ADR-101.
 
 ---
 
-The tool system is Agent's sole channel for perceiving and operating the world. LLM calls tools via tool_calls; Runtime parses and routes to corresponding tool implementations. All tool executions undergo permission checks; custom tools run isolated in WASM sandbox.
+The tool system is Bot's sole channel for perceiving and operating the world. LLM calls tools via tool_calls; Runtime parses and routes to corresponding tool implementations. All tool executions undergo permission checks; custom tools run isolated in WASM sandbox.
 
 ## 1. Tool Classification
 
@@ -21,29 +21,29 @@ Tool Dispatcher
 | Type     | Source                             | Execution Environment | LLM Directly Callable | Phase |
 |----------|------------------------------------|-----------------------|----------------------|-------|
 | Built-in | Runtime built-in                   | Host process          | Yes                  | Phase 1 |
-| WASM     | .agent package tools/ directory    | Wasmtime sandbox      | Yes                  | Phase 1 (decl + sandbox) / Phase 3 (full permissions) |
+| WASM     | .bot package tools/ directory    | Wasmtime sandbox      | Yes                  | Phase 1 (decl + sandbox) / Phase 3 (full permissions) |
 | RAG      | manifest declaration, pointing to enterprise RAG service | Remote HTTP call | Yes                  | Phase 2 |
 | Gateway  | Gateway Service API                | Gateway process       | No (Runtime internal) | Phase 4 |
 
 ## 2. Built-in Tools List
 
-The following tools are built-in implementations of Agent Runtime; Agents can declare use in manifest without providing implementation code.
+The following tools are built-in implementations of Bot Runtime; Bots can declare use in manifest without providing implementation code.
 
-**Platform Infrastructure-Level Tool Definition**: The scope of built-in tools is limited to **platform infrastructure level** — calling open protocols (HTTP/DNS/filesystem/OS APIs) or local computation (WASM/Embedding), not depending on specific third-party service paid APIs. SaaS integration (Jira/Notion/LinkedIn etc.) is provided by independent Agents, not built-in. 
+**Platform Infrastructure-Level Tool Definition**: The scope of built-in tools is limited to **platform infrastructure level** — calling open protocols (HTTP/DNS/filesystem/OS APIs) or local computation (WASM/Embedding), not depending on specific third-party service paid APIs. SaaS integration (Jira/Notion/LinkedIn etc.) is provided by independent Bots, not built-in. 
 
 | Tool Name | Function | Required Permission | Description |
 |-----------|----------|---------------------|-------------|
 | ~~`memory_recall`~~ | ~~Semantic search of private SQLite memory layer~~ | ~~`memory:read`~~ | **Migrated** — ADR-101: memory is a standalone service now, so this tool is `mcp_memory__memory_recall` on the Gateway-hosted memory MCP. No permission domain; per-tool opt-in happens in `agent_mcp_tools.json` (ADR-069). Hybrid retrieval semantics changed with ADR-082: text search is FTS5 and vectors are scanned brute-force (no HNSW); associative diffusion was never implemented |
 | ~~`memory_store`~~ | ~~Write to private SQLite memory layer~~ | ~~`memory:write`~~ | **Migrated** — same as above, now `mcp_memory__memory_store`; real-time extraction, the five types and the importance / privacy parameters keep their semantics, only the call channel changed |
 | `http_request` | HTTP requests (GET/POST/PUT/DELETE) | `network:<url_pattern>` | Supports method parameter for HTTP method selection; JSON responses auto-parsed; supports JSON body and form |
-| `web_fetch` | Fetch web page content | `network:<url_pattern>` | HTML → Markdown conversion, Agent directly receives readable text |
+| `web_fetch` | Fetch web page content | `network:<url_pattern>` | HTML → Markdown conversion, Bot directly receives readable text |
 | `shell` | Execute shell commands | `filesystem:exec` | Subject to sandbox restrictions, interruptible on timeout |
 | `file_read` | Read file | `filesystem:read:<path>` | Restricted to workspace and authorized directories |
 | `file_write` | Write file | `filesystem:write:<path>` | Restricted to workspace and authorized directories |
 | `file_edit` | Precise file editing | `filesystem:write:<path>` | Line range based editing (replace/insert/delete), more precise than file_write |
 | `glob_search` | Filename pattern search | `filesystem:read:<path>` | Supports glob pattern matching, returns file path list |
 | `content_search` | File content search | `filesystem:read:<path>` | Similar to grep, supports regex, returns matching lines and context |
-| `intent_send` | Send Intent to other Agents | `intent:send:<target>` | Routed via Gateway |
+| `intent_send` | Send Intent to other Bots | `intent:send:<target>` | Routed via Gateway |
 | ~~`identity_store`~~ | ~~Write user identity information~~ | ~~`identity:write`~~ | **Deleted** — User identity management migrated to Gateway UserProfile, see `18-user-identity-simplified.md` |
 | ~~`identity_query`~~ | ~~Query user identity information~~ | ~~`identity:read`~~ | **Deleted** — User identity management migrated to Gateway UserProfile |
 | ~~`identity_observe`~~ | ~~Subscribe to identity change notifications~~ | ~~`identity:observe`~~ | **Deleted** — User identity management migrated to Gateway UserProfile |
@@ -71,25 +71,25 @@ The following tools are built-in implementations of Agent Runtime; Agents can de
 
 **Availability Level Definition:**
 
-| Level | Meaning | Impact on Agent |
+| Level | Meaning | Impact on Bot |
 |-------|---------|------------------|
-| All platforms | Consistent behavior on all platforms | Agent can use without difference |
-| Desktop only | Mobile unsupported | When Agent declares `required = true`, mobile install rejected |
-| All platforms, mobile restricted | Mobile behavior degraded | Agent can use but needs to adapt to degraded behavior |
+| All platforms | Consistent behavior on all platforms | Bot can use without difference |
+| Desktop only | Mobile unsupported | When Bot declares `required = true`, mobile install rejected |
+| All platforms, mobile restricted | Mobile behavior degraded | Bot can use but needs to adapt to degraded behavior |
 
 **Specific Degradation Behavior:**
 
 `shell` (Desktop only):
 - iOS sandbox forbids external process execution; Android only supports it in rare scenarios (root or Termux)
 - Desktop also has shell differences: Windows is cmd/PowerShell, Linux/macOS is bash/zsh, command syntax differs
-- When Agent declares `required = true` in manifest, mobile install is directly rejected
-- When Agent declares `required = false` (default), mobile install succeeds, but `shell` tool is not registered in available tool list
+- When Bot declares `required = true` in manifest, mobile install is directly rejected
+- When Bot declares `required = false` (default), mobile install succeeds, but `shell` tool is not registered in available tool list
 
 `file_read` / `file_write` / `file_edit` / `glob_search` / `content_search` (Mobile restricted):
 - iOS App Sandbox only allows access to files within its own container
 - Android Scoped Storage restricts external storage access
-- Degradation behavior: path allow-list automatically narrowed to Agent working directory (`<agent_data_dir>/workspace/`); out-of-range path requests return permission errors
-- `glob_search` / `content_search` search range also limited to Agent working directory
+- Degradation behavior: path allow-list automatically narrowed to Bot working directory (`<agent_data_dir>/workspace/`); out-of-range path requests return permission errors
+- `glob_search` / `content_search` search range also limited to Bot working directory
 - Desktop path allow-list controlled by `filesystem:read/write:<path>` permission, can authorize any directory
 
 **Runtime Platform Detection:**
@@ -141,7 +141,7 @@ permissions = ["filesystem:exec"]
 
 ## 3. WASM Tools (Custom Tool Sandbox)
 
-Custom tools are provided by Agent developers as .wasm files, executed isolated in Wasmtime sandbox.
+Custom tools are provided by Bot developers as .wasm files, executed isolated in Wasmtime sandbox.
 
 ### 3.1 Runtime Selection: Wasmtime
 
@@ -189,7 +189,7 @@ max_execution_time_ms = 5000
 |-------|----------|-------------|
 | `name` | Yes | Tool name, LLM calls via this name |
 | `type` | Yes | Must be `"wasm"` |
-| `binary` | Yes | .wasm file path (relative to .agent package root) |
+| `binary` | Yes | .wasm file path (relative to .bot package root) |
 | `permissions` | Yes | Required permission list (displayed at install, validated at runtime) |
 | `resource_limits.max_memory_mb` | No | WASM linear memory limit (default 50) |
 | `resource_limits.max_execution_time_ms` | No | Execution timeout (default 5000) |
@@ -296,7 +296,7 @@ pub extern "C" fn schema_len() -> u32;
 
 ### 3.5 WASM Tool Development Toolchain
 
-Recommended flow for Agent developers writing WASM tools:
+Recommended flow for Bot developers writing WASM tools:
 
 ```
 1. Write tool logic in Rust (target: wasm32-wasip2)
@@ -344,9 +344,9 @@ All errors do not terminate the main loop. Error info is returned to LLM as tool
 
 ## 4. RAG Tools (Enterprise Knowledge Base Integration)
 
-RAG tools let Agents connect to enterprise-built RAG knowledge bases, enabling "dual-channel retrieval" — local SQLite memory layer (personal memory) and enterprise RAG (collective knowledge) queried in parallel, with results spliced into LLM context. ACowork does not host RAG services; only defines standard query protocol (request/response JSON Schema); enterprise RAG adapts to this protocol itself (see `00-prd.md` §1.13).
+RAG tools let Bots connect to enterprise-built RAG knowledge bases, enabling "dual-channel retrieval" — local SQLite memory layer (personal memory) and enterprise RAG (collective knowledge) queried in parallel, with results spliced into LLM context. ACowork does not host RAG services; only defines standard query protocol (request/response JSON Schema); enterprise RAG adapts to this protocol itself (see `00-prd.md` §1.13).
 
-**Configuration-Driven Opt-In**: RAG is not a default capability; only enabled when manifest declares `[[tools]] type = "rag"`. For Agents without RAG declaration, Tool Dispatcher doesn't register RAG tool, MemoryManager.retrieve() only queries SQLite memory layer channel, behavior identical to no RAG.
+**Configuration-Driven Opt-In**: RAG is not a default capability; only enabled when manifest declares `[[tools]] type = "rag"`. For Bots without RAG declaration, Tool Dispatcher doesn't register RAG tool, MemoryManager.retrieve() only queries SQLite memory layer channel, behavior identical to no RAG.
 
 **Hybrid Dual Trigger**: RAG has two triggering methods, both driven by manifest configuration:
 
@@ -431,7 +431,7 @@ Step ② MemoryManager.retrieve()
 
 | Rule | Description |
 |------|-------------|
-| Offline degradation | When RAG service is unreachable, return empty results, don't block Agent execution (both auto and explicit triggers degrade) |
+| Offline degradation | When RAG service is unreachable, return empty results, don't block Bot execution (both auto and explicit triggers degrade) |
 | Credential security | auth_ref references Vault key, Runtime fetches each call, not cached in process memory or env vars |
 | Result marking | Each RAG result is labeled source_url and chunk_id for LLM and user traceability |
 | Query scope restriction | collection field limits query scope, prevents cross-tenant data leakage |
@@ -447,7 +447,7 @@ RAG tool and local SQLite memory layer are two completely independent retrieval 
 | Storage location | Local file (rusqlite) | Enterprise RAG service (remote) |
 | Data type | Personal preferences, interaction history, autobiographical | Product docs, business processes, internal specs |
 | Retrieval method | Vector + fulltext + associative diffusion (graph expand) | Vector retrieval + optional hybrid keyword + metadata filter |
-| Privacy boundary | Agent-private, filtered by PrivacyLevel when sharing package | Enterprise-managed, Agent read-only |
+| Privacy boundary | Agent-private, filtered by PrivacyLevel when sharing package | Enterprise-managed, Bot read-only |
 
 RAG retrieval results and local SQLite memory layer retrieval results are spliced in the transient layer and uniformly fed into LLM context, but not integrated into the Memory system's abstraction layer — their query paradigms and storage models are entirely different.
 
@@ -466,14 +466,14 @@ The following operations do not belong to "tools" (not triggered by LLM tool_cal
 |-----------|----------------|-------------|
 | `KeyRelease` | After startup handshake | Get LLM API Key (one-time) |
 | `IdentityDelivery` | After startup handshake | Get user identity information (actively pushed by Gateway) |
-| `CapabilityOverview` | After startup handshake | Get installed Agents' capability summary (actively pushed by Gateway) |
+| `CapabilityOverview` | After startup handshake | Get installed Bots' capability summary (actively pushed by Gateway) |
 | `IntentSend` / `IntentReceived` | When LLM calls `intent_send` tool | Cross-Agent message routing |
 | `BudgetQuery` | During budget pre-check | Query remaining budget |
 | `UsageReport` | After each iteration (async) | Report LLM usage |
 | `RateAcquire` | Before calling LLM | Apply for rate token |
 | `PermissionRequest` | Runtime requests additional permissions | Pop-up for user confirmation |
 
-**Key Principle**: LLM calls and tool execution do not go through Gateway — Agent connects directly to LLM API, executes tools locally. Gateway only manages what must be centralized.
+**Key Principle**: LLM calls and tool execution do not go through Gateway — Bot connects directly to LLM API, executes tools locally. Gateway only manages what must be centralized.
 
 ## 5. Tool Dispatch Flow
 
@@ -520,10 +520,10 @@ Process each tool_call one by one:
 | Fuel metering | Enabled | Prevent malicious/defective WASM tools infinite loops |
 | API Key invisible to WASM | secrecy::SecretString | WASM tools are untrusted code, must never get LLM API Key |
 | SDK deferred | Phase 2+ | Phase 1 manual export functions sufficient, SDK lowers barrier but doesn't block core |
-| Builtin scope | Platform infrastructure level only | SaaS integration (Jira/Notion/LinkedIn etc.) provided by independent Agents, not built-in; vertical capabilities via WASM Tool or independent Agent |
-| web_fetch built-in | Yes | Nearly all Agents need it, platform-level infrastructure |
-| file_edit/glob_search/content_search built-in | Yes | File ops trio (read+write+edit+search); missing any one leads Agent to inefficient simulation with file_write |
-| RAG tool type | Independent type="rag", config-driven Opt-In | Enterprise RAG is external service integration, not built-in tool nor WASM tool, needs independent declaration and execution model; only registers when manifest declares, zero intrusion for Agents without RAG |
+| Builtin scope | Platform infrastructure level only | SaaS integration (Jira/Notion/LinkedIn etc.) provided by independent Bots, not built-in; vertical capabilities via WASM Tool or independent Bot |
+| web_fetch built-in | Yes | Nearly all Bots need it, platform-level infrastructure |
+| file_edit/glob_search/content_search built-in | Yes | File ops trio (read+write+edit+search); missing any one leads Bot to inefficient simulation with file_write |
+| RAG tool type | Independent type="rag", config-driven Opt-In | Enterprise RAG is external service integration, not built-in tool nor WASM tool, needs independent declaration and execution model; only registers when manifest declares, zero intrusion for Bots without RAG |
 | RAG credential security | Vault reference, runtime fetch | Consistent with built-in tool API Key management, not plaintext in manifest or process env vars |
 | RAG trigger model | Hybrid dual trigger (auto + explicit) | Auto trigger (Step ② Retrieve) solves "LLM doesn't know whether to query"; explicit trigger (Step ⑤ tool_call) solves "needs more precise query"; both opt-in driven by manifest config (ADR-012, see plan-p4.md) |
 | RAG protocol adaptation | ACowork defines standard protocol, enterprise RAG self-adapts | No adapter for each RAG implementation; enterprise side ensures their RAG service is compatible with standard query interface; follows PRD "pure integration, not hosting" principle |

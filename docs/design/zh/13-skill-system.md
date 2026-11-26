@@ -4,7 +4,7 @@
 
 ---
 
-Skill 是 Agent 行为模式的扩展机制。LLM 通过 Skill Instructions 获得特定领域的知识和操作流程，从而具备超出基础能力的专业行为。
+Skill 是 Bot 行为模式的扩展机制。LLM 通过 Skill Instructions 获得特定领域的知识和操作流程，从而具备超出基础能力的专业行为。
 
 Skill 系统采用**双层模型**：SKILL.md 作为静态定义层（发布态），SQLite 记忆层 作为动态经验层（运行态）。调试阶段的 Skill 在 SQLite 记忆层中迭代，完善后提交到 SKILL.md。
 
@@ -32,14 +32,14 @@ Skill System
 
 | 层级 | 存储位置 | 生命周期 | 可分发 | 可审计 | 可版本控制 |
 |------|---------|---------|--------|--------|-----------|
-| Definition Layer | SKILL.md | 随 .agent 包版本管理 | 是 | 是（直接打开看） | 是 |
-| Experience Layer | SQLite 记忆层 | 持久化到 Agent 工作区 | 否（私有数据） | 否（图数据库） | 否 |
+| Definition Layer | SKILL.md | 随 .bot 包版本管理 | 是 | 是（直接打开看） | 是 |
+| Experience Layer | SQLite 记忆层 | 持久化到 Bot 工作区 | 否（私有数据） | 否（图数据库） | 否 |
 
 类比：SKILL.md 是**教科书**（公共的、标准的、可分享的），SQLite 经验层是**个人笔记**（私有的、基于实践的、因人而异的）。两者结合才能形成完整的 Skill 行为。
 
 ## 2. SKILL.md 格式（静态定义层）
 
-SKILL.md 采用 YAML frontmatter + Markdown body 格式，兼容 Agent Skills 开放标准（agentskills.io）。
+SKILL.md 采用 YAML frontmatter + Markdown body 格式，兼容 Bot Skills 开放标准（agentskills.io）。
 
 ### 2.1 文件位置
 
@@ -120,11 +120,11 @@ tested_models:
 
 | 字段 | 必需 | 说明 |
 |------|------|------|
-| `name` | 是 | Skill 名称，在 Agent 内唯一 |
+| `name` | 是 | Skill 名称，在 Bot 内唯一 |
 | `description` | 是 | 功能描述，用于 Skill 搜索和展示 |
 | `version` | 否 | Skill 版本号（语义版本） |
-| `author` | 否 | 创建者：`agent`（Agent 自学习创建）或 `developer`（开发者手写） |
-| `source_draft` | 否 | Agent 自创建时的草稿 ID，用于追溯到调试历史 |
+| `author` | 否 | 创建者：`bot`（Bot 自学习创建）或 `developer`（开发者手写） |
+| `source_draft` | 否 | Bot 自创建时的草稿 ID，用于追溯到调试历史 |
 | `triggers` | 是 | 触发词列表，LLM 根据用户输入匹配 |
 | `tool_deps` | 否 | 依赖的 Built-in / WASM 工具，Runtime 用于权限校验 |
 | `platforms` | 否 | 平台支持声明，见 2.4 |
@@ -152,7 +152,7 @@ platforms:
 
 ## 3. SQLite 记忆层经验层（动态运行态）
 
-Agent 在使用 Skill 的过程中积累的经验数据存储在 SQLite 中，作为 SKILL.md 静态定义之上的增强层。
+Bot 在使用 Skill 的过程中积累的经验数据存储在 SQLite 中，作为 SKILL.md 静态定义之上的增强层。
 
 ### 3.1 节点类型概览
 
@@ -167,7 +167,7 @@ SQLite 记忆层（`nodes` 表）
 
 ### 3.2 SkillDraft（草稿 Skill）
 
-调试阶段，Agent 自创建或用户引导创建的 Skill 存储为 SkillDraft 节点。
+调试阶段，Bot 自创建或用户引导创建的 Skill 存储为 SkillDraft 节点。
 
 ```rust
 struct SkillDraft {
@@ -383,7 +383,7 @@ Skill 的完整生命周期分为三个阶段：创建与调试、发布、运�
 | 能力 | 说明 |
 |------|------|
 | 试运行 | 在 Debug 模式下执行 Skill，结果不写入生产记忆 |
-| 迭代修改 | Agent 根据执行结果自动修改草稿指令 |
+| 迭代修改 | Bot 根据执行结果自动修改草稿指令 |
 | 历史回溯 | 查看任意迭代版本和当时的执行记录 |
 | 用户反馈 | 用户可以对每次执行结果给出反馈 |
 | 草稿保存 | 中断后下次继续，草稿状态完整保留 |
@@ -641,7 +641,7 @@ System Prompt 组装（步骤 5：Skill Instructions）
 | 调试在 SQLite 记忆层 | 不直接修改 SKILL.md | 调试是探索性过程，需要迭代历史、回滚、A/B 测试，图数据库天然支持 |
 | 单向提交 | SQLite 记忆层 → SKILL.md | 类似 git 工作流：工作区迭代 → commit 到仓库 |
 | 模型兼容性记录 | SkillExecution + SkillExperience | Skill 效果与 LLM 强相关，不同模型需要不同适配，必须有记录 |
-| SKILL.md 格式 | YAML frontmatter + Markdown | 兼容 Agent Skills 开放标准（agentskills.io），六大主流平台事实标准 |
+| SKILL.md 格式 | YAML frontmatter + Markdown | 兼容 Bot Skills 开放标准（agentskills.io），六大主流平台事实标准 |
 | 经验注入而非替换 | 运行时合并，不修改 SKILL.md | 保证 SKILL.md 作为稳定基准，经验作为动态增强层叠加 |
 | 上下文裁剪 | 经验层优先裁剪 | 基础指令是 Skill 的核心逻辑，经验是锦上添花 |
 | 草稿不进包 | SkillDraft 仅存 SQLite 记忆层 | 未发布的草稿不应该作为包的一部分分发 |

@@ -11,21 +11,21 @@ ACowork Mobile App is a Tauri v2 based mobile client, positioned as a **portable
 
 ### 1.1 In one sentence
 
-**Mobile App = an IM-shaped conversation control terminal**: it carries "conversations with Agents and colleagues" using the interaction paradigm of mainstream IM software (WeCom / DingTalk), does basic conversation control in v1, and takes on no platform-management duties.
+**Mobile App = an IM-shaped conversation control terminal**: it carries "conversations with Bots and colleagues" using the interaction paradigm of mainstream IM software (WeCom / DingTalk), does basic conversation control in v1, and takes on no platform-management duties.
 
 ### 1.2 Relationship to Desktop App
 
 | Dimension | Desktop App | Mobile App |
 |-----------|-------------|------------|
-| Positioning | Primary workbench — create/debug/publish Agents | Portable terminal — receive and send messages anywhere |
+| Positioning | Primary workbench — create/debug/publish Bots | Portable terminal — receive and send messages anywhere |
 | Shape | Left/center/right multi-column | Bottom tab bar + full-screen hierarchy (IM shape) |
 | Navigation | Single nav bar + left list | One independent stack per tab + iOS push semantics |
-| Sessions | An Agent may have **multiple Session Tabs open in parallel** | An Agent has multiple sessions, **switched serially** (see §5) |
-| Agent management | Create/install/clone/publish | Not in v1 |
+| Sessions | A Bot may have **multiple Session Tabs open in parallel** | A Bot has multiple sessions, **switched serially** (see §5) |
+| Bot management | Create/install/clone/publish | Not in v1 |
 | Debugging | DevMode protocol, Git status bar | Not in v1 |
 | Local Gateway | Embeds/manages a Gateway process | **No local Gateway process** (see §11.1) |
 
-**Key insight**: the two Apps share the same server-side state (same Agents, same Sessions, same permission model), but **their client state is independent**. A session opened on Desktop can be continued on the phone; a session created on the phone is visible on Desktop (subject to permissions). Mobile is never a "remote display" for Desktop — it is a peer terminal.
+**Key insight**: the two Apps share the same server-side state (same Bots, same Sessions, same permission model), but **their client state is independent**. A session opened on Desktop can be continued on the phone; a session created on the phone is visible on Desktop (subject to permissions). Mobile is never a "remote display" for Desktop — it is a peer terminal.
 
 ### 1.3 What Mobile App does not do (v1)
 
@@ -33,7 +33,7 @@ ACowork Mobile App is a Tauri v2 based mobile client, positioned as a **portable
 |------------|-----|
 | DevMode debugging protocol | Requires local filesystem and process-level control; a phone has neither |
 | Git status bar | Depends on live workspace fs watching (ADR-078); no local workspace on mobile |
-| Agent create/install/clone/publish | Occasional developer operations — stay on desktop |
+| Bot create/install/clone/publish | Occasional developer operations — stay on desktop |
 | Provider / API Key / MCP / Embedding management | Harness's job, involves secrets; a phone should not hold them |
 | Rich-text editor | Document editing needs a large screen and a physical keyboard |
 | Harness / Extensions navigation | Developer concepts; ordinary users do not need them |
@@ -127,7 +127,7 @@ signal is kept, matching the desktop sidebar.
 
 | Gesture | Scope | Behavior |
 |---------|-------|----------|
-| Swipe left → | Chat detail page | Open the Agent settings drawer (Desktop RightPanel) |
+| Swipe left → | Chat detail page | Open the Bot settings drawer (Desktop RightPanel) |
 | Swipe right ← | Detail page | Go back one level (pop) |
 | Swipe right ← | Root page | **No action** |
 | Vertical swipe | Anywhere | Yields to page scrolling (does not trigger navigation) |
@@ -167,19 +167,19 @@ signal is kept, matching the desktop sidebar.
 └─────────────────────────────────┘
 ```
 
-### 4.2 Agent settings drawer (swipe left)
+### 4.2 Bot settings drawer (swipe left)
 
 Corresponds to Desktop's RightPanel, with six sections: Status / Workspace / Memory / Tools / Config / Sessions.
 
 Mobile uses **native-feeling components** (inset group lists, Switch, Segmented, Stepper, select dropdowns, Action Sheet) rather than scaled-down Desktop controls.
 
-**The workspace section offers Add to Chat only — no file preview.** Mobile has no Monaco, and file content is better read by the Agent inside the conversation. This boundary also honors [ADR-009 §5](../../adr/zh/ADR-009-gateway-workspace-isolation.md): mobile never touches the filesystem directly, going only through the Gateway reverse proxy.
+**The workspace section offers Add to Chat only — no file preview.** Mobile has no Monaco, and file content is better read by the Bot inside the conversation. This boundary also honors [ADR-009 §5](../../adr/zh/ADR-009-gateway-workspace-isolation.md): mobile never touches the filesystem directly, going only through the Gateway reverse proxy.
 
 ### 4.3 Message elements
 
 | Element | Mobile treatment |
 |---------|------------------|
-| User / Agent message bubbles | Kept, with Markdown rendering |
+| User / Bot message bubbles | Kept, with Markdown rendering |
 | Tool calls | Collapsed card, collapsed by default (narrow screen); data comes from the `GET /messages` reload, not an event stream |
 | Approval card | Allow/deny buttons kept (`POST .../approval`); card detail is tiered by channel — full (tool/risk/reason) over WS, generic over polling (§8.6) |
 | AskQuestion card | relay/WS channel renders the question card (`ask_question` event + `POST …/answer`); the polling channel degrades to a "handle this on Desktop" hint (§8.6) |
@@ -190,11 +190,11 @@ Mobile uses **native-feeling components** (inset group lists, Switch, Segmented,
 
 ## 5. Multi-Session Model (core design)
 
-> The first interaction prototype suggested "one active session per Agent". That was **rejected**. Multiple sessions per Agent is a business fact; Mobile is only one of several operating terminals — dropping multi-session would make the product unusable.
+> The first interaction prototype suggested "one active session per Bot". That was **rejected**. Multiple sessions per Bot is a business fact; Mobile is only one of several operating terminals — dropping multi-session would make the product unusable.
 
-### 5.1 Why one session per Agent is not acceptable
+### 5.1 Why one session per Bot is not acceptable
 
-An Agent being driven by several topics at once is normal: the architect is writing an ADR in one session, reviewing someone else's PR in another, and debugging a production issue in a third. Desktop carries this with **parallel Session Tabs**. A 390pt-wide phone screen cannot fit N side-by-side tabs — but that is a reason **"tabs are the wrong container"**, not a reason **"multiple sessions are not needed"**.
+A Bot being driven by several topics at once is normal: the architect is writing an ADR in one session, reviewing someone else's PR in another, and debugging a production issue in a third. Desktop carries this with **parallel Session Tabs**. A 390pt-wide phone screen cannot fit N side-by-side tabs — but that is a reason **"tabs are the wrong container"**, not a reason **"multiple sessions are not needed"**.
 
 ### 5.2 Container: the nav-bar title is the session switcher
 
@@ -457,7 +457,7 @@ Connect-screen probe (§7.2)
 | client_id | `user:{sub}:mobile:{device_uuid}`. `device_uuid` is generated on first launch and persisted (same store as tokens); `{sub}` = the access token's `sub` claim (the **user_id UUID**, not the login name) — the broker cross-checks and drops impersonation with a close, no CONNACK. **The session channel and the presence channel are two connections and their client ids MUST differ**: MQTT 3.1.1 keys a session by client id, so a duplicate CONNECT takes the other socket over. The presence channel appends `-presence` to the device segment (`remote_client_shape` forbids a fourth colon, so `:presence` is not an option) |
 | CONNECT auth | username=`{sub}` (informational; the broker decides on client_id + password), password=**current access token**. MQTT 3.1.1 never re-authenticates a live connection: after a token rotation (15 min) the new password rides the next reconnect — Desktop's `MqttCredentials::refresher` semantics: every reconnect reads the freshest token from authStore, triggering the single-flight refresh first if it is near expiry |
 | Subscription set (**foreground session only**) | `acowork/agents/{id}/sessions/{sid}/state` (retained: status + message_count — the pushed equivalent of the polling snapshot)<br>`…/messages/done`, `…/messages/error`, `…/messages/stopped`<br>`…/messages/tool_approval_needed` (retained QoS1, carries tool details)<br>`…/messages/ask_question` (retained QoS1, `question_json`) |
-| Presence subscription (**global second connection**) | `acowork/agents/+/status` (QoS1) — one wildcard filter covers the whole agent fleet. The payload is `DataEnvelope{agent_status = 9}` (`AgentStatus`: online / instance_id / state / detail), mapped onto **the same vocabulary the HTTP directory uses** (`alive` / `lifecycle`), so a push and a poll can never disagree about what the dot means (`src/lib/presence.ts`). The topic is Retained with a heartbeat plus an LWT (`online=false`), so subscribing replays every agent's last verdict and a transition that happened while the device was unreachable is never lost. Lifecycle: opened on login (phase `ready`), closed on logout/expiry. **It has no polling fallback by design** — the directory poll already carries presence; if the bridge is unreachable the list simply keeps the last polled verdict |
+| Presence subscription (**global second connection**) | `acowork/agents/+/status` (QoS1) — one wildcard filter covers the whole bot fleet. The payload is `DataEnvelope{agent_status = 9}` (`AgentStatus`: online / instance_id / state / detail), mapped onto **the same vocabulary the HTTP directory uses** (`alive` / `lifecycle`), so a push and a poll can never disagree about what the dot means (`src/lib/presence.ts`). The topic is Retained with a heartbeat plus an LWT (`online=false`), so subscribing replays every bot's last verdict and a transition that happened while the device was unreachable is never lost. Lifecycle: opened on login (phase `ready`), closed on logout/expiry. **It has no polling fallback by design** — the directory poll already carries presence; if the bridge is unreachable the list simply keeps the last polled verdict |
 | User-chat wake-up subscription (**same background connection, the SAME SUBSCRIBE packet**) | `acowork/users/{me}/chat/changed` (QoS1, **empty payload**, non-retained) — the doorbell `acowork-user` rings after every send and every read ([ADR-076 §Decision 8](../../adr/en/ADR-076-multi-user-account-system.md)). It deliberately names nothing: the embedded broker has no subscription-level ACL, so a payload saying which thread changed would publish the social graph. One reaction only: re-read over HTTP (§8.8). Both filters ride ONE SUBSCRIBE packet — the packet-id space is per connection, and two round trips would leave a state where presence subscribed but the doorbell silently did not, with nothing logging it. `chatTopic()` is re-derived per CONNECT, so an account change needs no teardown |
 | The background channel is granted **per filter** | SUBACK return codes line up with the filter order, and `0x80` is the only failure code MQTT 3.1.1 defines. "presence granted + chat `0x80`" is a legal combination (a Gateway with the account system off refuses the mailbox only): presence alone keeps the connection alive, a refused chat half reports `onChatChannel(false)` so the store arms its 5 s fallback poll (§8.8) instead of leaving the thread silently stale. The state is reported **only on a change** — re-reporting it on every reconnect would stop and re-arm that timer each time |
 | **Never subscribed** | `messages/chunk`, `tool_call`, `tool_result`, `reasoning_*` — every incremental/process event. "Final results only" is honored at the subscription layer, not by receiving-and-discarding |
@@ -512,7 +512,7 @@ Enter chat detail / after sending
 ### 8.4 Rendering: final results only (shared by both channels)
 
 - Any channel seeing `meta.message_count` change (or a `done` event) → `GET /api/agents/{id}/sessions/{sid}/messages?tail=N` reloads the tail; render whole (Markdown, collapsed tool cards, scrollable code — all static forms of §4.3 kept).
-- **No incremental assembly, no typewriter effect.** "Agent is working" is carried by the status indicator (nav subtitle + progress row above the composer); content arrives complete.
+- **No incremental assembly, no typewriter effect.** "Bot is working" is carried by the status indicator (nav subtitle + progress row above the composer); content arrives complete.
 - Pagination stays as the existing endpoints (`offset/limit/tail`), first screen tail=50.
 
 ### 8.5 List state freshness
@@ -520,16 +520,16 @@ Enter chat detail / after sending
 | Data | Refresh moments |
 |------|-----------------|
 | Conversation list (§2.3) | once at startup, pull-to-refresh, resume-to-foreground, after session create/delete |
-| Working dot | Follows the agent directory refresh (once at startup + on foreground + pull-to-refresh + after session add/remove). No read/unread count is kept: without push, per-agent "unread" cannot be judged reliably, so v1 drops it outright |
+| Working dot | Follows the bot directory refresh (once at startup + on foreground + pull-to-refresh + after session add/remove). No read/unread count is kept: without push, per-agent "unread" cannot be judged reliably, so v1 drops it outright |
 | (Removed) read/unread badge | v1 did render a local `message_count`-based unread dot; in practice the red/green flip-flop was more distracting than informative and inconsistent with desktop, so the whole thing was removed |
-| Agent online status | pushed by the presence connection (§8.1): online/offline/error flip within milliseconds; the directory poll (once at startup + resume + pull-to-refresh) stays the baseline and the race corrector — a late-arriving poll can repaint a row the push just lit as offline, and the next heartbeat/verdict resets it |
+| Bot online status | pushed by the presence connection (§8.1): online/offline/error flip within milliseconds; the directory poll (once at startup + resume + pull-to-refresh) stays the baseline and the race corrector — a late-arriving poll can repaint a row the push just lit as offline, and the next heartbeat/verdict resets it |
 
 ### 8.6 Channel capability matrix (recorded honestly so "polling-variant semantics" never calcifies into the global truth)
 
 | Capability | WS channel (relay and LAN) | Polling channel (fallback / no bridge) |
 |-----------|--------------------|--------------------------------------|
 | Status line | `state` push | 2 s snapshot |
-| Approval card | full details (tool / risk / reason / timeout) | generic card: "The Agent requests running a tool — details on Desktop" |
+| Approval card | full details (tool / risk / reason / timeout) | generic card: "The Bot requests running a tool — details on Desktop" |
 | AskQuestion | question card + `POST …/answer` | degraded hint: "handle on Desktop" |
 | Decision / answer flow-back | HTTP on both channels (identical) | same |
 | Latency | sub-second | ≤ 2 s |
@@ -537,13 +537,13 @@ Enter chat detail / after sending
 ### 8.7 Known gaps (not v1 blockers; evaluate before public-internet exposure)
 
 - **Per-user subscription authorization**: the remote ACL is currently the `sessions/+/messages/#` wildcard ([ADR-076 §5.5](../../adr/en/ADR-076-multi-user-account-system.md)) — subscribing to another user's session events is protocol-feasible today. Mobile's subscription discipline (foreground readable session only) is client behavior, not authorization. Desktop is in the same water at the same depth; topic-level authorization is a backend item, scheduled as a v1.1 cross-team item.
-- **The presence wildcard is unauthorized in the same way**: `agents/+/status` has no topic ACL on the strict listener either, so ANY valid user token sees the lifecycle verdict of every agent on that Gateway (online/offline/failed, including the startup-failure reason). That matches what Desktop already sees locally; filtering agent presence by ownership is part of the same topic-level authorization item.
+- **The presence wildcard is unauthorized in the same way**: `agents/+/status` has no topic ACL on the strict listener either, so ANY valid user token sees the lifecycle verdict of every bot on that Gateway (online/offline/failed, including the startup-failure reason). That matches what Desktop already sees locally; filtering bot presence by ownership is part of the same topic-level authorization item.
 - **Traffic-storm defense**: the broad-subscription defense rests on the client discipline "subscribe to the foreground session only"; relay-side per-connection rate limiting (24 §5.3) backstops misbehavior.
 - **The chat doorbell is unauthorized in the same way**: `acowork/users/{uid}/chat/changed` is named per account, but with no topic ACL any valid token can subscribe another account's doorbell. The payload is empty, so nothing about the content leaks — what leaks is the existence fact that this account is active. Filtering by `user_id` client-side is discipline, not authorization; topic-level authorization covers this too.
 
 ### 8.8 User↔user chat: wake-up and the refresh that must not move the viewport (same rule on Desktop)
 
-User chat is not an agent session: there is no "turn in progress" to poll, and content appears exactly when the peer decides. Freshness therefore arrives only as a wake-up plus a re-read. The rule is shared by both clients (Desktop `src/stores/userChatStore.ts`, mobile `src/stores/userChatStore.ts`) — **both must read the same window out of the same server data, so a change on one side alone is a defect**.
+User chat is not a bot session: there is no "turn in progress" to poll, and content appears exactly when the peer decides. Freshness therefore arrives only as a wake-up plus a re-read. The rule is shared by both clients (Desktop `src/stores/userChatStore.ts`, mobile `src/stores/userChatStore.ts`) — **both must read the same window out of the same server data, so a change on one side alone is a defect**.
 
 | Rule | Value | Why |
 |------|-------|-----|
@@ -631,7 +631,7 @@ Mobile OSes make no promise about background execution: a WebView is suspended w
 |----------|--------|-----------|
 | Shape | IM style, not a direct three-column translation | Mobile is "messages anywhere", not "managing many panels" |
 | Bottom tabs | 4 (no Harness/Extensions) | Developer concepts do not belong in an ordinary user's navigation |
-| Conversation list | Agents + contacts merged into one stream | The IM mental model is "find someone to talk to", not "pick an Agent" |
+| Conversation list | Bots + contacts merged into one stream | The IM mental model is "find someone to talk to", not "pick a Bot" |
 | Navigation stacks | One independent stack per tab | Preserves context across tab switches, matching IM habits |
 | Tab bar on detail pages | Hidden | Avoids two coexisting navigation systems |
 | Multi-session container | Nav-bar title + Action Sheet | A narrow screen cannot fit a side-by-side tab bar |
@@ -640,7 +640,7 @@ Mobile OSes make no promise about background execution: a WebView is suspended w
 | Read-only textarea | Not rendered | A fake typeable placeholder is a worse experience |
 | Read-only visibility icon | Disabled, not hidden | A viewer needs to know what they are looking at |
 | New session visibility | Defaults to Private | Matches ADR-076's create path |
-| Workspace | Add to Chat only, no preview | No Monaco; the Agent reading files is more natural |
+| Workspace | Add to Chat only, no preview | No Monaco; the Bot reading files is more natural |
 | Board | Degrades to Chip filters | Drag-and-drop is unusable on a narrow screen |
 | Gateway process management | Disabled in v1 | Mobile runs no local Gateway process |
 | Frontend code reuse | Protocol-layer types only | IA and components differ entirely; sharing would accumulate conditionals |

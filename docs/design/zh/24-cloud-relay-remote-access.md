@@ -21,7 +21,7 @@
 > 4. **中继不验证用户 token**（§7.3）：HTTP 中间件与 MQTT CONNECT 认证全部在 Gateway 侧完成，
 >    中继侧仅做隧道鉴权 + 连接级限流。账户体系唯一，无云端镜像账号。
 > 5. **（v0.2.1，实施修订）设备私钥不进密码保险库**（§7.3）：存 Gateway 配置目录明文 `0600`
->    `relay_identity.json`（同 Node Agent `identity.json` 先例，ADR-075）。原因：隧道必须在任何远程
+>    `relay_identity.json`（同 Node Service `identity.json` 先例，ADR-075）。原因：隧道必须在任何远程
 >    用户登录之前可用（登录请求本身走隧道），而 vault 解锁只有本地用户能做——鸡生蛋死锁。
 > 6. **（v0.2.2，实施修订）控制协议自带版本与能力协商**（§5.4.1）：`Register` / `Registered`
 >    增 `proto`（缺省 = 1，即原始格式）与 `caps`。原因：控制协议是公开契约、本仓仅为参考实现，
@@ -101,7 +101,7 @@ Desktop App 以同机进程身份直连。产品需要支持：
 | F2 | MQTT 认证在 CONNECT 时校验，与 HTTP 共享同一 HttpAuth token；ACL 经 `set_auth_handler` 回调实现 | `core/acowork-gateway/src/http/server.rs`、`core/acowork-gateway/src/mqtt/broker.rs` | 远程客户端可复用现有认证链路，ACL 可按连接来源扩展 |
 | F3 | Gateway HTTP 已有 token 认证（HttpAuth），但信任模型建立在 localhost 之上，ACL 注释自述 "single-user phase — permissive" | `rumqttd.toml` §ACL、`core/acowork-gateway/src/http/auth.rs` | 暴露公网前必须完成安全硬化（§7），这是 Phase 1 的**准入门槛**而非收尾工作 |
 | F4 | 平台存在多用户账户体系（AUTH_MODE=multi_user）与用户域服务 | ADR-076、ADR-084（`core/acowork-user`） | 设备注册与中继凭据发放应挂接账户体系，不另造一套身份 |
-| F5 | Node Agent 负责 Runtime 进程生命周期；`install_path` 等为 node-local 路径，跨机 fs 直读即 5xx | ADR-055、AGENTS.md「Gateway boundary」 | 远程模式下客户端不得假设与 Gateway 同机；附件等必须走 Gateway HTTP API |
+| F5 | Node Service 负责 Runtime 进程生命周期；`install_path` 等为 node-local 路径，跨机 fs 直读即 5xx | ADR-055、AGENTS.md「Gateway boundary」 | 远程模式下客户端不得假设与 Gateway 同机；附件等必须走 Gateway HTTP API |
 | F6 | Desktop 的 `GatewayClient` 已支持 `with_base_url / set_base_url`，MQTT 客户端连 `127.0.0.1:19875`（TCP） | `apps/acowork-desktop/src-tauri/src/gateway_client.rs`、`mqtt_client.rs` | Desktop 远程化改造集中在传输层与地址/传输选择管理，API 层基本不动 |
 | F7 | Desktop 承担本机 Gateway 生命周期管理（spawn/监控），并有 clipboard、附件落盘等同机命令 | `apps/acowork-desktop/src-tauri/src/commands/` | 远程模式存在能力降级，需显式清单化（§8） |
 | F8 | DevMode 调试协议走 MQTT + HTTP，高频交互 | ADR-048、`core/acowork-gateway/src/http/debug_mqtt.rs` | 调试通道默认禁止远程访问 |
@@ -381,7 +381,7 @@ sequenceDiagram
   已实证），为远程流量配置独立 listener + 独立 `set_auth_handler`：
   - 允许：`user:{name}:desktop:{id}` / `user:{name}:mobile:{id}` 形状的 client_id，
     密码 = 有效用户 token（复用 `user_verifier` 验签链路）
-  - 拒绝：`node:*`、`agent:*`、`gateway:publisher`、内部 service publisher 等一切其他身份
+  - 拒绝：`node:*`、`bot:*`、`gateway:publisher`、内部 service publisher 等一切其他身份
     ——远程侧不存在 Node/Runtime 直连场景（它们本就在内网连 `:19875`）
 - **HTTP（`127.0.0.1:19877`）**：RemoteOrigin guard middleware（layer 在主 Router 副本上）：
   - 以下路由直接 **404**（不暴露存在性）：`debug_mqtt` 调试端点、Gateway 配置写端点、fs 浏览类端点（F5）
@@ -478,9 +478,9 @@ Gateway 侧 `relay.enabled` 与客户端接入方式正交（单机版 Gateway �
 
 | 能力 | ① 单机 | ② LAN 直连 | ③ Relay | 说明 |
 |------|---------|---------|---------|------|
-| 聊天 / 会话 / Agent 管理 | ✅ | ✅ | ✅ | 核心路径，HTTP + MQTT 流式推送（③ 经隧道） |
+| 聊天 / 会话 / Bot 管理 | ✅ | ✅ | ✅ | 核心路径，HTTP + MQTT 流式推送（③ 经隧道） |
 | 文件上传下载（附件） | ✅ | ✅（走 API） | ✅（走 API） | 禁止本地路径直读（F5） |
-| Gateway 启停 / 自愈 | ✅ | ❌ | ❌ | 远端断电只能等内网侧自愈（Node Agent）或人工干预 |
+| Gateway 启停 / 自愈 | ✅ | ❌ | ❌ | 远端断电只能等内网侧自愈（Node Service）或人工干预 |
 | DevMode 调试协议 | ✅ | ✅ | ❌（默认禁止） | ADR-048 高频交互 + 调试端点屏蔽（§7.2） |
 | 本机剪贴板 / 本地 fs 浏览 | ✅ | ❌ | ❌ | 同机假设不成立 |
 | LSP（本地语言服务器） | ✅ | ❌ | ❌ | LSP relay 绑定 Desktop 所在机器 |

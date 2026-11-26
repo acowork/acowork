@@ -10,7 +10,7 @@
 
 The execution session shows the assistant avatar + name + a phase status line **immediately** after the user sends. The chat session (1:1 and group) shows only a centered generic waiting line at that moment; the avatar + name appear only once the round's reference row and block projection land. The latency is structural: the chat transcript's content plane runs on the disk projection + doorbell (ADR-106 D3/D5), while the waiting window (the D9 claim) was deliberately made "the platform's own voice" — nameless, centered, bubble-less.
 
-This design upgrades the waiting window's presentation from a centered generic line to a **Turn Header**: right after sending, the transcript tail renders the *expected responder's* avatar + name + status line; when the round's execution block or an agent answer row arrives, the claim ends and the block's own avatar header (already existing) takes over at the same anchor — content "overwrites" the state. No new status vocabulary: reuse `getProcessingPhase()`. The name is not a guess — it is the delivery decision's own input (@-mentions / the group default responder / the 1:1 peer), and server-side receipts and closing rows are what falsify it.
+This design upgrades the waiting window's presentation from a centered generic line to a **Turn Header**: right after sending, the transcript tail renders the *expected responder's* avatar + name + status line; when the round's execution block or a bot answer row arrives, the claim ends and the block's own avatar header (already existing) takes over at the same anchor — content "overwrites" the state. No new status vocabulary: reuse `getProcessingPhase()`. The name is not a guess — it is the delivery decision's own input (@-mentions / the group default responder / the 1:1 peer), and server-side receipts and closing rows are what falsify it.
 
 The change is purely presentational: no new network endpoints, no proto changes, no storage changes. It requires a revision chapter to ADR-106 D9 (draft in §9.1).
 
@@ -22,7 +22,7 @@ The change is purely presentational: no new network endpoints, no proto changes,
 - Chat side today: `AgentChatView.tsx:1260` (1:1) and `GroupChatPanel.tsx:1789` (group) render a centered `ChatTurnStatusLine` while `composerLocked` (this device's D9 claim is in window) — generic wording (group) or a named 1:1 string, but **no avatar, no phase**.
 - `ChatExecutionBlock` already renders an avatar + name header (`AgentAvatar`, line 436); its header status word follows "live word wins, read-derived word is the fallback" (line 297), and the live subscription is viewport-scoped, never persisted, never in context, never in unread counts (ADR-106 D9, item 4).
 - Claim mechanism: `chatSessionStore.armTurn(chatSessionId, rowId)`; the window starts at this device's `delivered` send receipt and ends at the first answering row or deadline (ADR-106 revision 2026-11-03); `archived` (no delivery target) and all-failed fan-outs arm nothing.
-- Responder information already known client-side at send time: 1:1 = the peer agent; group with @ = the `targets` argument of `sendGroupText`; group without @ = the chat session's `responder` field (the same field GroupResponderCard reads/writes, stored server-side).
+- Responder information already known client-side at send time: 1:1 = the peer bot; group with @ = the `targets` argument of `sendGroupText`; group without @ = the chat session's `responder` field (the same field GroupResponderCard reads/writes, stored server-side).
 - Avatar anchoring machinery already exists (`avatarAnchor.ts` / `bubbleMetaAnchor.ts`); adjacent bubbles from the same speaker fold their headers, and a block always starts a new turn.
 - Mobile's `AgentChatScreen.tsx` has the same waiting line; the transcript shape is unified with Desktop (ADR-106 P6).
 
@@ -32,7 +32,7 @@ The change is purely presentational: no new network endpoints, no proto changes,
 
 ### Constraints
 
-- ADR-106 D9's three invariants must survive: (1) terminal outcomes (aborted / failed / timeout / waiting) stay centered platform lines — a stop is not the agent speaking; (2) live status is a presentation-layer add-on only: not persisted, not in context, not in unread counts; (3) unreachable ≠ running.
+- ADR-106 D9's three invariants must survive: (1) terminal outcomes (aborted / failed / timeout / waiting) stay centered platform lines — a stop is not the bot speaking; (2) live status is a presentation-layer add-on only: not persisted, not in context, not in unread counts; (3) unreachable ≠ running.
 - ADR-049: the single source of truth for status vocabulary is `getProcessingPhase()`; parallel enums are forbidden.
 - ADR-055: the round's execution session may live on a remote node — live status being unavailable is the normal case, not an error.
 - Gateway boundary red line: chat presentation data is fetched only via Runtime/Gateway HTTP, never by direct filesystem reads (this design adds no data plane at all).
@@ -41,9 +41,9 @@ The change is purely presentational: no new network endpoints, no proto changes,
 
 ### Functional
 
-- FR-1: In a 1:1 chat, right after the send's `delivered` receipt, the transcript tail shows the peer agent's avatar + name + role + status line (the role line was added by the 2026-11-08b amendment, §9.1).
+- FR-1: In a 1:1 chat, right after the send's `delivered` receipt, the transcript tail shows the peer bot's avatar + name + role + status line (the role line was added by the 2026-11-08b amendment, §9.1).
 - FR-2: In a group, the header shows the expected responder(s) per the resolution rules (avatar stack + name list for multiple targets, and no role line) + status line.
-- FR-3: When the round's reference row arrives (block renders) or an agent answer row arrives, the turn header disappears and content takes over at the same avatar anchor — block header / bubble header — with no visual jump.
+- FR-3: When the round's reference row arrives (block renders) or a bot answer row arrives, the turn header disappears and content takes over at the same avatar anchor — block header / bubble header — with no visual jump.
 - FR-4: `archived` sends, all-failed fan-outs, and page reloads (no local claim) show no turn header — identical gating to today's waiting line.
 - FR-5: Terminal closings (aborted / failed / timeout) remain centered platform lines, never avatar-wrapped.
 - FR-6: Within the claim window, if the round's bound exec session is resident locally and resolvable (Phase 2, optional), the status line shows the real `ProcessingPhase` word; otherwise a generic "working" shimmer.
@@ -87,7 +87,7 @@ user sends ──202 delivered──▶ armTurn(claim)
 ### Module: ChatTurnHeader (new, Desktop `components/chat/`)
 
 - **Responsibility**: render the turn header — avatar (for several responders, this component's own overlapping stack; NOT the sidebar's square-tile `GroupAvatarStack`, which is a different visual for a different surface) + name chain + one status word; reuse `ChatEventText`'s live-shimmer grammar.
-- **Dependencies**: agent directory (avatar/display-name resolution, same path both views already use); `getProcessingPhase` (Phase 2).
+- **Dependencies**: bot directory (avatar/display-name resolution, same path both views already use); `getProcessingPhase` (Phase 2).
 - **Public interface**: `<ChatTurnHeader identities={TurnIdentity[]} text={string} className?={string} />` — multiple identities stack; the name chain is joined by `Intl.ListFormat` for the active locale ("A、B" in zh/ja, "A, B" in en); Phase 2 adds a `phase` input here, and its absence renders the generic "working".
 - **Failure modes**: identity unresolved (directory not ready) → degrade to today's centered generic line; never render a nameless avatar.
 
@@ -102,10 +102,10 @@ user sends ──202 delivered──▶ armTurn(claim)
 
 - **Responsibility**: replace `composerLocked && <ChatTurnStatusLine …/>` with `<ChatTurnHeader>` per the resolution rules below; hole-class messages (`block.notFound` etc.) stay centered platform lines.
 - **Responder resolution rules** (single function `resolveExpectedResponders`, shared by both views; it mirrors the server's `deliver_mentions` / `addressed_execution_round` rung for rung):
-  1. 1:1 chat: the peer agent instance (one);
-  2. group reply addressing a round: that round's agent alone — the server resolves `in_reply_to` against the whole log and ignores the body's `@`s once a round is named. When the addressed row is outside this surface's loaded window the fact is UNRESOLVED, not absent: name nobody (the centered line) rather than guess from the mentions;
+  1. 1:1 chat: the peer bot instance (one);
+  2. group reply addressing a round: that round's bot alone — the server resolves `in_reply_to` against the whole log and ignores the body's `@`s once a round is named. When the addressed row is outside this surface's loaded window the fact is UNRESOLVED, not absent: name nobody (the centered line) rather than guess from the mentions;
   3. group with @: the `targets` list;
-  4. group without @: the agent named by the chat session's `default_responder` field; no responder (archive path) → render nothing (that send arms no claim);
+  4. group without @: the bot named by the chat session's `default_responder` field; no responder (archive path) → render nothing (that send arms no claim);
   5. multiple targets: list all (stacked avatars + the locale's name chain).
 - **Failure modes**: responder read fails → generic-line fallback.
 
@@ -152,7 +152,7 @@ P1/P2 are independently reviewable and mergeable; no phase spans modules.
 |----------|--------|-----------|-----------------------|------------|
 | Status vocabulary | Reuse `ProcessingPhase` + one claim-state "working" | ADR-049 single truth; the claim state is "window exists", not a phase — no enum extension | New chat session-state enum | One less precise word in the shortest window, bought with zero drift |
 | Group naming basis | Delivery-decision inputs (@ / responder), falsified by closing rows | The name is a decision fact, not a guess; D9's ban targeted inferring the responder from transcript shape | Keep the generic nameless line (status quo) | A later re-routed name may show for a very short window |
-| Terminal presentation | Keep centered platform lines | D9 invariant: a stop is not the agent speaking | Avatar-wrap terminals too | Consistent with the exec session's own terminal lines anyway |
+| Terminal presentation | Keep centered platform lines | D9 invariant: a stop is not the bot speaking | Avatar-wrap terminals too | Consistent with the exec session's own terminal lines anyway |
 | Takeover mechanism | Reuse the block's own avatar header + avatarAnchor | Machinery exists; "overwrite" = claim end; no new folding logic | Persistent header that grows downward | Depends on the existing reference-row arrival timing |
 | Phase 2 live words | Optional, local-only, viewport-only | Isomorphic to D9 item 4; cross-machine unavailability is the norm | Force full-chain immediacy | Cross-machine rounds keep showing the generic word |
 
@@ -160,7 +160,7 @@ P1/P2 are independently reviewable and mergeable; no phase spans modules.
 
 > **Revision (2026-11-08 · turn header)**: within "this device's send claim", D9's waiting line is upgraded from a centered generic line to a **turn header**: it renders the expected responder(s) (1:1 peer / @-mentions / group default responder — all delivery-decision inputs, not transcript-shape inference) as avatar + name + status word; the first answering row or the deadline hands over to the block's own avatar header at the same anchor. The "never guess the responder" ban narrows to "never infer the responder from transcript shape"; when delivery-decision inputs are unresolvable, degrade to the generic centered line. The three invariants (centered terminal rows, live-as-presentation-only, unreachable≠running) are kept verbatim. The criteria, window, and closing mechanism are unchanged (still the D9 claim).
 
-> **Revision (2026-11-08b · the role line)**: the turn header's shape is fixed as **avatar + name + role + status word**. The role comes from the same agent-directory meta that `ChatExecutionBlock`'s header and a regular agent message header read, on the same tier (one step under the name). The reason is not "more information" but ADR-106 Decision 4's takeover invariant: the block header renders name + role, so a claim window showing only the name would have to *insert* a line under it at handover and shift the whole column — and the point of the turn header is "content overwrites state", not a re-layout. A multi-target fan-out renders **no** role line: a joined list of roles names no single responder, and the avatar stack already says "several".
+> **Revision (2026-11-08b · the role line)**: the turn header's shape is fixed as **avatar + name + role + status word**. The role comes from the same agent-directory meta that `ChatExecutionBlock`'s header and a regular bot message header read, on the same tier (one step under the name). The reason is not "more information" but ADR-106 Decision 4's takeover invariant: the block header renders name + role, so a claim window showing only the name would have to *insert* a line under it at handover and shift the whole column — and the point of the turn header is "content overwrites state", not a re-layout. A multi-target fan-out renders **no** role line: a joined list of roles names no single responder, and the avatar stack already says "several".
 
 > **Revision (2026-11-08c · the status word's position)**: the status word does not live in the identity column — it lives in the **content column**, on the row that starts with the same 40px spacer as the block body (the column where `ChatExecutionBlock`'s "Explored" row sits). The 2026-11-08b amendment fixed the element list (avatar + name + role + status word) but not which column the word belongs to, and the implementation put it as the identity column's third line: the `items-center` row grew with that column, lifting the name and role off the avatar's axis, and at handover the word would have had to jump sideways into the content column — a violation of the very invariant that revision was written for. The identity row therefore wears the block header's own classes, and the word becomes its own row behind a 40px spacer: identity row + one line in the content column, of which the takeover replaces only the latter.
 

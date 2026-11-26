@@ -10,11 +10,11 @@
 
 > **v4.0 Change**: Memory layer switched to SQLite (single database + WAL + FTS5 + a vectors table; see [ADR-082](../../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)). The `acowork-grafeo` crate has been deleted; memory engine code (`EpisodicDistiller` / `RetrievalMetrics`) migrated to `core/acowork-memory/`.
 
-> **v4.1 Change (implemented, 2026-10-23)**: the memory module has been extracted from the Runtime into a Gateway-hosted standalone process `acowork-memory`; Agents call its tools over MCP (registered as `mcp_memory__memory_store` / `mcp_memory__memory_recall`, with per-tool opt-in in `agent_mcp_tools.json`, ADR-069) and the panel reaches it through the Gateway reverse proxy; auto-inject is removed, the `memory:read` / `memory:write` permission entries are deleted, and the Runtime is left with zero memory business code — see [ADR-101](../../adr/en/ADR-101-memory-standalone-mcp-service.md). **The rest of this document is still written against the pre-extraction (built-in) shape**; the layered data model (transient / experiential / consolidated) and the distillation and forgetting pipeline semantics are unchanged — what changed is process ownership and the access channel.
+> **v4.1 Change (implemented, 2026-10-23)**: the memory module has been extracted from the Runtime into a Gateway-hosted standalone process `acowork-memory`; Bots call its tools over MCP (registered as `mcp_memory__memory_store` / `mcp_memory__memory_recall`, with per-tool opt-in in `agent_mcp_tools.json`, ADR-069) and the panel reaches it through the Gateway reverse proxy; auto-inject is removed, the `memory:read` / `memory:write` permission entries are deleted, and the Runtime is left with zero memory business code — see [ADR-101](../../adr/en/ADR-101-memory-standalone-mcp-service.md). **The rest of this document is still written against the pre-extraction (built-in) shape**; the layered data model (transient / experiential / consolidated) and the distillation and forgetting pipeline semantics are unchanged — what changed is process ownership and the access channel.
 
 ---
 
-Memory uses **biomimetic layered** design, with human cognitive science as reference and SQLite memory layer graph database as storage engine. Each Agent has completely independent private Memory, no Gateway-maintained public database exists. Cross-Agent data sharing is implemented through Intent queries and system Agent services, not shared storage.
+Memory uses **biomimetic layered** design, with human cognitive science as reference and SQLite memory layer graph database as storage engine. Each Bot has completely independent private Memory, no Gateway-maintained public database exists. Cross-Agent data sharing is implemented through Intent queries and system Bot services, not shared storage.
 
 **Design philosophy**: Memory is not storage, it is cognition. A memory system without forgetting is a dump, a memory system without consolidation is a fragment pile, a memory system without self-awareness is a database. What the Memory module should answer is not "how to store", but "how to remember, how to forget, how to think".
 
@@ -68,11 +68,11 @@ The old three-tier (working memory / private memory / cloud sync) confused two d
 |----------------|-----------|-------------------|
 | Transient → Experiential | Summary write | Compaction triggers (80% token usage) or Session close, LLM summary asynchronously writes to SQLite. No longer per-round write, avoiding redundancy with JSONL |
 | Experiential → Consolidated | Consolidation pipeline | Instant extraction (LLM autonomous tool call) + offline replay (dedicated call when idle) |
-| Consolidated → Transient | Retrieval injection | When user input arrives, retrieve related memory and inject into context. **Default OFF since 2026-09-12** (`MemoryManagerConfig::auto_inject_enabled = false`): different Agents have different recall needs, SQLite memory layer triple/preference memory is incomplete, raw user message as query has low hit rate. Recovery method: set `auto_inject_enabled` to `true` (can be per-agent configured). Explicit `memory_recall` tool not affected |
+| Consolidated → Transient | Retrieval injection | When user input arrives, retrieve related memory and inject into context. **Default OFF since 2026-09-12** (`MemoryManagerConfig::auto_inject_enabled = false`): different Bots have different recall needs, SQLite memory layer triple/preference memory is incomplete, raw user message as query has low hit rate. Recovery method: set `auto_inject_enabled` to `true` (can be per-agent configured). Explicit `memory_recall` tool not affected |
 | Intra Consolidated/Experiential flow | Associative diffusion | **Not implemented** (ADR-082 D4 removed graph traversal; no `edges` table — §6 is retained as a design goal) |
 | Consolidated → Dormant | Forgetting decay | Background periodically calculates decay_score |
 
-**Irreversible one-way gate**: Experiential → Consolidated is information refinement process (raw fragments → structured knowledge), naturally one-way. But Consolidated → Experiential can be implemented through "recall" mechanism — when user or Agent actively triggers, extract related knowledge from consolidated layer as new episodic context injected into transient layer.
+**Irreversible one-way gate**: Experiential → Consolidated is information refinement process (raw fragments → structured knowledge), naturally one-way. But Consolidated → Experiential can be implemented through "recall" mechanism — when user or Bot actively triggers, extract related knowledge from consolidated layer as new episodic context injected into transient layer.
 
 **Mapping between layers and SQLite memory layer storage:**
 
@@ -82,7 +82,7 @@ The old three-tier (working memory / private memory / cloud sync) confused two d
 | Experiential | Episodic memory | `nodes` (`label = 'Episodic'`) + `vectors` + `fts_episodic` | Vectors in a `vectors` table (f32 BLOB); lexical search via an FTS5 trigram virtual table |
 | Consolidated | Semantic/Procedural/Autobiographical/Skill experience | `nodes` (`label` ∈ {Knowledge, Procedural, Autobiographical}) + their `vectors` / `fts_*` | One FTS5 virtual table per label; no `edges` table |
 
-There is no ambiguity like "experiential layer nodes exist in semantic memory" — cognitive layering and `nodes.label` are one-to-one mapping. The storage format is a single SQLite file (ADR-082 D1, rusqlite bundled), one per Agent instance.
+There is no ambiguity like "experiential layer nodes exist in semantic memory" — cognitive layering and `nodes.label` are one-to-one mapping. The storage format is a single SQLite file (ADR-082 D1, rusqlite bundled), one per Bot instance.
 
 > **v4.1 change**: the `episodes` / `episodes_vec` / `episodes_fts` table layout, the sqlite-vss HNSW index, and the `edges` table described by the previous version of this table no longer exist. ADR-082 D2 dropped HNSW (in-memory cache + brute-force scan, recall = 100%), D3 moved text search to FTS5, and D4 removed inter-layer graph traversal (no `edges` table, no simulated graph walks). The storage path moved with ADR-101 to `$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`.
 
@@ -99,7 +99,7 @@ Memory system involves a lot of semantic judgments (what's worth remembering, ho
 
 ## 1. Transient Layer: Working Memory
 
-Working memory is what Agent is currently "thinking" about, directly mapped to LLM's context window.
+Working memory is what Bot is currently "thinking" about, directly mapped to LLM's context window.
 
 ```
 ┌─ System Prompt ──────────────────────────┐
@@ -164,7 +164,7 @@ Context compression is a semantic understanding task; only LLM can reliably judg
 
 ## 2. Experiential Layer: Episodic Memory
 
-Episodic memory stores Agent's interaction fragments with users, is the "raw material" of memory.
+Episodic memory stores Bot's interaction fragments with users, is the "raw material" of memory.
 
 ```
 SQLite `episodes` row
@@ -224,7 +224,7 @@ Episodic memory's forgetting is more aggressive than consolidated layer — this
 
 ## 3. Consolidated Layer: Long-Term Memory
 
-Consolidated layer is Agent's "knowledge foundation", containing three memory types, all stored in SQLite's semantic memory graph.
+Consolidated layer is Bot's "knowledge foundation", containing three memory types, all stored in SQLite's semantic memory graph.
 
 ### 3.1 Semantic Memory (KnowledgeNode)
 
@@ -345,7 +345,7 @@ When a ProceduralNode's `source_skill` is non-empty, it forms cross-reference wi
 
 ### 3.3 Autobiographical Memory (AutobiographicalNode)
 
-Stores Agent's self-awareness — "who am I, what can I do, where are my boundaries". This is the foundation of personality continuity.
+Stores Bot's self-awareness — "who am I, what can I do, where are my boundaries". This is the foundation of personality continuity.
 
 ```rust
 struct AutobiographicalNode {
@@ -378,13 +378,13 @@ enum AutobiographicalAspect {
 **Sources of autobiographical memory:**
 
 1. **Manifest derived** (auto): From `manifest.toml`'s `agent.name`, `agent.description`, `skills/` list auto-generate Identity and Capability nodes
-2. **Self-evaluation** (periodic): When Agent is idle, based on SkillExperience's model_compatibility and execution statistics, generate/update Limitation nodes ("on qwen3:8b, complex reasoning task success rate ~60%")
-3. **User statement** (instant): User directly expresses evaluation of Agent ("you're too wordy"), LLM calls `memory_store` tool in Tool Call phase, passing `category: "autobiographical"` + `aspect: "Preference"` to land. See §4.1 tool definition
+2. **Self-evaluation** (periodic): When Bot is idle, based on SkillExperience's model_compatibility and execution statistics, generate/update Limitation nodes ("on qwen3:8b, complex reasoning task success rate ~60%")
+3. **User statement** (instant): User directly expresses evaluation of Bot ("you're too wordy"), LLM calls `memory_store` tool in Tool Call phase, passing `category: "autobiographical"` + `aspect: "Preference"` to land. See §4.1 tool definition
 4. **Important event** (instant): Key interactions (first time learning new Skill, major error correction, user expressing strong emotion) LLM judges then calls `memory_store` tool, passing `category: "autobiographical"` + `aspect: "History"` (append by event, append-only). Same event won't bloat from repeated writes
 
 **Autobiographical Memory Injection**:
 
-Autobiographical memory summary always injected at front of System Prompt (after Agent identity definition), as Agent's "self-awareness background":
+Autobiographical memory summary always injected at front of System Prompt (after Bot identity definition), as Bot's "self-awareness background":
 
 ```
 ## About Yourself
@@ -409,7 +409,7 @@ Consolidation pipeline is the information refinement process from Experiential t
 
 ### 4.1 Instant Extraction (Phase 1)
 
-Instant extraction is implemented via **Tool Call mechanism** — `memory_store` as one of Agent's built-in tools, LLM autonomously judges whether to call when generating replies. No extra LLM calls, async pipelines, or prefilter rules needed.
+Instant extraction is implemented via **Tool Call mechanism** — `memory_store` as one of Bot's built-in tools, LLM autonomously judges whether to call when generating replies. No extra LLM calls, async pipelines, or prefilter rules needed.
 
 **Instant Extraction Output Definition (ADR-068 2026-09 revision)**:
 

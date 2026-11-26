@@ -5,7 +5,7 @@
 
 ---
 
-Gateway is a resident system-level process implemented in Rust. Gateway **does not proxy Agent business logic** (does not proxy LLM calls, does not proxy tool execution); it only handles coordination work that must be centralized.
+Gateway is a resident system-level process implemented in Rust. Gateway **does not proxy Bot business logic** (does not proxy LLM calls, does not proxy tool execution); it only handles coordination work that must be centralized.
 
 Gateway serves two consumer categories simultaneously:
 
@@ -30,7 +30,7 @@ Gateway serves two consumer categories simultaneously:
 └────────────────────────────────────────────────┘
 ```
 
-- **MQTT + HTTP reverse proxy**: IPC channel for Agent Runtime — MQTT carries real-time event push (chat chunk, tool_call, done, device status Will+Retained), HTTP reverse proxy carries large data queries (history messages, session queries), Runtime itself does not expose external ports
+- **MQTT + HTTP reverse proxy**: IPC channel for Bot Runtime — MQTT carries real-time event push (chat chunk, tool_call, done, device status Will+Retained), HTTP reverse proxy carries large data queries (history messages, session queries), Runtime itself does not expose external ports
 - **HTTP API**: REST interface for Desktop App / CLI (Axum, localhost only)
 
 Both share Gateway's internal state, just different access layers.
@@ -40,44 +40,44 @@ Both share Gateway's internal state, just different access layers.
 - **Install**: Extract `.agent` to `~/.local/share/agent-gateway/agents/<agent_id>/`, verify manifest integrity, record version. Must verify package signature before installation (see [02-agent-package.md](./02-agent-package.md)); if signature is invalid or doesn't match the installed version's signature, reject installation.
 - **Uninstall**: Delete the corresponding directory, optionally back up user data (including private SQLite memory layer).
 - **Upgrade**: Preserve `data/` and user-modified `config/`, replace other files. If `runtime_version` is incompatible, prompt the user. On upgrade, verify the new package's signing certificate fingerprint matches the installed version.
-- **Repository support**: Configurable multiple HTTP repository sources (like apt), periodically check for updates. Repository-provided .agent packages must be signed.
+- **Repository support**: Configurable multiple HTTP repository sources (like apt), periodically check for updates. Repository-provided .bot packages must be signed.
 
 ## 2. Lifecycle Manager
 
 **Startup strategy:**
 - On-demand: Start when receiving messages matching triggers or user explicitly invokes.
-- Persistent: User can mark an Agent to auto-start on boot.
+- Persistent: User can mark a Bot to auto-start on boot.
 - Scheduled: Triggered by cron expression. (**Phase 3 implementation**, Phase 2 supports on-demand and persistent only)
 
 **Process management:**
 - Use `std::process::Command` to create child processes, set independent working directory, environment variables.
-- Startup parameter injection: Agent package path, Gateway MQTT broker address (`127.0.0.1:19875`), Agent ID, workspace path.
-- **API Key distribution**: Agent Runtime obtains Key from Gateway via MQTT handshake (`AgentHello` message, see [ADR-034](../../adr/zh/ADR-034-mqtt-http-boundary.md), not passed via environment variables to prevent ps leakage.
-- Health check: If Agent process exits, decide whether to auto-restart based on exit code (configurable).
+- Startup parameter injection: Bot package path, Gateway MQTT broker address (`127.0.0.1:19875`), Bot ID, workspace path.
+- **API Key distribution**: Bot Runtime obtains Key from Gateway via MQTT handshake (`AgentHello` message, see [ADR-034](../../adr/zh/ADR-034-mqtt-http-boundary.md), not passed via environment variables to prevent ps leakage.
+- Health check: If Bot process exits, decide whether to auto-restart based on exit code (configurable).
 
 **Sleep and wake:**
-- Use kill-restart strategy: After idle timeout, directly kill Agent Runtime process, re-spawn when needed next time.
-- Agent state persists via private SQLite, restores context from Memory on startup.
+- Use kill-restart strategy: After idle timeout, directly kill Bot Runtime process, re-spawn when needed next time.
+- Bot state persists via private SQLite, restores context from Memory on startup.
 - Do not use SIGSTOP/SIGCONT (Windows doesn't support, process still occupies memory, state serialization difficult).
-- Agent can declare `startup_timeout_ms` in manifest; Gateway uses this to decide whether to pre-warm (start ahead of time).
+- Bot can declare `startup_timeout_ms` in manifest; Gateway uses this to decide whether to pre-warm (start ahead of time).
 
 ## 3. Intent Router
 
 **Input sources:**
 - Requests from user interface (CLI/GUI).
 - Scheduled task triggers.
-- Intent messages forwarded by other Agents via Gateway (see [06-communication.md](./06-communication.md)).
+- Intent messages forwarded by other Bots via Gateway (see [06-communication.md](./06-communication.md)).
 
 **Routing rules:**
-- Route directly to target Agent based on `target` field in message.
-- If target Agent is not running, start it on-demand.
-- If `target` not specified, match installed Agents' manifest `triggers.message.pattern`.
+- Route directly to target Bot based on `target` field in message.
+- If target Bot is not running, start it on-demand.
+- If `target` not specified, match installed Bots' manifest `triggers.message.pattern`.
 
 ## 4. Sandbox Configurator
 
-> **2026-04-25 Decision (ADR-007)**: Process-level sandbox (bubblewrap / AppContainer / Seatbelt) deferred to Phase 7. For Phases 3~6, when Gateway launches Agent Runtime, only **policy-level isolation** is used (permission checks + path allow-list), without OS-level mandatory isolation. The full design is preserved below for Phase 7 reference.
+> **2026-04-25 Decision (ADR-007)**: Process-level sandbox (bubblewrap / AppContainer / Seatbelt) deferred to Phase 7. For Phases 3~6, when Gateway launches Bot Runtime, only **policy-level isolation** is used (permission checks + path allow-list), without OS-level mandatory isolation. The full design is preserved below for Phase 7 reference.
 
-Gateway configures sandbox parameters based on manifest when launching Agent Runtime, after which OS layer executes isolation. Implementation differs per platform, but isolation goals are consistent.
+Gateway configures sandbox parameters based on manifest when launching Bot Runtime, after which OS layer executes isolation. Implementation differs per platform, but isolation goals are consistent.
 
 **Cross-platform Isolation Strategy Comparison:**
 
@@ -94,7 +94,7 @@ Gateway configures sandbox parameters based on manifest when launching Agent Run
 
 | **Data Directory** | XDG (`~/.local/share/`) | `%APPDATA%\AgentGateway\` | `~/Library/Application Support/AgentGateway/` | `context.getFilesDir()` | appSupportDir |
 
-**Phase 3~6 Policy-Level Isolation**: Gateway launches Agent Runtime via bare `Command::new`, relying on Runtime-side PermissionChecker for path allow-list and network permission checks.
+**Phase 3~6 Policy-Level Isolation**: Gateway launches Bot Runtime via bare `Command::new`, relying on Runtime-side PermissionChecker for path allow-list and network permission checks.
 
 **Phase 7 Process-Level Sandbox Implementation Example (for reference):**
 ```bash
@@ -128,46 +128,46 @@ Centralized management of all LLM API Keys, encrypted storage:
 └── vault.key               # Master key, derived from user password
 ```
 
-- Agent manifest references Key with `vault:openai_key`, not stored plaintext.
-- Agent Runtime fetches Key via MQTT handshake after startup (one-time transfer, not via environment variables).
+- Bot manifest references Key with `vault:openai_key`, not stored plaintext.
+- Bot Runtime fetches Key via MQTT handshake after startup (one-time transfer, not via environment variables).
 - Key stored zero-copy/sealed on Rust side (using `secrecy::SecretString`), LLM Client directly uses this Secret to sign requests; WASM plugin layer absolutely has no API to read this string.
 
 ## 6. Budget Tracker
 
-Receives LLM usage reports from Agent Runtime, maintains cross-Agent statistics:
+Receives LLM usage reports from Bot Runtime, maintains cross-Agent statistics:
 
-- Each Agent has independent daily/monthly Token and cost limits.
-- On overrun, send signal to Agent (stop / fallback / warn).
-- Provides budget query interface for Agent local pre-check.
+- Each Bot has independent daily/monthly Token and cost limits.
+- On overrun, send signal to Bot (stop / fallback / warn).
+- Provides budget query interface for Bot local pre-check.
 
 ## 7. Rate Limiter
 
-Coordinates concurrent requests from multiple Agents to the same LLM Provider, avoiding triggering API Rate Limits:
+Coordinates concurrent requests from multiple Bots to the same LLM Provider, avoiding triggering API Rate Limits:
 
-- Before Agent calls LLM, apply for rate token via Gateway (extremely lightweight RPC, < 0.1ms).
+- Before Bot calls LLM, apply for rate token via Gateway (extremely lightweight RPC, < 0.1ms).
 - Gateway allocates tokens based on Provider's RPM/TPM limits.
 
 ## 8. Configuration and Data Storage
 
 - **Gateway's own configuration**: `~/.config/agent-gateway/config.toml` (containing Vault config, repository list, default LLM config, etc.).
-- **Each Agent's workspace**: `~/.local/share/agent-gateway/agents/<agent_id>/workspace/`:
+- **Each Bot's workspace**: `~/.local/share/agent-gateway/agents/<agent_id>/workspace/`:
   - `data/`: Copied from package, read-write.
   - `config/`: User-modifiable configuration (initially from package config).
   - `memory/`: Workspace store SQLite file (`private.sqlite`) — carries the session meta and the conversation index (ADR-082). Memory nodes live in the standalone memory service (`$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`, ADR-101).
   - `runtime/`: Temporary files (pid, HTTP port).
-- **Logs**: Gateway collects stdout/stderr from all Agents, writes to `~/.local/share/agent-gateway/logs/`, supports filtering by Agent.
+- **Logs**: Gateway collects stdout/stderr from all Bots, writes to `~/.local/share/agent-gateway/logs/`, supports filtering by Bot.
 
 ## 9. HTTP API (Desktop App / CLI Access Layer)
 
 > **Current implementation status**: HTTP API is fully implemented based on Axum, providing REST interfaces; streaming events go through MQTT (see §9.1 dual-protocol architecture and [`docs/protocols/zh/README.md`](../../protocols/zh/README.md)). The following interface definitions reflect actual implementation, but for documentation conciseness, only core routes are listed. Complete route list see code `crates/acowork-gateway/src/http/routes.rs`.
 
-The IPC between Gateway and Agent Runtime, starting from [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md), is unified as **MQTT pub/sub + HTTP reverse proxy**: MQTT handles real-time event push (chat chunk, tool_call, done, device status Will+Retained), HTTP reverse proxy handles large data queries and session history pulls. HTTP API as the unified access layer for Desktop App and CLI, invisible to Runtime.
+The IPC between Gateway and Bot Runtime, starting from [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md), is unified as **MQTT pub/sub + HTTP reverse proxy**: MQTT handles real-time event push (chat chunk, tool_call, done, device status Will+Retained), HTTP reverse proxy handles large data queries and session history pulls. HTTP API as the unified access layer for Desktop App and CLI, invisible to Runtime.
 
 ### 9.1 Why Dual Protocol (MQTT + HTTP)
 
 | Dimension | MQTT | HTTP Reverse Proxy |
 |-----------|------|---------------------|
-| Consumer | Agent Runtime (Gateway ↔ Runtime bidirectional) | Gateway → Runtime (on-demand forwarding) |
+| Consumer | Bot Runtime (Gateway ↔ Runtime bidirectional) | Gateway → Runtime (on-demand forwarding) |
 | Listener | Gateway embedded rumqttd broker (`127.0.0.1:19875`) | Gateway HTTP reverse proxy (`127.0.0.1:19876`) |
 | Communication Mode | Topic pub/sub (many-to-many, multiplexed) | Request/response (point-to-point) |
 | Frame Format | MQTT Payload (independent protobuf namespace, see [`core/acowork-core/proto/mqtt_payload.proto`](../../../core/acowork-core/proto/mqtt_payload.proto)) | Standard HTTP/JSON |
@@ -287,7 +287,7 @@ pub fn http_routes() -> Router<GatewayState> {
 
 ### 9.4 Core Interface Details
 
-#### 9.4.1 Agent Management
+#### 9.4.1 Bot Management
 
 ```json
 // GET /api/agents
@@ -389,7 +389,7 @@ The Vault HTTP API **does not return plaintext Keys**, only existence and desens
 
 > **History**: v3.1 and earlier versions used Socket API (Unix Socket / Named Pipe / Local TCP) as Gateway ↔ Runtime IPC channel; the gRPC era was Protocol Buffers bidirectional streaming (see [`16-ipc-grpc-migration.md`](./16-ipc-grpc-migration.md)). Starting from [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md), IPC converged to **MQTT + HTTP reverse proxy**.
 
-Agent management operations in HTTP API (install/uninstall/start/stop) directly call Gateway internal components, sharing the same logic as MQTT channel processing:
+Bot management operations in HTTP API (install/uninstall/start/stop) directly call Gateway internal components, sharing the same logic as MQTT channel processing:
 
 ```
 POST /api/agents/:id/start
@@ -426,7 +426,7 @@ HTTP API is not a bypass independent of the IPC channel, but Runtime protocol's 
 | Vault Key desensitization | GET endpoint doesn't return plaintext, POST endpoint receives plaintext |
 | No CORS allow-list | Gateway doesn't maintain origin allow-list (CORS always permissive) — local loopback 0 risk |
 | Optional Auth Token | Gateway generates random token, Desktop App retrieves on first connection, subsequent requests carry `Authorization: Bearer <token>` |
-| Agent install verification | Mandatory package signature verification (HTTP and MQTT channels share the same verification path) |
+| Bot install verification | Mandatory package signature verification (HTTP and MQTT channels share the same verification path) |
 
 Auth Token mechanism (optional, Phase 5+):
 ```
@@ -520,7 +520,7 @@ Desktop App also goes through this path
 
 | Decision | Choice | Reason |
 |----------|--------|--------|
-| Gateway doesn't proxy business logic | Pure coordination layer | Avoid single-point bottleneck; Agent Runtime direct LLM connection has lower latency |
+| Gateway doesn't proxy business logic | Pure coordination layer | Avoid single-point bottleneck; Bot Runtime direct LLM connection has lower latency |
 | Dual protocol layer (since ADR-033) | MQTT + HTTP reverse proxy | MQTT carries real-time event push (chat chunk, tool_call, done, device status), HTTP reverse proxy carries large data queries and session history (see ADR-033 / ADR-034) |
 | HTTP framework | Axum | Most mature HTTP framework in Rust ecosystem; Gateway already confirmed in technology selection |
 | HTTP port | 127.0.0.1:19876 | Localhost only, secure; port configurable; auto-increment on conflict |

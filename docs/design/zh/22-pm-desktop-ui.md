@@ -184,7 +184,7 @@ chips 常驻，因为候选可以收起来，引用必须一直看得见。
 | `📎 2` | 附件数量 |
 | `🔗 2` | 依赖数量 |
 | `[BLOCKED]` | 有未满足依赖时显眼标签 |
-| `[PENDING]` | 仅 待审核 列显示，提示是 Agent 创建待审批 |
+| `[PENDING]` | 仅 待审核 列显示，提示是 Bot 创建待审批 |
 
 **卡牌高度**：固定 ~120px，避免高度变化影响拖动目标计算。
 
@@ -254,7 +254,7 @@ chips 常驻，因为候选可以收起来，引用必须一直看得见。
 模态对话框，宽 640px，高固定 560px（`max-h-86vh`），标签页切换不改变尺寸。
 
 一个任务现在承载四类互不相干的内容（自身字段、关联任务、附件、提交记录），
-全部堆在一列里会变成一条很长的滚动条 —— 而读者最想看的"Agent 交了什么"排在
+全部堆在一列里会变成一条很长的滚动条 —— 而读者最想看的"Bot 交了什么"排在
 附件网格之后。所以改成 `GlobalSearchDialog` 那套外壳：标题行下面一条固定高的
 标签栏，正文统一滚动。
 
@@ -350,7 +350,7 @@ chips 常驻，因为候选可以收起来，引用必须一直看得见。
 ```
 
 - 待审核卡片底色轻微黄色调（`bg-warning/10`），与其他列视觉区分。
-- 卡片底部显示创建者：`[agent @coder]` 或 `[human @alice]`。
+- 卡片底部显示创建者：`[bot @coder]` 或 `[human @alice]`。
 - 卡片 inline 操作：`[批准]` → `status=todo`；`[拒绝]` → 弹确认对话框（可选填理由）→ `status=rejected`。
 
 ---
@@ -387,7 +387,7 @@ sequenceDiagram
 | InProgress | Done | 允许 | 直接移动；如有依赖未满足警告 toast（不阻止） |
 | Done | InProgress | 允许（退回） | 直接移动 |
 | InProgress | ToDo | 允许（退回） | 直接移动 |
-| ToDo/InProgress | 待审核 | 拒绝（仅 Agent 创建才进待审核） | 拖动无效 + 提示 |
+| ToDo/InProgress | 待审核 | 拒绝（仅 Bot 创建才进待审核） | 拖动无效 + 提示 |
 | 待审核 | ToDo | 人类专属 `approve` 接口 | 走"批准"按钮而非拖动 |
 | 待审核 | rejected | 人类专属 `reject` 接口 | 走"拒绝"按钮 |
 
@@ -468,7 +468,7 @@ sequenceDiagram
 | `Input` / `Textarea` | 标题、描述、依赖搜索 |
 | `Modal` / `Dialog` | Create/Edit Task、Confirm Dialog |
 | `Drawer` (基础) | Task Detail Drawer 容器 |
-| `Avatar` | Agent 头像 |
+| `Avatar` | Bot 头像 |
 | `Badge` | 优先级徽章、计数徽章 |
 | `Toast` / `Notification` | 拖动失败、服务离线提示 |
 | `Dropdown` / `Select` | 状态下拉、类型选择 |
@@ -545,7 +545,7 @@ API 基地址走 `getGatewayUrl()` + `/api/pm/...`（Gateway 反代，见 [`pm_a
 | `usePmProjectStore` | `projects: Project[]`, `selected: Project \| null` | 进入 `/projects` 路由 | 创建/删除/改名后主动 `reload()` |
 | `usePmBoardStore` | `tasks: Task[]`（按列分组派生）, `loading`, `error` | 选中项目后 | 创建/删除/拖动/编辑后主动 `reload()` |
 | `usePmTaskDetailStore` | `detail: TaskResponse \| null`, `attachments` | 打开 Drawer | 编辑/状态变更后刷新详情 |
-| `usePmAgentStore` | `agents: string[]` | 打开指派下拉时 | 5 min 定时或手动刷新 |
+| `usePmAgentStore` | `bots: string[]` | 打开指派下拉时 | 5 min 定时或手动刷新 |
 
 **缓存约定**：
 - 列表数据在 store 内**常驻**（离开路由不清空，返回即显示，后台 `reload()` 静默刷新）。
@@ -708,7 +708,7 @@ useEffect(() => {
 | 项目列表 | 30s | 创建/删除 |
 | 项目任务 | 10s | 拖动/编辑 |
 | 任务详情 | 5 min | 编辑/状态变更 |
-| Agent 列表 | 5 min | Gateway 同步周期 |
+| Bot 列表 | 5 min | Gateway 同步周期 |
 
 **节流**：连续拖动时，乐观更新立即生效；服务端写入各自 `await` 串行提交
 （store action 内不并发），避免重复请求。

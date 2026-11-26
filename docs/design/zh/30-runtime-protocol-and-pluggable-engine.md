@@ -3,7 +3,7 @@
 > **版本**: v0.2.1（纳入四条核心诉求；v0.1→v0.2 与 v0.2.1 变更见 §14）
 > **状态**: 📝 待评审（REQ-01~04 为**约束条件**，不再开放讨论；§11 剩 4 个开放问题）
 > **范围**: ACowork 平台协议层（Gateway / Node / Runtime / Desktop 四方契约）
-> **一句话结论**: ACowork 只定义**一个协议壳 + 一套能力模型**，不定义引擎该有什么能力。壳的必选面是三件事：**轮次流、session 基础配置（模型 / reasoning / workspace）、agent 参数设置面**；其余全部由 runtime 自行声明，声明的词汇表由 ACowork 拥有。Desktop 只有一套界面和一套交互逻辑，差异一律表现为能力开关的**开与关**，不表现为代码分支。
+> **一句话结论**: ACowork 只定义**一个协议壳 + 一套能力模型**，不定义引擎该有什么能力。壳的必选面是三件事：**轮次流、session 基础配置（模型 / reasoning / workspace）、bot 参数设置面**；其余全部由 runtime 自行声明，声明的词汇表由 ACowork 拥有。Desktop 只有一套界面和一套交互逻辑，差异一律表现为能力开关的**开与关**，不表现为代码分支。
 > **Android 高权限 runtime** 是本框架下的第 2 个内置引擎实现，不是特例（§9）。
 
 ---
@@ -12,7 +12,7 @@
 
 ### 1.1 触发背景
 
-roadmap 上有一条：**把第三方开源 agent 运行时接入 Gateway，在 Desktop 上统一管理**，候选对象（待 S0 核实形态）包括 codex 开源版、deepseek harness、hermes 等。这条 roadmap 的架构权重高于 Android 高权限 runtime：受益面覆盖所有引擎与所有客户端，且**协议一旦对外发布就不可逆**，而 Android 侧只是新增一个 backend 实现。
+roadmap 上有一条：**把第三方开源 bot 运行时接入 Gateway，在 Desktop 上统一管理**，候选对象（待 S0 核实形态）包括 codex 开源版、deepseek harness、hermes 等。这条 roadmap 的架构权重高于 Android 高权限 runtime：受益面覆盖所有引擎与所有客户端，且**协议一旦对外发布就不可逆**，而 Android 侧只是新增一个 backend 实现。
 
 ### 1.2 四条核心诉求（本方案的约束条件）
 
@@ -21,7 +21,7 @@ roadmap 上有一条：**把第三方开源 agent 运行时接入 Gateway，在 
 | **REQ-01** | ACowork **只约束一个 runtime 协议壳**；第三方 runtime 的能力由 runtime 自己声明，但 **ACowork 必须对能力模型有定义** | 权威二分：**词汇表 + 分层 + UI 效应**归 ACowork（注册表，随协议版本发布）；**有没有**归 runtime（声明）。引擎不能自造能力 ID 上 UI | §6.2 |
 | **REQ-02** | 不同 runtime 在 Desktop 端**共用一套交互界面与交互逻辑**，功能开关由能力模型驱动 | "统一"必须是**可检查的硬约束**：一个开关 ↔ 恰好一个能力 ID；前端禁止出现 `engine_kind` 分支 | §6.4 |
 | **REQ-03** | **session 基础配置是必选项**：模型、reasoning、workspace | 三件套进 ARP 必选面（T1C）；EIP 必须有对应动作；必选缺失 = **启动即失败**，不是运行时降级 | §6.3.1 |
-| **REQ-04** | **agent 参数设置是必选项** | 必选的是**接口面**（schema 声明 + 读写 + retained 同步），不是参数个数；空 schema 是合法实现。必须终结"opaque JSON + 前端硬编码字段名"（F17） | §6.3.2 |
+| **REQ-04** | **bot 参数设置是必选项** | 必选的是**接口面**（schema 声明 + 读写 + retained 同步），不是参数个数；空 schema 是合法实现。必须终结"opaque JSON + 前端硬编码字段名"（F17） | §6.3.2 |
 
 > REQ-01 与 REQ-02 天然张力：**自由度**与**统一性**。本方案的调和点是——**交互逻辑分支只允许由注册表能力驱动；引擎自定义内容只允许出现在 schema 驱动的表单字段里**。表单字段不产生第二套交互逻辑，所以可以开放；代码分支会，所以必须封闭。
 
@@ -29,7 +29,7 @@ roadmap 上有一条：**把第三方开源 agent 运行时接入 Gateway，在 
 
 现状的 Runtime 对外协议是从 acowork-runtime **单一引擎的行为**里长出来的，从未作为契约评审：
 
-1. **引擎内部概念泄漏**：`CompactingPayload` / `IterationLimitPausedPayload` / `LoopDetectedPausedPayload` / `SkillExecutedPayload` / `MemoryUpdatedPayload`（[mqtt_payload.proto:649-760](../../../core/acowork-core/proto/mqtt_payload.proto)）——这些是我们主循环的具体策略，不是任何 agent 引擎都有的阶段。
+1. **引擎内部概念泄漏**：`CompactingPayload` / `IterationLimitPausedPayload` / `LoopDetectedPausedPayload` / `SkillExecutedPayload` / `MemoryUpdatedPayload`（[mqtt_payload.proto:649-760](../../../core/acowork-core/proto/mqtt_payload.proto)）——这些是我们主循环的具体策略，不是任何 bot 引擎都有的阶段。
 2. **HTTP 面把实现细节当接口**：`/sessions/{sid}/compress`、`/api/debug/context/{iteration}/sections/{section}`、`/conversation/index/rebuild`（[server.rs:598-760](../../../core/acowork-runtime/src/http/server.rs)）。
 3. **进程契约写死唯一引擎**：Node 把二进制定位成自己的兄弟文件 `acowork-runtime[.exe]` + 一长串固定 flag（[spawn.rs:110-200](../../../core/acowork-node/src/process/spawn.rs)）——这是最硬的耦合点。
 
@@ -46,7 +46,7 @@ roadmap 上有一条：**把第三方开源 agent 运行时接入 Gateway，在 
 | F5 | 上线契约 = **Bootstrap 五步**（status/meta/config → subscribe global → subscribe control），重连必须重做 | [mqtt.md §5.1.1](../protocols/zh/mqtt.md)（ADR-039） |
 | F6 | 生命周期是**能力枚举**而非阶段枚举；`UNSPECIFIED` 兜底；只追加不重编号 | `AgentLifecycleState`（proto:459-482，ADR-085） |
 | F7 | 能力协商先例**只存在于 Node 层**：`NodeInfo.protocol_version` + `repeated capabilities` | proto:1256-1288（ADR-055 §6.9） |
-| F8 | **Agent 层没有能力字段**：`AgentMeta` 只有 agent_id/name/version/instance_id/node_id | proto:484-502 |
+| F8 | **Bot 层没有能力字段**：`AgentMeta` 只有 agent_id/name/version/instance_id/node_id | proto:484-502 |
 | F9 | 引擎侧已有一处干净抽象可复用：`Provider` trait + `StreamEvent`（6 种） | [providers/traits.rs:714-748](../../../core/acowork-core/src/providers/traits.rs) |
 | F10 | 记忆已抽成**独立 MCP 服务**，外部进程可通过 MCP 使用 ACowork 记忆 | ADR-101 |
 | F11 | 安装/执行同机是既定约束，引擎分发归属 Node | ADR-090 / ADR-091 |
@@ -55,8 +55,8 @@ roadmap 上有一条：**把第三方开源 agent 运行时接入 Gateway，在 
 | F14 | **命名冲突预警**："Adapter" 已被占用——ADR-040 的 "Runtime Adapter" 指 `acowork-runtime/src/usecases/` 的 UseCase trait 层，不是引擎适配器 | [ADR-040](../../adr/zh/ADR-040-runtime-adapter-use-case-layer.md) |
 | F15 | 既有准则 RXT-01~06（依赖倒置/生命周期钩子/配置外置/中间件/存储可替换/事件可观测）；本方案是其**对外一层** | [03-agent-runtime.md §9.1](./03-agent-runtime.md) |
 | **F16** | **REQ-03 的三件套在现有契约里已经有字段**：`SessionConfig` 含 `provider_id` / `model_id` / `reasoning_effort`（`""` = 不覆盖） / `workspace_id`，另有 temperature / context_window / account_id | proto:584-617 |
-| **F17** | **REQ-04 的真实阻塞点**：agent 参数在 MQTT 上是 **opaque JSON 字符串**（`AgentConfig.config_json`，注释明写"避免在 protobuf 里复制 config schema，让 Runtime 自行演进"）；Desktop 侧 `agentStore` / `chatStore` **硬编码解析字段名**（`temperature`、`context_window`…，见 `chatStore.ts:4305` 读 `config_json`）。没有 schema，就没有泛化渲染 | proto:503-515；[agent_config.rs:121-175](../../../core/acowork-runtime/src/agent_config.rs)；`apps/acowork-desktop/src/stores/` |
-| F18 | 现有 agent 参数是**三层解析链**：`agent_config.json`（用户）→ `manifest.llm.*`（包作者）→ `DEFAULT_*`（硬编码）。REQ-04 的 schema 必须与这条链共存，不能另起一套 | [agent_config.rs:135-160](../../../core/acowork-runtime/src/agent_config.rs) |
+| **F17** | **REQ-04 的真实阻塞点**：bot 参数在 MQTT 上是 **opaque JSON 字符串**（`AgentConfig.config_json`，注释明写"避免在 protobuf 里复制 config schema，让 Runtime 自行演进"）；Desktop 侧 `agentStore` / `chatStore` **硬编码解析字段名**（`temperature`、`context_window`…，见 `chatStore.ts:4305` 读 `config_json`）。没有 schema，就没有泛化渲染 | proto:503-515；[agent_config.rs:121-175](../../../core/acowork-runtime/src/agent_config.rs)；`apps/acowork-desktop/src/stores/` |
+| F18 | 现有 bot 参数是**三层解析链**：`agent_config.json`（用户）→ `manifest.llm.*`（包作者）→ `DEFAULT_*`（硬编码）。REQ-04 的 schema 必须与这条链共存，不能另起一套 | [agent_config.rs:135-160](../../../core/acowork-runtime/src/agent_config.rs) |
 
 **F1 的四面拆解**：
 
@@ -71,15 +71,15 @@ roadmap 上有一条：**把第三方开源 agent 运行时接入 Gateway，在 
 
 ## 3. 概念澄清
 
-### 3.1 "第三方 agent" 是三类东西的混称
+### 3.1 "第三方 bot" 是三类东西的混称
 
 接入点完全不同。**S0 的第一项产出就是这张表的实证版本**——它决定 roadmap 上每个候选走哪条路。
 
 | 档 | 对象形态 | 正确接入点 | 本方案覆盖 | 例子（待核实） |
 |---|---|---|---|---|
-| **M 模型级** | 只有权重/API，无 agent 循环 | `Provider` trait + provider 目录（F9、design 23 同模式） | ❌ 不需要新协议 | 若 hermes 是模型 → 归此类 |
+| **M 模型级** | 只有权重/API，无 bot 循环 | `Provider` trait + provider 目录（F9、design 23 同模式） | ❌ 不需要新协议 | 若 hermes 是模型 → 归此类 |
 | **E 引擎级** | 有主循环 + 自有工具 + 自有 transcript，无 UI | **EIP**（§6.5） | ✅ 主战场 | codex 开源版、deepseek harness |
-| **P 产品级** | 自带账号/UI/云端的完整产品 | **ARP 直连**（选项 B）或仅互操作 | ⚠️ 例外通道 | 云端 agent 服务 |
+| **P 产品级** | 自带账号/UI/云端的完整产品 | **ARP 直连**（选项 B）或仅互操作 | ⚠️ 例外通道 | 云端 bot 服务 |
 
 ### 3.2 "协议壳" 的两层命名（REQ-01 的具体化）
 
@@ -132,7 +132,7 @@ graph TD
 - **G1** 定义**能力模型**（注册表 + 声明 + 校验 + 演进流程），词汇表归 ACowork，事实归 runtime（REQ-01）。
 - **G2** ARP 显式化为可发布契约：版本化、分层（必选集 T0/T1/T1C + 可选集 T2/T3）、缺失即不可表达。
 - **G3** 定义 EIP：引擎实现 **9 动作 + 7 事件 + 3 类反向调用** 即可被平台管理（§6.5）。
-- **G4** **必选配置面**：session 三件套（模型 / reasoning / workspace）+ agent 参数设置面，跨引擎语义一致（REQ-03/04）。
+- **G4** **必选配置面**：session 三件套（模型 / reasoning / workspace）+ bot 参数设置面，跨引擎语义一致（REQ-03/04）。
 - **G5** Desktop **一套界面一套逻辑**：所有差异收敛为能力开关状态（REQ-02），并给出可检查的禁止规则。
 - **G6** 安全边界：引擎进程拿不到 MQTT 凭证、Gateway token、LLM API Key；出网经 Host 代理。
 - **G7** 让引擎归属问题（Android 的 D0）降级为"依赖两个已发布契约 crate 的稳定版本"。
@@ -172,7 +172,7 @@ graph TD
 |---|---|---|---|
 | **T0 存在性** | Bootstrap 五步（F5）、`AgentStatus`/`AgentLifecycleState`（F6）、`AgentMeta`（追加 `engine_kind`/`protocol_version`/`capabilities`）、`http_endpoint` | ✅ 必选 | 无"部分在线"，只有 OFFLINE/STARTING/HTTP_READY/SESSIONS_READY/FAILED |
 | **T1 轮次流** | `POST/GET /sessions/{sid}/messages`、核心 **9 个事件**（reasoning 起止成对）：`chunk` / `reasoning_started` / `reasoning_ended` / `tool_call` / `tool_result` / `done` / `error` / `stopped` / `context_usage`；`SessionState` | ✅ 必选 | **启动即失败**（FAILED + detail） |
-| **T1C 必选配置面**（新增，REQ-03/04） | `SessionConfig` 三件套（`provider_id`+`model_id` / `reasoning_effort` / `workspace_id`）读写与 retained 同步；**agent 参数面**（schema 声明 + 读写 + retained 同步） | ✅ 必选 | **启动即失败**（FAILED + detail） |
+| **T1C 必选配置面**（新增，REQ-03/04） | `SessionConfig` 三件套（`provider_id`+`model_id` / `reasoning_effort` / `workspace_id`）读写与 retained 同步；**bot 参数面**（schema 声明 + 读写 + retained 同步） | ✅ 必选 | **启动即失败**（FAILED + detail） |
 | **T2 会话控制** | `open`/`close`/`visibility`、`stop`、`approval`、`answer`、`cancel-tool`、`todo_updated`、`ask_question` | 🟡 能力声明 | 开关关闭 + 标注"该 runtime 不支持"；**禁止静默 fallback** |
 | **T3 引擎私货** | `compacting_*`/`compaction_cancelled`、`iteration_limit_paused`、`loop_detected_paused`、`skill_executed`、`memory_updated`、`round_state`（ADR-106 轮次门铃）、`/compress`、`/search/summary`、`/conversation/index/rebuild`、`/api/debug/*`、`prompt-file` | 🟡 能力声明 | 面板不渲染；HTTP 返回 `404 unsupported_capability`（不塌缩成 500，不返回假成功）；`round_state` 缺失 ⇒ 执行块靠周期重读收口（响应变慢，正确性不变——这正是它进 T3 而不进 T1 的理由） |
 
@@ -197,7 +197,7 @@ ui_effect       = "reasoning_picker"              # 驱动哪个 UI 开关（REQ
 since           = 1                               # 引入的 ARP 版本
 ```
 
-**命名空间**（封闭集合，新增需评审）：`turn.*` `session.*` `agent.*` `tool.*` `approval.*` `context.*` `memory.*` `skill.*` `search.*` `debug.*` `fs.*`
+**命名空间**（封闭集合，新增需评审）：`turn.*` `session.*` `bot.*` `tool.*` `approval.*` `context.*` `memory.*` `skill.*` `search.*` `debug.*` `fs.*`
 
 **校验规则（fail closed）**：
 
@@ -229,9 +229,9 @@ since           = 1                               # 引入的 ARP 版本
 
 **失败语义（D10，关键）**：请求一个引擎不支持的 reasoning 档位时，`session.set_core_config` 必须在**设置时**返回结构化 `422 unsupported_value`，**不得静默降级为别的档位**。这符合项目既有原则"explicit failure, no silent fallback"，也避免 Desktop 显示与实际行为不一致（REQ-02 的隐性要求）。
 
-#### 6.3.2 Agent 参数设置面
+#### 6.3.2 Bot 参数设置面
 
-REQ-04 要求"agent 参数设置是必选项"。**必选的是接口面，不是参数个数**——空 schema 是合法实现。这一条把 F17 的 opaque JSON 换成 schema 驱动：
+REQ-04 要求"bot 参数设置是必选项"。**必选的是接口面，不是参数个数**——空 schema 是合法实现。这一条把 F17 的 opaque JSON 换成 schema 驱动：
 
 ```text
 ParamDef {
@@ -248,7 +248,7 @@ ParamDef {
 
 契约：`GET /agent/params/schema` → `ParamDef[]`；`PUT /agent/params` → 校验后生效；retained `AgentConfig` 从 **opaque `config_json`** 改为 **schema 版本 + 值映射**（或保留 `config_json` 作兼容只读镜像，见 §12）。
 
-**与现有三层解析链共存（F18，D14）**：schema 只描述"用户可设置项"，**不接管解析链**。生效顺序保持 `用户 agent 参数 → manifest → 引擎内置默认`；schema 的 `default` 字段语义是"该层的继承点"，不是"最终值"。避免再造一套配置权威。
+**与现有三层解析链共存（F18，D14）**：schema 只描述"用户可设置项"，**不接管解析链**。生效顺序保持 `用户 bot 参数 → manifest → 引擎内置默认`；schema 的 `default` 字段语义是"该层的继承点"，不是"最终值"。避免再造一套配置权威。
 
 **为什么这是 REQ-01 与 REQ-02 的调和点**：参数 key 由引擎自定义（自由度），但渲染方式是平台统一的（表单泛化）。自定义字段**不产生新的交互逻辑分支**，所以不违反 REQ-02。
 
@@ -321,7 +321,7 @@ ParamDef {
 | **D10** | **必选层缺失 = 启动即失败（FAILED + detail）；可选层缺失 = 开关关 + 标注**；不支持的配置取值 = **设置时 422 显式拒绝** | 统一为"运行时静默降级"：Desktop 显示与实际行为不一致，直接违反 REQ-02；统一为"全部启动失败"：把 T2/T3 当必选，方案退化成 A |
 | **D11** | **tier（必选性）归注册表，不进 wire** | 让 runtime 声明 tier：引擎可把私货抬成必选，REQ-01 被反噬 |
 | **D12** | **能力是布尔开关；参数化差异走 schema，不走能力 ID** | 能力 ID 带参数（如 `session.reasoning.effort[low\|medium]` 变体爆炸）：ID 空间无界，注册表失去控制 |
-| **D13** | **agent 参数面必选，参数内容引擎自定义**（空 schema 合法） | 规定统一参数清单：等于替所有引擎决定行为，违反 REQ-01；不要求参数面：违反 REQ-04，且 Desktop 无法统一渲染 |
+| **D13** | **bot 参数面必选，参数内容引擎自定义**（空 schema 合法） | 规定统一参数清单：等于替所有引擎决定行为，违反 REQ-01；不要求参数面：违反 REQ-04，且 Desktop 无法统一渲染 |
 | **D14** | 参数 schema **不接管三层解析链**（F18），只描述"用户可设置项" | schema 兼做生效值来源：与 `agent_config → manifest → default` 冲突，出现第二套配置权威 |
 
 ---
@@ -392,7 +392,7 @@ Android 仓库对上游的依赖痛点（无 tag、无发布、path 依赖、103
 |---|---|---|---|
 | **S0 实证 spike**（1–2 周） | ①候选引擎按 M/E/P 归类（§3.1）；②选 1 个 E 类引擎，用原型脚本验证 **7 事件能否覆盖其输出面**；③验证它对**三件套**（model/reasoning/workspace）能否给出真实语义——这是 REQ-03 的可行性风险点；④列出映射缺口 | 归类表 + 事件覆盖缺口清单 + 三件套映射结论 | 纯 spike，零生产影响 |
 | **S1 协议壳显式化**（不动引擎） | 能力注册表 crate 化；`AgentMeta` 追加字段（D1）；ARP 分层文档化；**必选配置面契约固化**（T1C）；`ParamDef` schema 契约 + Desktop 泛化渲染（终结 F17）；T3 路由返回 `404 unsupported_capability`；U1/U2/U3 三条规则进 lint/review | 现有 builtin 引擎声明全能力、行为零变化；**一致性探针**（conformance test）能验证"声明了就必须做到"；缺能力引擎在 UI 上不崩 | 字段只追加；回滚 = 撤 UI 门控与 lint 规则 |
-| **S2 EIP 抽象**（纯重构） | 把现有 agent loop 封成 **EIP 内置实现 #1**；Host 与引擎分离（对应 F13 的 ~33k Host / ~72k 引擎量级） | 现有 e2e（含移动端 store e2e）全绿；**零行为变化**为唯一验收 | 风险最高的一步：分片 PR、逐模块合，每片可独立回滚 |
+| **S2 EIP 抽象**（纯重构） | 把现有 bot loop 封成 **EIP 内置实现 #1**；Host 与引擎分离（对应 F13 的 ~33k Host / ~72k 引擎量级） | 现有 e2e（含移动端 store e2e）全绿；**零行为变化**为唯一验收 | 风险最高的一步：分片 PR、逐模块合，每片可独立回滚 |
 | **S3 首个外部引擎** | stdio JSON-RPC 形态 + Host 侧 LLM 代理（含 `/v1/models`）+ `fs.grant` | 该引擎在 Desktop 可聊天、可停、可见工具调用、**三件套可配**、参数面板可渲染、transcript 与既有 JSONL 同构 | 单引擎下线即可，不影响 builtin |
 | **S4 分发与归属** | `package kind = engine` 的 Node 侧安装/探测（D6）；Desktop 引擎选择与能力展示 | 换一台机器能装能跑；PATH 探测复用 ADR-090 机制 | 保留手工 spawn 通道 |
 | **S5 第 2、3 个引擎** | 按 rule-of-three 决定 EIP 是否升级（多 transport、更细 usage） | 第 3 个引擎接入成本 < 第 1 个的 1/3；**且未新增任何前端 `engine_kind` 分支**（REQ-02 的终局检验） | — |

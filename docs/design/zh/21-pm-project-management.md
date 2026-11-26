@@ -7,7 +7,7 @@
 > 关联 ADR：[`ADR-055-remote-runtime-node-topology.md`](../../adr/zh/ADR-055-remote-runtime-node-topology.md)（远程节点访问）、[`ADR-061-pm-storage-tree.md`](../../adr/zh/ADR-061-pm-storage-tree.md)（目录树存储选型）
 > 实现仓库：[`core/acowork-pm`](../../../core/acowork-pm/) + [`core/acowork-gateway/src/http/pm_proxy.rs`](../../../core/acowork-gateway/src/http/pm_proxy.rs)
 >
-> **一句话**：`acowork-pm` 是 Gateway 监督的独立本地项目管理服务，管理对象为 **Agent**——人类经 Desktop 看板管理项目与任务；Agent 经 HTTP MCP 工具自查、自领、提交任务；Agent 创建的任务须经人类审核后生效。
+> **一句话**：`acowork-pm` 是 Gateway 监督的独立本地项目管理服务，管理对象为 **Bot**——人类经 Desktop 看板管理项目与任务；Bot 经 HTTP MCP 工具自查、自领、提交任务；Bot 创建的任务须经人类审核后生效。
 
 ---
 
@@ -16,9 +16,9 @@
 ### 1.1 目标
 
 1. 提供基础版项目管理：项目/任务的创建、列表、看板式状态流转（pending / in_progress / submitted / done 四列看板，六态状态机）。
-2. 任务指派对象为 **Agent**；Agent 通过 MCP 工具自查、自领、更新、提交任务。
-3. **Agent 创建的任务须经人类审核后生效**（`review_status=pending`），防止垃圾任务污染看板；人类创建的任务 `review_status=not_required` 直接生效。
-4. 指派 Agent 必须校验存在，不存在不能指派。
+2. 任务指派对象为 **Bot**；Bot 通过 MCP 工具自查、自领、更新、提交任务。
+3. **Bot 创建的任务须经人类审核后生效**（`review_status=pending`），防止垃圾任务污染看板；人类创建的任务 `review_status=not_required` 直接生效。
+4. 指派 Bot 必须校验存在，不存在不能指派。
 5. 独立进程托管（ADR-064，Gateway supervisor + 反代）；支持远程节点访问。
 
 ### 1.2 已决结论（PRD §10 开放问题固化）
@@ -27,8 +27,8 @@
 |------|------|-------------|
 | Q1 | **前端 = Desktop 本地 React 组件**（不 WebView 内嵌） | 同 doc（[20-doc-online-document.md](./20-doc-online-document.md) §1.2 Q1）：复用 Desktop 设计系统，风格统一。acowork-pm 只提供 REST API |
 | Q3 | **MCP transport = HTTP** | 服务常驻；现有 `McpTransport` 支持 HTTP |
-| Q5 | **`pm_create_task` 对 Agent 开放，但创建的任务进入「待审核」状态（`review_status=pending`），人类 `review` 通过后才生效** | 未来有专门 PM Agent 承担任务编排；先放开权限，用人类审核兜底防垃圾任务。人类创建的任务 `review_status=not_required`，直接生效不审核 |
-| Q6 | **指派 Agent 必须校验存在** | 不存在的 Agent 不允许指派；校验来源为 Gateway Agent 目录（§9） |
+| Q5 | **`pm_create_task` 对 Bot 开放，但创建的任务进入「待审核」状态（`review_status=pending`），人类 `review` 通过后才生效** | 未来有专门 PM Bot 承担任务编排；先放开权限，用人类审核兜底防垃圾任务。人类创建的任务 `review_status=not_required`，直接生效不审核 |
+| Q6 | **指派 Bot 必须校验存在** | 不存在的 Bot 不允许指派；校验来源为 Gateway Bot 目录（§9） |
 | Q7 | **暴露给远程节点** | 与 embed 一致：endpoint 用 `advertise_host` 构造，远程 Runtime 可访问 pm MCP（§8） |
 | Q8 | **数据目录 = `{data}/acowork-pm/`** | 与 Gateway 自身数据在 `<root>/data/` 下平行 |
 
@@ -42,7 +42,7 @@
 
 - 独立 Rust crate：`core/acowork-pm/`，axum HTTP 服务，实现 PM 领域逻辑（存储、状态机、MCP 工具、REST handler）。
 - **独立进程**（ADR-064）：`acowork-pm` 独立二进制，独立端口（默认 `18082`，冲突自动递增），由 Gateway supervisor 管理生命周期（spawn / monitor / restart，复用 `acowork-core::supervisor`）。Gateway **不再编译 PM 代码**（`cargo tree -p acowork-gateway` 不含 `acowork-pm`），`/api/pm/*` 由 [`core/acowork-gateway/src/http/pm_proxy.rs`](../../../core/acowork-gateway/src/http/pm_proxy.rs) **反向代理**到 `127.0.0.1:{pm_port}/*`（剥离 `/api/pm` 前缀）。
-- 公开路径统一为 **`/api/pm/*`**（REST）与 **`/api/pm/mcp`**（MCP HTTP），与 Gateway 既有 `/api/*` 路由隔离；Desktop 与远程 Agent 两端均经 Gateway 反代，**无感知**。
+- 公开路径统一为 **`/api/pm/*`**（REST）与 **`/api/pm/mcp`**（MCP HTTP），与 Gateway 既有 `/api/*` 路由隔离；Desktop 与远程 Bot 两端均经 Gateway 反代，**无感知**。
 - 启动失败**非致命**：PM 进程未就绪时 `/api/pm/*` 返回 **503**（带 `Retry-After: 2`，Desktop `with503Retry` 退避重试），Gateway 照常运行。
 - 只暴露 REST API + MCP HTTP 端点，不内置前端。
 
@@ -214,11 +214,11 @@ mcp_http_path = "/api/pm/mcp"            # MCP HTTP 端点公开路径（含 /ap
 
 ### 3.7 任务活动流（提交历史）
 
-任务面上必须读得到"Agent 交了什么、人类回了什么"。`task.json` 里的 `result` 是覆盖式的"最后一次提交"，承载不了这个需求（重做一次提交，上一版正文就没了），所以活动单独成一条**只追加事件流**。
+任务面上必须读得到"Bot 交了什么、人类回了什么"。`task.json` 里的 `result` 是覆盖式的"最后一次提交"，承载不了这个需求（重做一次提交，上一版正文就没了），所以活动单独成一条**只追加事件流**。
 
 - **物理位置**：`{task_dir}/activity.json`，一个 JSON 数组，整份读-改-写（走 §10.1 的原子写）。
 - **为什么不塞进 `task.json`**：`Task` 是可变记录（每次 PATCH 全量重写），活动是只追加、无上限增长的事件流。合在一份里，每次改标题都要重写全部历史；而看板列表（`find_tasks` 逐个序列化 `task.json`）会随提交次数线性膨胀。附件同理（元数据在记录里，二进制在外面），只是这里连元数据都嫌大。
-- **条目结构**：`{ id, kind, actor, actor_kind, text, attachment_ids, created_at }`。`kind ∈ submitted | approved | rejected | comment`；`actor` 是 agent instance_id 或人类 user id（含遗留常量 `human`），`actor_kind` 按 ADR-076 §决策 10 判别，前端据此决定去 agent 目录还是账号解析显示名。
+- **条目结构**：`{ id, kind, actor, actor_kind, text, attachment_ids, created_at }`。`kind ∈ submitted | approved | rejected | comment`；`actor` 是 bot instance_id 或人类 user id（含遗留常量 `human`），`actor_kind` 按 ADR-076 §决策 10 判别，前端据此决定去 bot 目录还是账号解析显示名。
 - **与 `result` 的分工**：`result` 仍是"最后一次提交"（MCP `pm_get_task` 与 Mobile 的既有契约），与最新一条 `Submitted` 条目**同一次写入**落盘，字段来源同一个 `TaskResult`，不会漂移。历史全量以活动流为准。
 - **写入点只有三个**：`submit`（→ `submitted`）、`review`（→ `approved`/`rejected`，正文 = 请求里的 `_comment`，此前服务端收到就丢）、`POST /activity`（→ `comment`，人类回复）。**状态机自身的流转不进活动流**（拖动改 `status`、claim、取消由 `Task` 字段表达），否则同一事实两个真源。
 - **落盘顺序**：先写 `activity.json`，再写 `task.json`；后者失败时回滚前者。反过来会留下"状态已流转但读不到提交内容"——那正是这个能力要修的缺陷形态。
@@ -232,8 +232,8 @@ mcp_http_path = "/api/pm/mcp"            # MCP HTTP 端点公开路径（含 /ap
 
 > 定稿：**六态** `pending / in_progress / submitted / done / rejected / cancelled`（无 `todo`）。
 > 实现见 [`tree.rs::validate_transition`](../../../core/acowork-pm/src/store/tree.rs)。
-> 人类与 Agent 创建的**初始 status 均为 `pending`**，区别在 `review_status`：
-> human → `not_required`，Agent → `pending`（待人类审核）。
+> 人类与 Bot 创建的**初始 status 均为 `pending`**，区别在 `review_status`：
+> human → `not_required`，Bot → `pending`（待人类审核）。
 
 ```mermaid
 stateDiagram-v2
@@ -253,23 +253,23 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-- **pending**：所有任务创建后的初始状态；Agent 创建的 `review_status=pending` 需人类 `review` 通过才进入正式流转（`pm_get_task` 可查审核状态），human 创建的 `review_status=not_required` 直接可被 claim。
-- **in_progress**：由 Agent `pm_claim_task` 自领（`pending → in_progress`，仅限 assignee）；依赖未满足返回 `DependencyNotSatisfied`。
-- **submitted**：Agent `pm_submit_task` 提交结果后进入（写入 `result`），等待人类 review。
+- **pending**：所有任务创建后的初始状态；Bot 创建的 `review_status=pending` 需人类 `review` 通过才进入正式流转（`pm_get_task` 可查审核状态），human 创建的 `review_status=not_required` 直接可被 claim。
+- **in_progress**：由 Bot `pm_claim_task` 自领（`pending → in_progress`，仅限 assignee）；依赖未满足返回 `DependencyNotSatisfied`。
+- **submitted**：Bot `pm_submit_task` 提交结果后进入（写入 `result`），等待人类 review。
 - **done / rejected**：人类 `review(approved)` 决定（`submitted → done` 或 `submitted → rejected`）。
 - **退回**：done → in_progress（人类操作）。
 - **审核流（两种语义，由 `status` 区分）**：
-  - **创建审批**（`status=pending` + `review_status=pending`，Agent 刚建、从未开工）：人类 `review{approved:true}` **只把 `review_status` 翻为 `approved`，`status` 留在 `pending`** —— 审批是*授权开工*而非*完成工作*，之后由 Agent 自己 `pm_claim_task` 推进；`approved:false` 则 `pending → rejected`（D-1：Agent 仍可重新自领重做）。
-  - **结果审核**（`status=submitted`，Agent 已交活）：`submitted → done` / `submitted → rejected`。
-- **审批闸门**：`review_status=pending` 的任务不得进入 `in_progress`。该闸门在 store 层挂在**所有**进入 `in_progress` 的写路径上（`claim_task` + `update_task(status)`），否则 Agent 换个 MCP 工具即可绕过；违反返回 409 `review_not_approved`。只卡 `pending` 一种——`rejected` 不卡（保留 D-1 的重做路径）。
-  - ponytail：闸门对人类操作面同样生效（REST `PATCH status`），即人类想强推一个 Agent 建的垃圾任务也需先点一次"批准"。有意的简化：审批是一个显式可审计的写入动作，比在闸门里开人类特权后门更简单也更可查。
+  - **创建审批**（`status=pending` + `review_status=pending`，Bot 刚建、从未开工）：人类 `review{approved:true}` **只把 `review_status` 翻为 `approved`，`status` 留在 `pending`** —— 审批是*授权开工*而非*完成工作*，之后由 Bot 自己 `pm_claim_task` 推进；`approved:false` 则 `pending → rejected`（D-1：Bot 仍可重新自领重做）。
+  - **结果审核**（`status=submitted`，Bot 已交活）：`submitted → done` / `submitted → rejected`。
+- **审批闸门**：`review_status=pending` 的任务不得进入 `in_progress`。该闸门在 store 层挂在**所有**进入 `in_progress` 的写路径上（`claim_task` + `update_task(status)`），否则 Bot 换个 MCP 工具即可绕过；违反返回 409 `review_not_approved`。只卡 `pending` 一种——`rejected` 不卡（保留 D-1 的重做路径）。
+  - ponytail：闸门对人类操作面同样生效（REST `PATCH status`），即人类想强推一个 Bot 建的垃圾任务也需先点一次"批准"。有意的简化：审批是一个显式可审计的写入动作，比在闸门里开人类特权后门更简单也更可查。
 
 ---
 
 ## 5. REST API 设计
 
 > 公开前缀 `/api/pm`；错误统一 JSON `{"error": {...}}`。
-> **Desktop 访问路径**：经 Gateway 反向代理 `{gw}/api/pm/...`，Gateway 剥掉 `/api/pm` 前缀转发到 pm 服务内部路径（**不带** `/api` 前缀，由 [`pm_proxy.rs`](../../../core/acowork-gateway/src/http/pm_proxy.rs) 反代；保持单入口 + 鉴权点）。Agent 不调 REST，走 §6 MCP HTTP。
+> **Desktop 访问路径**：经 Gateway 反向代理 `{gw}/api/pm/...`，Gateway 剥掉 `/api/pm` 前缀转发到 pm 服务内部路径（**不带** `/api` 前缀，由 [`pm_proxy.rs`](../../../core/acowork-gateway/src/http/pm_proxy.rs) 反代；保持单入口 + 鉴权点）。Bot 不调 REST，走 §6 MCP HTTP。
 
 | 方法 | 路径 | 说明 | 鉴权 |
 |------|------|------|------|
@@ -278,31 +278,31 @@ stateDiagram-v2
 | GET | `/api/pm/projects/:id` | 项目详情 | Desktop |
 | PATCH | `/api/pm/projects/:id` | 编辑项目（标题/描述） | Desktop |
 | DELETE | `/api/pm/projects/:id` | 删除项目（级联任务，二次确认） | Desktop |
-| GET | `/api/pm/projects/:id/tasks` | 项目任务列表（`?status=&assignee=` 过滤） | Desktop / Agent |
+| GET | `/api/pm/projects/:id/tasks` | 项目任务列表（`?status=&assignee=` 过滤） | Desktop / Bot |
 | POST | `/api/pm/projects/:id/tasks` | 新建任务（human 创建 → `review_status=not_required`） | Desktop |
-| GET | `/api/pm/tasks/:id` | 任务详情（含 `is_blocked`/`blocked_by`/`depth`/`parent_id` 派生字段） | Desktop / Agent |
+| GET | `/api/pm/tasks/:id` | 任务详情（含 `is_blocked`/`blocked_by`/`depth`/`parent_id` 派生字段） | Desktop / Bot |
 | PATCH | `/api/pm/tasks/:id` | 编辑任务（标题/描述/优先级/截止/指派/状态） | Desktop |
 | DELETE | `/api/pm/tasks/:id` | 删除任务（级联子树） | Desktop |
-| POST | `/api/pm/tasks/:id/claim` | **Agent 自领**（pending → in_progress） | Agent（x-actor） |
-| POST | `/api/pm/tasks/:id/submit` | **Agent 提交结果**（in_progress → submitted，body `{text, attachment_ids?}`） | Agent（x-actor） |
+| POST | `/api/pm/tasks/:id/claim` | **Bot 自领**（pending → in_progress） | Bot（x-actor） |
+| POST | `/api/pm/tasks/:id/submit` | **Bot 提交结果**（in_progress → submitted，body `{text, attachment_ids?}`） | Bot（x-actor） |
 | POST | `/api/pm/tasks/:id/review` | **人类审核**（body `{approved, _comment?}`）：`pending` 时只翻 `review_status` / `pending → rejected`；`submitted` 时 `→ done/rejected`。`_comment`（拒绝理由 / 批准附言）落 §3.7 活动流 | Desktop |
-| GET | `/api/pm/tasks/:id/activity` | **提交历史**（§3.7：提交 / 审核结论 / 回复，按时间升序） | Desktop / Agent |
+| GET | `/api/pm/tasks/:id/activity` | **提交历史**（§3.7：提交 / 审核结论 / 回复，按时间升序） | Desktop / Bot |
 | POST | `/api/pm/tasks/:id/activity` | **追加回复**（body `{text}`；只写活动流，不动状态） | Desktop |
 | PATCH | `/api/pm/tasks/:id/parent` | **移动任务到新父下**（`parent_id=null` 提升为根任务；DFS 防环） | Desktop |
 | GET | `/api/pm/tasks/:id/children` | 直接子任务列表 | Desktop |
-| GET | `/api/pm/tasks/:id/attachments` | 附件元数据列表 | Desktop / Agent |
-| POST | `/api/pm/tasks/:id/attachments` | **上传附件**（multipart，单文件 ≤ 10MB） | Desktop / Agent |
-| GET | `/api/pm/attachments/:id` | **下载附件**（`?download=1` 强制下载，否则 inline 预览） | Desktop / Agent |
+| GET | `/api/pm/tasks/:id/attachments` | 附件元数据列表 | Desktop / Bot |
+| POST | `/api/pm/tasks/:id/attachments` | **上传附件**（multipart，单文件 ≤ 10MB） | Desktop / Bot |
+| GET | `/api/pm/attachments/:id` | **下载附件**（`?download=1` 强制下载，否则 inline 预览） | Desktop / Bot |
 | DELETE | `/api/pm/attachments/:id` | 删除附件 | Desktop |
 
-> **实际路由实现**：[`core/acowork-pm/src/api/routes.rs`](../../../core/acowork-pm/src/api/routes.rs)（PM router 内部不带 `/api` 前缀，Gateway [`pm_proxy.rs`](../../../core/acowork-gateway/src/http/pm_proxy.rs) 反代时剥离；MCP 端点在 `/api/pm/mcp`）。Desktop 经 Gateway 反代访问，Agent 走 §6 MCP HTTP 而非 REST。
+> **实际路由实现**：[`core/acowork-pm/src/api/routes.rs`](../../../core/acowork-pm/src/api/routes.rs)（PM router 内部不带 `/api` 前缀，Gateway [`pm_proxy.rs`](../../../core/acowork-gateway/src/http/pm_proxy.rs) 反代时剥离；MCP 端点在 `/api/pm/mcp`）。Desktop 经 Gateway 反代访问，Bot 走 §6 MCP HTTP 而非 REST。
 
 ---
 
-## 6. Agent 接口（pm MCP 工具，HTTP transport）
+## 6. Bot 接口（pm MCP 工具，HTTP transport）
 
 - MCP Server 端点：`http://{advertise_host}:{gw_http_port}/api/pm/mcp`（Q3 = HTTP，P4 定稿 advertise endpoint）。远程 Runtime 用 §8 的 advertise endpoint 直接 HTTP 调用。
-- Gateway 将 pm MCP 配置注入每个 Agent 的 `catalog` 列表（`auto_inject_mcp=true` 时），Agent 默认获得 `pm_*` 工具。
+- Gateway 将 pm MCP 配置注入每个 Bot 的 `catalog` 列表（`auto_inject_mcp=true` 时），Bot 默认获得 `pm_*` 工具。
 - 身份：调用方经 **`X-MCP-Actor` header** 携带 `agent_instance_id`（UUID，ADR-073 §1.3 不变量 1）— Gateway 下发 `{instance_id}` 模板，Runtime 收到 `acowork/global/mcps` 时替换为 `self.bootstrap_data.instance_id`；服务端校验（§9），**所有状态变更工具都校验调用者 instance_id 与任务 assignee 一致**。
 - 错误码：`-32001` Unauthenticated（无可信身份调变更工具）、`-32002` Forbidden（非 assignee）；业务错误（409 依赖未满足等）映射为对应 `PmError` code。
 
@@ -315,9 +315,9 @@ stateDiagram-v2
 > 缺 `pm_list_tasks` 的 `only_blocked`，并把 `pm_check_task` 写成"仅创建者可查"（已成为
 > `pm_get_task` 的别名）。
 >
-> 面向 agent 的三条不变式（细节见文档 32）：
-> 1. `assignee` 必须是该项目的 **agent 成员**（M7），人类成员由 Desktop 侧指派；
-> 2. Agent 创建的任务一律 `review_status=pending`，人工批准后方可 claim（ADR-102）；
+> 面向 bot 的三条不变式（细节见文档 32）：
+> 1. `assignee` 必须是该项目的 **bot 成员**（M7），人类成员由 Desktop 侧指派；
+> 2. Bot 创建的任务一律 `review_status=pending`，人工批准后方可 claim（ADR-102）；
 > 3. 状态流转按 §4 状态机，非法流转的报错会列出当前态的合法去向。
 
 ---
@@ -326,11 +326,11 @@ stateDiagram-v2
 
 - `projects` 视图（替换 [AppLayout.tsx:897-903](../../../apps/acowork-desktop/src/components/layout/AppLayout.tsx#L897) 的 TODO）：
   - **左侧**：项目列表（新建/删除）。
-  - **右侧**：项目详情 + **四列看板**（pending / in_progress / submitted / done），支持新建/编辑任务、指派 Agent、查看结果。
-  - **提交历史**：任务编辑界面内嵌 §3.7 活动流（Agent 提交正文 + 人类审核结论与回复），验收不需要去群聊里翻。
-  - **待审核**：Agent 创建的任务 `review_status=pending` 高亮，人类 `review` approve/reject。
+  - **右侧**：项目详情 + **四列看板**（pending / in_progress / submitted / done），支持新建/编辑任务、指派 Bot、查看结果。
+  - **提交历史**：任务编辑界面内嵌 §3.7 活动流（Bot 提交正文 + 人类审核结论与回复），验收不需要去群聊里翻。
+  - **待审核**：Bot 创建的任务 `review_status=pending` 高亮，人类 `review` approve/reject。
 - 数据获取：本地 React 组件经 Gateway 反向代理调用 REST API（`http://127.0.0.1:19876/api/pm/*`）。
-- 指派 Agent 下拉：数据源为 Gateway Agent 目录（`GET /api/agents` 等既有 Gateway 接口），不存在的 Agent 不可选（§9.1）。
+- 指派 Bot 下拉：数据源为 Gateway Bot 目录（`GET /api/agents` 等既有 Gateway 接口），不存在的 Bot 不可选（§9.1）。
 - 服务离线提示：显示「项目管理服务不可用 + 重试」而非白屏（`pm_service=None` 时 `/api/pm/*` 不挂载）。
 
 ---
@@ -348,10 +348,10 @@ stateDiagram-v2
 
 ## 9. 权限与校验（Q6 落地）
 
-### 9.1 指派 Agent 校验（Q6）
+### 9.1 指派 Bot 校验（Q6）
 
-- **规则**：`pm_create_task` / 编辑任务时 `assignee` 必须存在于 Agent 目录；不存在返回 `InvalidId`（400/422），**不允许指派**。
-- **校验来源**（ADR-064 Phase 3）：[`core/acowork-pm/src/mcp/agent_dir.rs`](../../../core/acowork-pm/src/mcp/agent_dir.rs) 的 `HttpAgentDirectory`——PM 独立进程后不再共享 Gateway 内存 state，改为经 HTTP 查询 Gateway `GET /api/agents`（Agent 目录权威）。**启动拉全量 + 周期刷新**（`--agent-sync-interval-secs`，默认 60s）+ **即时校验兜底**（缓存 miss 时直接 `GET /api/agents/{id}` 即时确认，恢复计划 v0.3 T1-11）。
+- **规则**：`pm_create_task` / 编辑任务时 `assignee` 必须存在于 Bot 目录；不存在返回 `InvalidId`（400/422），**不允许指派**。
+- **校验来源**（ADR-064 Phase 3）：[`core/acowork-pm/src/mcp/agent_dir.rs`](../../../core/acowork-pm/src/mcp/agent_dir.rs) 的 `HttpAgentDirectory`——PM 独立进程后不再共享 Gateway 内存 state，改为经 HTTP 查询 Gateway `GET /api/agents`（Bot 目录权威）。**启动拉全量 + 周期刷新**（`--agent-sync-interval-secs`，默认 60s）+ **即时校验兜底**（缓存 miss 时直接 `GET /api/agents/{id}` 即时确认，恢复计划 v0.3 T1-11）。
 
 ### 9.2 工具调用身份校验
 
@@ -359,7 +359,7 @@ stateDiagram-v2
 |------|------|
 | `pm_claim_task` / `pm_submit_task` / `pm_update_task`（MCP） | 调用者 `instance_id` 必须 == 任务 `assignee`（两者均为 UUID，ADR-073）；否则 JSON-RPC `-32002` Forbidden（实现：[`mcp/mod.rs`](../../../core/acowork-pm/src/mcp/mod.rs) `CODE_FORBIDDEN`） |
 | 匿名调变更工具（无 `X-MCP-Actor`） | JSON-RPC `-32001` Unauthenticated |
-| `pm_create_task` | 不要求 assignee 是调用者（Agent 可为他人/项目建任务，但要审核）；assignee 必须存在（§9.1） |
+| `pm_create_task` | 不要求 assignee 是调用者（Bot 可为他人/项目建任务，但要审核）；assignee 必须存在（§9.1） |
 | REST claim/submit/review | 经 Gateway 反代 + `X-Actor` header；review 仅人类（Desktop 会话鉴权面） |
 
 ### 9.3 其它安全
@@ -386,7 +386,7 @@ stateDiagram-v2
 |---------|------|
 | `by_id: HashMap<TaskId, TaskLocation>` | id → (project_id, dir_path, depth) |
 | `by_project: HashMap<ProjectId, HashSet<TaskId>>` | 项目任务集合 |
-| `by_assignee: HashMap<AgentId, HashSet<TaskId>>` | Agent 自查（`/api/pm/tasks?assignee=X`） |
+| `by_assignee: HashMap<AgentId, HashSet<TaskId>>` | Bot 自查（`/api/pm/tasks?assignee=X`） |
 | `blocked_by: HashMap<TaskId, Vec<TaskId>>` | 反向依赖图（"谁依赖我"） |
 
 ### 10.3 启动重建（崩溃恢复）
@@ -434,8 +434,8 @@ async fn rebuild_index(projects_dir: &Path) -> Result<TaskIndex> {
 | **P0 骨架** | `core/acowork-pm` crate（axum + /health + 日志）；Gateway `[pm]` 配置 + 独立进程 supervisor + 反代（ADR-064） | ✅ 完成 |
 | **P1 存储 + REST** | **目录树存储**（§2.2）、数据模型（project.json / task.json）、项目/任务 CRUD、状态机、**附件上传/下载**、**父子树创建/move**、**依赖图校验**、REST API（§5） | ✅ 完成 |
 | **P2 Desktop projects 视图** | 项目列表 + 看板 + 任务编辑/拖动 + 指派下拉 + 父子树展开 + 附件预览，接入 AppLayout | ✅ 完成 |
-| **P3 Agent 接口 + 审核** | pm MCP HTTP Server（§6，12 工具）、Agent 创建任务待审核 + 人类 review、`acowork/global/mcps` catalog 自动注入 | ✅ 完成 |
-| **P4 远程 + 验证** | advertise endpoint 下发（`http://{advertise_host}:{gw_http_port}/api/pm/mcp`）、远程 Runtime 集成、端到端测试（人类建→Agent 领/交→看板刷新） | ✅ 完成 |
+| **P3 Bot 接口 + 审核** | pm MCP HTTP Server（§6，12 工具）、Bot 创建任务待审核 + 人类 review、`acowork/global/mcps` catalog 自动注入 | ✅ 完成 |
+| **P4 远程 + 验证** | advertise endpoint 下发（`http://{advertise_host}:{gw_http_port}/api/pm/mcp`）、远程 Runtime 集成、端到端测试（人类建→Bot 领/交→看板刷新） | ✅ 完成 |
 | **P5+（可选）** | 附件物理去重（按 sha256 复用）、全文检索、SQLite 存储层切换（TaskStore trait 替换 impl） | 待定 |
 
 ---
@@ -446,10 +446,10 @@ async fn rebuild_index(projects_dir: &Path) -> Result<TaskIndex> {
 
 | 编号 | 决策点 | 定稿结论 | 落点 |
 |------|--------|----------|------|
-| D-1 | Agent 创建任务被拒绝后的语义 | **关闭为 rejected** 并保留记录；Agent 可重新自领（rejected → in_progress）或新建 | §4 状态机 |
+| D-1 | Bot 创建任务被拒绝后的语义 | **关闭为 rejected** 并保留记录；Bot 可重新自领（rejected → in_progress）或新建 | §4 状态机 |
 | D-2 | 待审核任务展示方式 | 看板 `pending` 列展示，`review_status=pending` 高亮；人类 `review` 决定 | §4 / §7 |
-| D-3 | 任务「退回」权限 | 退回仅人类（done → in_progress）；Agent 只能 claim/submit | §4 / §5 `review` |
-| D-4 | 批量指派能力 | **本版不需要（YAGNI）**，后续 PM Agent 迭代 | — |
+| D-3 | 任务「退回」权限 | 退回仅人类（done → in_progress）；Bot 只能 claim/submit | §4 / §5 `review` |
+| D-4 | 批量指派能力 | **本版不需要（YAGNI）**，后续 PM Bot 迭代 | — |
 | D-5 | 删父任务时子任务语义 | **默认级联删除**（`rm -rf` 任务目录，UI 二次确认）；提升为顶层为可选高级操作 | §3.4 / ADR-061 |
 | D-6 | `checkpoint`/`milestone` 与 review 语义 | `checkpoint` submit 后仍需 review（与普通任务一致走 submitted）；`milestone` 语义保留为 `type`，状态机统一 | §4 / manifest |
 | D-7 | `depends_on` 是否允许跨项目依赖 | **允许**；claim 时计算 `blocked_by`，未满足返回 `DependencyNotSatisfied` | §3.5 / §9.2 |

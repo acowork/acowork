@@ -111,11 +111,11 @@ Do not replace each source API with a generic adapter framework. Six named tasks
 
 | Adapter | API and eligibility | Signal / per-source limit |
 |---|---|---|
-| File | `GET /api/agents/{id}/workspaces/search?q=&workspace_id=&max_results=20&match_file_names=true`; keep current case/whole-word options | One signal; skip without agent; at most 20 results, aligned with ADR-093 UI cap. `match_file_names` makes the same endpoint return content hits and file-name hits together (ADR-081 D2) |
+| File | `GET /api/agents/{id}/workspaces/search?q=&workspace_id=&max_results=20&match_file_names=true`; keep current case/whole-word options | One signal; skip without bot; at most 20 results, aligned with ADR-093 UI cap. `match_file_names` makes the same endpoint return content hits and file-name hits together (ADR-081 D2) |
 | Git | Reuse `useGitStore.fetchLog(agentId, workspaceId, "", 100, 0)` + `filterGitCommits(query)` | Add optional `AbortSignal` to existing `fetchLog`/`httpGet`; AbortError exits without 503 retry |
 | Doc | `searchDocs(query, 20, signal)` | Signal already supported; identity/permissions remain as enforced by current Gateway API |
 | Project | `searchPm(query, 20, signal)` | Signal already supported |
-| Memory | `GET /api/agents/{id}/search?scopes=memory&mode=hybrid&limit=20` | Reuse existing fetch/mapper; skip without agent |
+| Memory | `GET /api/agents/{id}/search?scopes=memory&mode=hybrid&limit=20` | Reuse existing fetch/mapper; skip without bot |
 | Conversation | Same Runtime endpoint with `scopes=conversation&mode=hybrid&limit=20` | Same; `not_indexed` is skipped/no hits, not a network failure |
 
 **Limits**: Start at most six source requests at a time; do not add a second concurrency pool. This fixed small fan-out needs no semaphore. The run deadline controls request lifetime; any per-fetch deadline must not exceed the remaining run deadline. Source lists retain their existing order; Git commits retain log order after filtering.
@@ -147,7 +147,7 @@ POST /api/agents/{instance_id}/search/summary
 Content-Type: application/json
 ```
 
-Add the route to `core/acowork-gateway/src/http/proxy.rs::proxy_routes`. The handler extracts only agent ID, body bytes, and headers, then forwards to Runtime `/search/summary` through the existing `proxy_to_runtime_with_method`. Reuse the Runtime registry, error forwarding, and hop-by-hop header rules. Do not parse candidates, log request bodies, or retry POST.
+Add the route to `core/acowork-gateway/src/http/proxy.rs::proxy_routes`. The handler extracts only bot ID, body bytes, and headers, then forwards to Runtime `/search/summary` through the existing `proxy_to_runtime_with_method`. Reuse the Runtime registry, error forwarding, and hop-by-hop header rules. Do not parse candidates, log request bodies, or retry POST.
 
 #### Runtime request
 
@@ -268,7 +268,7 @@ The current Git `openGitHit` opens the log, not a specific commit. For MVP, a ci
 
 ### 5.1 One Generation, Fixed Fan-Out
 
-- Keep the existing 300 ms debounce. Create a run only for non-empty trimmed query, open dialog, and eligible agent scope.
+- Keep the existing 300 ms debounce. Create a run only for non-empty trimmed query, open dialog, and eligible bot scope.
 - Each run starts at most six fixed requests, using `Promise.allSettled`/per-source callbacks; no recursive fan-out, unbounded queue, or retry storm.
 - Do not serialize sources; update hits/status immediately on each source callback.
 - Show per-source waiting/searching/ok(count)/empty/skipped/error/timeout and overall `completed / applicable`; do not display a fake precise percentage.

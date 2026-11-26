@@ -2,13 +2,13 @@
 
 > 版本：v3.7 | 更新日期：2026-07-12
 
-> **v3.7 变更**：§0/§1/§1.5 全面对齐 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) —— Gateway ↔ Runtime IPC 通道由 gRPC 双向流替换为 **MQTT pub/sub + HTTP 反向代理**。Intent 协议（§2）保持不变，仍是 Agent 间逻辑通信的语义合同（与传输无关）。
+> **v3.7 变更**：§0/§1/§1.5 全面对齐 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) —— Gateway ↔ Runtime IPC 通道由 gRPC 双向流替换为 **MQTT pub/sub + HTTP 反向代理**。Intent 协议（§2）保持不变，仍是 Bot 间逻辑通信的语义合同（与传输无关）。
 >
 > **v3.6 变更**：新增 §1.5 Session 管理 IPC 消息 Proto 定义，支持 Session Actor 多会话并发模型。Session 相关 Gateway ↔ Runtime IPC 消息现在承载在 MQTT 主题 `acowork/sessions/...` 上，由 Gateway 反向代理 Runtime 的 localhost HTTP 处理 Session CRUD / 消息历史查询（见 [`docs/protocols/zh/mqtt.md`](../../zh/protocols/mqtt.md)、[`docs/protocols/zh/http.md`](../../zh/protocols/http.md)）。
 
 **交叉引用**：
 - Session Actor 架构：`15-conversation-persistence.md` §1.7
-- Agent 运行时主循环：`03-agent-runtime.md` §2
+- Bot 运行时主循环：`03-agent-runtime.md` §2
 - Session 生命周期与 JSONL 安全：`15-conversation-persistence.md` §1.5、§1.9
 
 ---
@@ -46,9 +46,9 @@
 
 | 通道 | 消费者 | 协议 | 用途 |
 |------|--------|------|------|
-| **HTTP API** | Desktop App / CLI / Gateway → Runtime 反代 | REST (`http://127.0.0.1:19876`) | Agent 管理、对话触发、Vault、配置、大数据查询反代 |
-| **MQTT** | Agent Runtime ↔ Gateway ↔ Desktop App | MQTT 3.1.1 over TCP (`127.0.0.1:19875`, rumqttd broker) | 实时事件推送（chat chunk / tool_call / done）、状态同步、设备生命周期（Will+Retained）、Intent 主题路由 |
-| **HTTP 反向代理** | Gateway → Agent Runtime | HTTP（Runtime 自身监听 localhost 随机端口）| 会话历史拉取、消息分页查询、配置回写、AgentHello 等需要"等回复"的场景 |
+| **HTTP API** | Desktop App / CLI / Gateway → Runtime 反代 | REST (`http://127.0.0.1:19876`) | Bot 管理、对话触发、Vault、配置、大数据查询反代 |
+| **MQTT** | Bot Runtime ↔ Gateway ↔ Desktop App | MQTT 3.1.1 over TCP (`127.0.0.1:19875`, rumqttd broker) | 实时事件推送（chat chunk / tool_call / done）、状态同步、设备生命周期（Will+Retained）、Intent 主题路由 |
+| **HTTP 反向代理** | Gateway → Bot Runtime | HTTP（Runtime 自身监听 localhost 随机端口）| 会话历史拉取、消息分页查询、配置回写、AgentHello 等需要"等回复"的场景 |
 | **Debug Protocol** | Desktop App (DevMode) | HTTP RPC（Gateway 反代 → Runtime `/api/debug/*`）+ MQTT 调试事件（`acowork/agents/{id}/debug/events/{type}`） | 步进调试、录制回放、Skill 热加载（ADR-048 后与生产 IPC 完全同构）|
 
 **权威参考：**
@@ -59,7 +59,7 @@
 
 **§1（Gateway Service API / gRPC）已整体退役** —— 旧 gRPC 合同层握手、帧格式、GatewayRequest/Response 枚举全部下线，相应职责拆分为 MQTT（事件）和 HTTP 反代（请求/响应）。历史合同定义仍可在 [`16-ipc-grpc-migration.md`](./16-ipc-grpc-migration.md) 查阅。
 
-**§2（跨 Agent 通信 / Intent 机制）与传输无关** —— Intent 消息结构、Capability Registry、路由流程等仍是平台语义合同，载荷直接落到 MQTT 主题 `acowork/intents/...` 上，传输层不参与语义。
+**§2（跨 Bot 通信 / Intent 机制）与传输无关** —— Intent 消息结构、Capability Registry、路由流程等仍是平台语义合同，载荷直接落到 MQTT 主题 `acowork/intents/...` 上，传输层不参与语义。
 
 ## 1. Gateway Service API（已退役 — 拆分为 MQTT + HTTP 反向代理）
 
@@ -72,9 +72,9 @@
 >
 > 之前 §1 的"合同层 vs 实现层"分层（消息格式 / JSON schema / 握手协议 vs 传输方式）不再适用 —— 现在合同层是 **MQTT 主题树 + mqtt_payload.proto + HTTP REST 路由**，没有"两套实现层"。
 
-## 2. 跨 Agent 通信（Intent 机制）
+## 2. 跨 Bot 通信（Intent 机制）
 
-Agent 通过 Gateway 的 Intent Router 发送消息请求调用另一个 Agent 的能力。
+Bot 通过 Gateway 的 Intent Router 发送消息请求调用另一个 Bot 的能力。
 
 ### 1.5 Session 管理 IPC 消息
 
@@ -361,15 +361,15 @@ struct IntentError {
 
 #### 字段安全说明
 
-- `from` 字段由 Gateway 在收到 Agent 的 IntentSend 请求后自动填充，Agent 不可自行指定。这防止了身份伪造攻击。
-- `id` 由 Gateway 生成（UUID v4），确保全局唯一。Agent 在 IntentSend 请求中无需提供 id。
+- `from` 字段由 Gateway 在收到 Bot 的 IntentSend 请求后自动填充，Bot 不可自行指定。这防止了身份伪造攻击。
+- `id` 由 Gateway 生成（UUID v4），确保全局唯一。Bot 在 IntentSend 请求中无需提供 id。
 - `params` 的大小限制为 64 KB（超过时 Gateway 拒绝转发），防止大 payload 攻击。
 
 ### 2.2 Capability Registry
 
 #### 设计原则
 
-ACowork 不支持隐式 Intent，所有 Intent 调用必须显式指定 `target`（Agent ID）。因此 Capability Registry 只需回答一个问题：**这个 Agent 声明了这个 Action 吗？** 无需 priority 机制，无路由 ambiguity。
+ACowork 不支持隐式 Intent，所有 Intent 调用必须显式指定 `target`（Bot ID）。因此 Capability Registry 只需回答一个问题：**这个 Bot 声明了这个 Action 吗？** 无需 priority 机制，无路由 ambiguity。
 
 #### 数据结构
 
@@ -389,9 +389,9 @@ pub struct CapabilityRegistry {
 |------|------|--------|
 | **安装依赖检查** | `capabilities.get("{}:{}".format(requires_agent, requires_action))` | O(1) |
 | **运行时校验**（可选） | `capabilities.get("{}:{}".format(target, action))` | O(1) |
-| **Agent 能力查询** | `capabilities.iter().filter(|(k, _)| k.starts_with("{}:", agent_id))` | O(n) |
+| **Bot 能力查询** | `capabilities.iter().filter(|(k, _)| k.starts_with("{}:", agent_id))` | O(n) |
 
-Agent 数量有限，O(n) 全量扫描完全可接受。
+Bot 数量有限，O(n) 全量扫描完全可接受。
 
 #### 安装 / 卸载 / 重启
 
@@ -415,7 +415,7 @@ capabilities.retain(|k, _| !k.starts_with("{}:", agent_id))
 
 **Gateway 重启：**
 
-扫描 `~/.local/share/agent-gateway/agents/` 下所有已安装 agent 的 manifest 重建索引。
+扫描 `~/.local/share/agent-gateway/agents/` 下所有已安装 bot 的 manifest 重建索引。
 
 #### manifest 中 capabilities 声明格式
 
@@ -438,38 +438,38 @@ capabilities.retain(|k, _| !k.starts_with("{}:", agent_id))
 
 #### 三个用途
 
-1. **安装时依赖检查**：Agent 声明 `requires` 指向其他 Agent 的 capability，Gateway 校验这些 capability 是否已注册。
-2. **运行时校验**（可选）：Agent A 向 Agent B 发送 Intent 时，Gateway 可校验 `target:action` 是否在 Registry 中。
-3. **运行时查询**：Agent 可通过 `CapabilityQuery` 接口查询其他 Agent 的详细能力（见 2.4 节）。
+1. **安装时依赖检查**：Bot 声明 `requires` 指向其他 Bot 的 capability，Gateway 校验这些 capability 是否已注册。
+2. **运行时校验**（可选）：Bot A 向 Bot B 发送 Intent 时，Gateway 可校验 `target:action` 是否在 Registry 中。
+3. **运行时查询**：Bot 可通过 `CapabilityQuery` 接口查询其他 Bot 的详细能力（见 2.4 节）。
 
 ### 2.3 Intent 路由流程
 
-1. Agent A 通过 Socket 发送 Intent 到 Gateway。
-2. Gateway 查找 target Agent B：
+1. Bot A 通过 Socket 发送 Intent 到 Gateway。
+2. Gateway 查找 target Bot B：
    - 若 B 已安装但未运行 → 按 B 的启动策略决定是否拉起（见下方）。
-   - 若 B 未安装 → 返回错误 `"Agent not found"`。
+   - 若 B 未安装 → 返回错误 `"Bot not found"`。
 3. Gateway 校验 Intent 的 action 和参数是否匹配 B 的 capability 声明。
-4. Gateway 将 Intent 转发给 Agent B。
-5. Agent B 处理后返回结果。
-6. Gateway 将结果返回给 Agent A（同步模式）或缓存等待 Agent A 下次查询（异步模式）。
+4. Gateway 将 Intent 转发给 Bot B。
+5. Bot B 处理后返回结果。
+6. Gateway 将结果返回给 Bot A（同步模式）或缓存等待 Bot A 下次查询（异步模式）。
 
-**目标 Agent 未运行时的启动策略：**
+**目标 Bot 未运行时的启动策略：**
 
 | 场景 | 行为 |
 |------|------|
 | 同步 Intent + B 未运行 | Gateway 拉起 B，A 阻塞等待（超时由 A 设置） |
 | 异步 Intent + B 未运行 | Gateway 拉起 B，A 不阻塞，B 处理完后 Gateway 缓存结果 |
-| B 启动失败 | Gateway 返回错误 `"Agent failed to start"` |
+| B 启动失败 | Gateway 返回错误 `"Bot failed to start"` |
 | B 的启动策略为"按需" | 正常拉起 |
-| B 的 manifest 禁止被 Intent 唤醒 | Gateway 返回错误 `"Agent does not accept intents"` |
+| B 的 manifest 禁止被 Intent 唤醒 | Gateway 返回错误 `"Bot does not accept intents"` |
 
 ### 2.4 Capability 查询机制
 
-Agent 获取其他 Agent 的能力列表有两种途径：
+Bot 获取其他 Bot 的能力列表有两种途径：
 
 #### 途径 1：启动时注入（Capability Overview）
 
-Agent Runtime 握手时，Gateway 主动推送当前已安装的所有 Agent 及其 **名字级能力摘要**（不含 input/output schema）。这是**最常用的方式**——Agent 在构建 prompt 时就知道系统里有哪些 Agent 能做什么，可以直接向 LLM 描述可用的协作能力。
+Bot Runtime 握手时，Gateway 主动推送当前已安装的所有 Bot 及其 **名字级能力摘要**（不含 input/output schema）。这是**最常用的方式**——Bot 在构建 prompt 时就知道系统里有哪些 Bot 能做什么，可以直接向 LLM 描述可用的协作能力。
 
 ```json
 // Gateway 推送的 capability_overview（名字级摘要）
@@ -497,15 +497,15 @@ Agent Runtime 握手时，Gateway 主动推送当前已安装的所有 Agent 及
 
 **为什么只推名字级摘要？**
 
-如果装了 50 个 Agent，每个 5 个 capability 的完整 schema，推送到 prompt 中约需 6000-8000 token——严重挤占上下文空间，稀释 LLM 对核心指令的注意力。名字级摘要同样规模只有 500-800 token，对 LLM 来说已足够做规划决策（"日历 Agent 能 create_event"就够了），精确参数在调用前按需查询即可。
+如果装了 50 个 Bot，每个 5 个 capability 的完整 schema，推送到 prompt 中约需 6000-8000 token——严重挤占上下文空间，稀释 LLM 对核心指令的注意力。名字级摘要同样规模只有 500-800 token，对 LLM 来说已足够做规划决策（"日历 Bot 能 create_event"就够了），精确参数在调用前按需查询即可。
 
 **推送内容说明：**
 
 - 只包含 capability 名称列表，不含 input/output schema。
-- `running` 字段表示当前是否在运行，供 Agent 判断调用延迟预期。
-- 总量控制在 1000 token 以内。如果已安装 Agent 过多导致超限，Gateway 按以下策略裁剪：
-  1. 优先保留 `running: true` 的 Agent
-  2. 其次保留本 Agent 在 manifest 中声明了 intent 依赖的 Agent
+- `running` 字段表示当前是否在运行，供 Bot 判断调用延迟预期。
+- 总量控制在 1000 token 以内。如果已安装 Bot 过多导致超限，Gateway 按以下策略裁剪：
+  1. 优先保留 `running: true` 的 Bot
+  2. 其次保留本 Bot 在 manifest 中声明了 intent 依赖的 Bot
   3. 其余按 agent_id 字母序截断
 
 **调用时按需获取详细 schema 的流程：**
@@ -528,7 +528,7 @@ LLM 输出 tool_call: intent_send(target="com.example.calendar", action="create_
 
 #### 途径 2：运行时查询（CapabilityQuery）
 
-当 Agent 需要精确确认某 Agent 当前状态或获取完整 capability schema 时，主动查询 Gateway：
+当 Bot 需要精确确认某 Bot 当前状态或获取完整 capability schema 时，主动查询 Gateway：
 
 ```json
 // 查询指定 Agent
@@ -567,9 +567,9 @@ Gateway 返回完整信息：
 | 场景 | 途径 | 理由 |
 |------|------|------|
 | 构建系统 prompt 时描述可用协作能力 | 途径 1（启动注入） | 一次性获取，不需要额外通信 |
-| 发送 Intent 前确认目标 Agent 是否安装 | 途径 1 | overview 已包含安装信息 |
+| 发送 Intent 前确认目标 Bot 是否安装 | 途径 1 | overview 已包含安装信息 |
 | 需要完整的 input/output schema | 途径 2（运行时查询） | overview 只含概要信息 |
-| 用户安装/卸载 Agent 后刷新能力视图 | 途径 2 | 启动时的 overview 可能已过期 |
+| 用户安装/卸载 Bot 后刷新能力视图 | 途径 2 | 启动时的 overview 可能已过期 |
 
 #### 途径 1 的更新机制
 
@@ -606,7 +606,7 @@ Gateway 返回完整信息：
 }
 ```
 
-Agent Runtime 收到更新后，刷新本地缓存的 capability 视图，并在下一轮迭代的上下文构建中反映变化。
+Bot Runtime 收到更新后，刷新本地缓存的 capability 视图，并在下一轮迭代的上下文构建中反映变化。
 
 ### 2.5 WorkspaceContextUpdate（工作区上下文更新）
 
@@ -622,7 +622,7 @@ Gateway → Runtime 单播推送。携带已格式化的工作区上下文文本
 ```
 
 **触发时机**：
-- Agent 会话启动时主动推送
+- Bot 会话启动时主动推送
 - 用户通过 Desktop App 切换当前工作区时推送
 
 ## 3. 设计决策记录
@@ -631,9 +631,9 @@ Gateway → Runtime 单播推送。携带已格式化的工作区上下文文本
 |------|------|------|
 | IPC 通道收敛（ADR-033） | 统一为 MQTT pub/sub + HTTP 反向代理 | 见 ADR-033 / ADR-034：MQTT 承担事件与状态、HTTP 反代承担 req/res 与历史查询；淘汰 gRPC 双向流与 WebSocket 流式推送 |
 | Capability 发现方式 | 启动时注入 + 运行时查询 | 启动注入满足常见需求（构建 prompt），运行时查询满足精确需求 |
-| Overview 内容粒度 | 名字级摘要（不含 schema） | 50 Agent × 5 capability 完整 schema 约 6000-8000 token，名字级仅 500-800 token |
+| Overview 内容粒度 | 名字级摘要（不含 schema） | 50 Bot × 5 capability 完整 schema 约 6000-8000 token，名字级仅 500-800 token |
 | 精确参数获取 | 调用前 CapabilityQuery 按需查询 | LLM 规划只需知道"谁会什么"，精确 schema 在执行时才需要 |
-| Overview 推送 vs 拉取 | 推送 | Agent 在启动时就需要知道协作环境，拉取需额外通信 |
-| 安装/卸载后的更新 | Gateway 主动推送增量 | 避免 Agent 轮询，减少不必要的通信 |
-| Overview 超限裁剪策略 | 保留 running + intent 依赖 + 字母序截断 | 确保最相关的 Agent 信息不丢失 |
-| Intent 目标未运行 | Gateway 按需拉起 | Agent 开发者无需关心目标 Agent 的运行状态 |
+| Overview 推送 vs 拉取 | 推送 | Bot 在启动时就需要知道协作环境，拉取需额外通信 |
+| 安装/卸载后的更新 | Gateway 主动推送增量 | 避免 Bot 轮询，减少不必要的通信 |
+| Overview 超限裁剪策略 | 保留 running + intent 依赖 + 字母序截断 | 确保最相关的 Bot 信息不丢失 |
+| Intent 目标未运行 | Gateway 按需拉起 | Bot 开发者无需关心目标 Bot 的运行状态 |

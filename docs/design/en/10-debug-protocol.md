@@ -4,7 +4,7 @@
 
 ---
 
-The Debug Protocol is the communication specification between Desktop App's developer mode and Agent Runtime (DevMode). It enables step debugging, record/replay, message editing, and Skill hot-reload for Agent Runtime.
+The Debug Protocol is the communication specification between Desktop App's developer mode and Bot Runtime (DevMode). It enables step debugging, record/replay, message editing, and Skill hot-reload for Bot Runtime.
 
 > **Post-ADR-033 Note**: The Debug Protocol previously used WebSocket as the transport. Following ADR-033 (MQTT replacing gRPC/WebSocket), the Debug Protocol has been refactored to use **HTTP RPC + MQTT events**: control plane commands (DebuggerAttach, Step, SetBreakpoint etc.) go through HTTP RPC, real-time events (iteration_started, tool_call, etc.) go through MQTT pub/sub.
 
@@ -43,7 +43,7 @@ The Debug Protocol is the communication specification between Desktop App's deve
 
 ### 1.1 Prerequisites
 
-- Agent Runtime must be started with `--dev-mode` flag
+- Bot Runtime must be started with `--dev-mode` flag
 - `--debug-port` (default 19878) opens HTTP RPC server
 - Runtime subscribes to debug-related MQTT topics, publishes debug events
 
@@ -125,7 +125,7 @@ Event payload:
 
 ### 3.1 DebuggerAttach
 
-Attach debugger to Agent Runtime.
+Attach debugger to Bot Runtime.
 
 **Request**:
 ```json
@@ -159,7 +159,7 @@ Attach debugger to Agent Runtime.
 
 ### 3.2 DebuggerDetach
 
-Detach debugger, Agent Runtime resumes normal execution.
+Detach debugger, Bot Runtime resumes normal execution.
 
 **Request**:
 ```json
@@ -216,7 +216,7 @@ Resume normal execution until next breakpoint or end.
 
 ### 3.5 DebuggerPause
 
-Pause currently executing Agent.
+Pause currently executing Bot.
 
 **Request**:
 ```json
@@ -461,7 +461,7 @@ Published to `acowork/debug/{agent_id}/iteration/event`:
 
 ## 5. Main Loop Integration
 
-When Debug Mode is active, the Agent Runtime main loop is intercepted at key phases:
+When Debug Mode is active, the Bot Runtime main loop is intercepted at key phases:
 
 ```
 Main loop step ⓪ (message merge)
@@ -549,12 +549,12 @@ User (Developer Mode): Edit message to "What's the weather in Shanghai tomorrow?
 
 **Use cases:**
 - Test different prompts on same message
-- Adjust user intent and observe Agent's response change
+- Adjust user intent and observe Bot's response change
 - A/B test different tool selection strategies
 
 ## 7. Skill Hot-Reload
 
-After developer edits SKILL.md, they can hot-reload Skills without restarting Agent:
+After developer edits SKILL.md, they can hot-reload Skills without restarting Bot:
 
 ```
 Developer: Edit skills/weather-query/SKILL.md
@@ -635,10 +635,10 @@ When replaying, Runtime:
 
 **Use cases:**
 - Reproduce reported bugs
-- A/B test different Agent behavior on same input
+- A/B test different Bot behavior on same input
 - Demo / training material generation
 
-## 9. Agent Clone
+## 9. Bot Clone
 
 Clone runs through the Gateway HTTP API (invoked by Desktop App), not through the Debug Protocol.
 
@@ -685,12 +685,12 @@ One criterion decides: **package static content vs. per-instance runtime state.*
 | Mode | Contents | Rationale |
 |---|---|---|
 | **skeleton** | Every **package-level file** — `manifest.toml` (with `agent_id` rewritten), `prompts/`, `skills/`, `assets/`, `tools/`, `resources/`… | Present at install time; independent of the user |
-| **full** | skeleton **+ instance state under `workspace/`**: `workspace/config/` (user-curated model picks, MCP servers, custom workspace dirs in `agent_workspaces.json`), `workspace/conversations/`, `workspace/memory/` (incl. `-wal`/`-shm`) | Produced by running; the trace of what this agent has seen |
+| **full** | skeleton **+ instance state under `workspace/`**: `workspace/config/` (user-curated model picks, MCP servers, custom workspace dirs in `agent_workspaces.json`), `workspace/conversations/`, `workspace/memory/` (incl. `-wal`/`-shm`) | Produced by running; the trace of what this bot has seen |
 
 Two constraints:
 
 1. **Neither list is hard-coded.** Package-level exclusion is driven by `PACKAGE_ALWAYS_EXCLUDE_DIRS` (`memory`/`workspace`/`runtime`); workspace-level exclusion is driven by `WORKSPACE_LOCAL_DIRS` (`files`/`logs`). Every other entry is copied. An allowlist rots as the format evolves — an earlier `["prompts","config","tools","resources"]` package list dropped `skills/`/`assets/` from skeleton, and an earlier `(conversations, memory)` workspace list dropped `config/` from full.
-2. **Instance state lives under `workspace/`, not at package level.** They are siblings, not parent/child: `{instance}/prompts/` is package content while `{instance}/workspace/conversations/` is state. Conflating them makes full mode copy from a path that never exists — silently shipping an agent with no history.
+2. **Instance state lives under `workspace/`, not at package level.** They are siblings, not parent/child: `{instance}/prompts/` is package content while `{instance}/workspace/conversations/` is state. Conflating them makes full mode copy from a path that never exists — silently shipping a bot with no history.
 
 `workspace/files/` (host-specific attachments) and `workspace/logs/` (runtime artefacts) stay behind even in `full` — they are machine-local. `workspace/config/` ships with `full` because the user spent the afternoon setting it up and a clone should not force them to redo it.
 
@@ -701,7 +701,7 @@ Two constraints:
 
 ## 10. Publish Wizard Integration
 
-Developer Mode's Publish Wizard uses Debug Protocol to validate Agent before publishing:
+Developer Mode's Publish Wizard uses Debug Protocol to validate Bot before publishing:
 
 ```
 Step 1: Check — manifest integrity, SKILL.md format, prompts presence

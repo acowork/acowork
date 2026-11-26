@@ -6,22 +6,22 @@
 
 ## 1. Process Isolation
 
-- Each Agent runs in its own process; one crash does not affect others.
-- Agent Runtime is a platform-trusted binary; .agent packages contain no executable code.
+- Each Bot runs in its own process; one crash does not affect others.
+- Bot Runtime is a platform-trusted binary; .bot packages contain no executable code.
 
 ## 2. Filesystem Isolation
 
 ### 2.1 Policy-Level Isolation (Phase 1)
 
-- Agents can only write to their own workspace directories and directories explicitly authorized by the user.
+- Bots can only write to their own workspace directories and directories explicitly authorized by the user.
 - Private SQLite memory layer files reside in the workspace, enforced at the sandbox level.
 - Runtime performs allow-list checks on path arguments for `file_read` / `file_write` etc., rejecting out-of-bounds access.
 
-**Known Limitations**: Policy-level isolation depends on the Runtime actively checking; it cannot defend against an Agent using the shell tool to spawn subprocesses that bypass path restrictions. Subprocesses inherit the full OS permissions of the user process and can read/write any file outside the workspace. See §11 and ADR-005.
+**Known Limitations**: Policy-level isolation depends on the Runtime actively checking; it cannot defend against a Bot using the shell tool to spawn subprocesses that bypass path restrictions. Subprocesses inherit the full OS permissions of the user process and can read/write any file outside the workspace. See §11 and ADR-005.
 
 ### 2.2 OS-Level Mandatory Isolation (Phase 7, Platform-Dependent)
 
-> **2026-04-25 Decision (ADR-007)**: Process-level sandbox (bubblewrap / AppContainer / Seatbelt) is deferred to Phase 7. For Phases 3~6, when Gateway launches Agent Runtime, only **policy-level isolation** is used (permission checks + path allow-list), without OS-level mandatory isolation. The full design is preserved below for Phase 7 reference.
+> **2026-04-25 Decision (ADR-007)**: Process-level sandbox (bubblewrap / AppContainer / Seatbelt) is deferred to Phase 7. For Phases 3~6, when Gateway launches Bot Runtime, only **policy-level isolation** is used (permission checks + path allow-list), without OS-level mandatory isolation. The full design is preserved below for Phase 7 reference.
 
 | Platform | Mechanism | Description |
 |----------|-----------|-------------|
@@ -33,10 +33,10 @@ OS-level isolation is enforced by the kernel — even subprocesses cannot bypass
 
 ## 3. Package Signature Verification
 
-- All .agent packages must pass signature verification before installation (see [02-agent-package.md](./02-agent-package.md)). Unsigned or invalid-signature packages are rejected.
-- System Agents (manifest `system: true`) must be Platform-signed; Gateway has the platform root public key built in for verification.
-- On Agent update, the new package's signing certificate fingerprint must match the installed version's to prevent malicious package replacement.
-- Gateway configuration can define trust rules based on signers (`trusted_signers`); Agents with specific signatures can automatically receive additional permissions.
+- All .bot packages must pass signature verification before installation (see [02-agent-package.md](./02-agent-package.md)). Unsigned or invalid-signature packages are rejected.
+- System Bots (manifest `system: true`) must be Platform-signed; Gateway has the platform root public key built in for verification.
+- On Bot update, the new package's signing certificate fingerprint must match the installed version's to prevent malicious package replacement.
+- Gateway configuration can define trust rules based on signers (`trusted_signers`); Bots with specific signatures can automatically receive additional permissions.
 - Signatures cover the entire ZIP content (Local Files + Central Directory + End of Directory); no unsigned regions exist.
 
 ## 4. Network Isolation
@@ -48,7 +48,7 @@ OS-level isolation is enforced by the kernel — even subprocesses cannot bypass
 ## 5. Permission Minimization
 
 - Manifests must declare all permissions; users can refuse at install time.
-- Runtime permission requests: Agents can request additional permissions via Gateway, which pops up a confirmation dialog.
+- Runtime permission requests: Bots can request additional permissions via Gateway, which pops up a confirmation dialog.
 
 ```json
 {
@@ -62,8 +62,8 @@ OS-level isolation is enforced by the kernel — even subprocesses cannot bypass
 
 - Keys are stored centrally in Gateway Vault (encrypted).
 - Distributed via handshake, not environment variables (avoid ps/procfs leakage).
-- After Agent Runtime starts, keys are obtained once via the MQTT handshake (per ADR-033) and stored in process memory.
-- Agent Runtime is a trusted binary; .agent packages contain no executable code; WASM tools run in a sandbox and cannot read host memory.
+- After Bot Runtime starts, keys are obtained once via the MQTT handshake (per ADR-033) and stored in process memory.
+- Bot Runtime is a trusted binary; .bot packages contain no executable code; WASM tools run in a sandbox and cannot read host memory.
 
 ## 7. WASM Tool Sandbox
 
@@ -81,9 +81,9 @@ OS-level isolation is enforced by the kernel — even subprocesses cannot bypass
 
 ## 9. Prompt Injection Defense
 
-- Agent Runtime has a built-in Prompt Guard that detects and filters suspicious inputs.
+- Bot Runtime has a built-in Prompt Guard that detects and filters suspicious inputs.
 - High-risk tool execution (file writes, network requests, Intent sends) requires user confirmation (approval mechanism).
-- Audit logs: all tool calls and Intents issued by the Agent are recorded and traceable.
+- Audit logs: all tool calls and Intents issued by the Bot are recorded and traceable.
 
 ## 10. Memory Transport Encryption
 
@@ -136,7 +136,7 @@ enum FileSource {
 | `file_write` creates file | `CreatedByTool { tool: "file_write" }` |
 | `network_fetch` saves to file | `Downloaded { from_url }` |
 | New file appears after `shell` execution | `Unknown` (highest risk level) |
-| Agent startup scans workspace | `PreExisting` |
+| Bot startup scans workspace | `PreExisting` |
 
 **Key Rule**: When a shell command attempts to **execute** a `Downloaded` or `Unknown` source file, high-security handling is triggered (see §11.3).
 
@@ -241,13 +241,13 @@ All shell execution records include complete security context:
 2. **Subprocess chain tracking is difficult**: Shell-spawned subprocesses may spawn further subprocesses that Runtime cannot track. Only OS-level sandbox (Phase 7) fundamentally solves this. Phase 3 alternative: shell tool is not provided by default (manifest must explicitly declare) + Approval Gate.
 3. **Symlink attacks**: `ln -s /etc/passwd link && cat link` can bypass path allow-list to read external files. Phase 3 detects symlink creation via FS monitoring; Phase 7 fully resolves via bwrap.
 
-## 12. Publishing-Side Security — Agent Repository Scanning
+## 12. Publishing-Side Security — Bot Repository Scanning
 
 ### 12.1 Problem Background
 
-Runtime-side security (§2~§11) establishes post-installation defense in depth. However, Agent malicious behavior may be covert — embedded indirect instructions in Prompts, dangerous behavior patterns described in Skills, malicious logic in WASM tools — these may bypass Shell risk classification and FileProvenance detection at runtime.
+Runtime-side security (§2~§11) establishes post-installation defense in depth. However, Bot malicious behavior may be covert — embedded indirect instructions in Prompts, dangerous behavior patterns described in Skills, malicious logic in WASM tools — these may bypass Shell risk classification and FileProvenance detection at runtime.
 
-Referencing the Google Play scanning mechanism in the Android ecosystem, ACowork establishes security checkpoints at the Agent repository (store) listing stage, **shifting security left** to the publishing phase. This forms a three-layer defense: pre-listing scan + install-time signature verification + runtime protection:
+Referencing the Google Play scanning mechanism in the Android ecosystem, ACowork establishes security checkpoints at the Bot repository (store) listing stage, **shifting security left** to the publishing phase. This forms a three-layer defense: pre-listing scan + install-time signature verification + runtime protection:
 
 ```
 Developer submits .agent package
@@ -264,7 +264,7 @@ Developer submits .agent package
 
 ### 12.2 Scan Scope
 
-The Agent repository performs automated security scans on submitted .agent packages in the following dimensions:
+The Bot repository performs automated security scans on submitted .bot packages in the following dimensions:
 
 | Scan Dimension | Target Files | Detection Content | Severity |
 |---------------|--------------|-------------------|----------|
@@ -281,23 +281,23 @@ Memory scanning is a unique challenge for ACowork with no direct analog in tradi
 
 **Problem 1: Self-Learned Skills "Going Bad" Risk**
 
-Agents accumulate SkillIteration and SkillExperience via SQLite memory layer during runtime; these self-learned memories evolve through user interactions. A benign Agent might "learn" dangerous behavior under specific user interaction patterns — for example, after the user repeatedly confirms high-risk operations, the Agent's ProceduralNode may solidify "skip confirmation" as a general behavior pattern.
+Bots accumulate SkillIteration and SkillExperience via SQLite memory layer during runtime; these self-learned memories evolve through user interactions. A benign Bot might "learn" dangerous behavior under specific user interaction patterns — for example, after the user repeatedly confirms high-risk operations, the Bot's ProceduralNode may solidify "skip confirmation" as a general behavior pattern.
 
 **Problem 2: Trust Boundary of Package Sharing**
 
-When an Agent is shared, the packaged SQLite memory layer memory contains SkillIteration, ProceduralNode, AutobiographicalNode etc. (Public-level retained, Personal/Sensitive stripped, see 00-prd.md ADR-002). The recipient trusts the "Agent's capability", but the packaged memory may contain:
+When a Bot is shared, the packaged SQLite memory layer memory contains SkillIteration, ProceduralNode, AutobiographicalNode etc. (Public-level retained, Personal/Sensitive stripped, see 00-prd.md ADR-002). The recipient trusts the "Bot's capability", but the packaged memory may contain:
 
 - Malicious ProceduralNode: solidifying dangerous operations as "habits"
 - Contaminated SkillExperience: recording "successful experience" of bypassing security mechanisms
-- Injected Preference: changing Agent's default behavior tendencies
+- Injected Preference: changing Bot's default behavior tendencies
 
 **Scanning Strategy**:
 
 | Scenario | Scan Timing | Scan Target | Strategy |
 |----------|--------------|-------------|----------|
-| Agent listing in store | Developer submission | SQLite memory layer export at packaging | Full scan, high-risk nodes reject listing |
-| Agent shared with others | User-initiated packaging | Packaged SQLite memory layer snapshot | Local scan + warning, do not block sharing (but flag risk) |
-| Agent runtime self-learning | Runtime background | Incremental changes in runtime SQLite memory layer | Lightweight pattern detection (Phase 3+), abnormal Skill experience triggers user notification |
+| Bot listing in store | Developer submission | SQLite memory layer export at packaging | Full scan, high-risk nodes reject listing |
+| Bot shared with others | User-initiated packaging | Packaged SQLite memory layer snapshot | Local scan + warning, do not block sharing (but flag risk) |
+| Bot runtime self-learning | Runtime background | Incremental changes in runtime SQLite memory layer | Lightweight pattern detection (Phase 3+), abnormal Skill experience triggers user notification |
 
 ### 12.4 Scan Engine Architecture
 
@@ -340,7 +340,7 @@ When an Agent is shared, the packaged SQLite memory layer memory contains SkillI
 | Verdict | Condition | Follow-up Action |
 |---------|-----------|------------------|
 | **Pass** | No Critical/High findings, Medium findings ≤ 3 | Normal listing, attach scan report |
-| **Warn** | High findings present but explainable (e.g. shell-declaring Agent inherently has high-risk Skill patterns) | Listed with warning tag, visible on user install |
+| **Warn** | High findings present but explainable (e.g. shell-declaring Bot inherently has high-risk Skill patterns) | Listed with warning tag, visible on user install |
 | **Reject** | Critical findings present, or High findings ≥ 3 with no reasonable explanation | Reject listing, return scan report for developer remediation |
 
 ### 12.5 Specific Rules for SQLite memory layer Memory Scanning
@@ -406,8 +406,8 @@ enum SQLite memory layerFinding {
 
 Publishing-side scanning works in concert with package signing (§3):
 
-- **Developer self-signed packages**: Developer self-distributed (sideloaded), **no repository scan guarantee**. Users bear risk themselves; Gateway warns at install: "Unverified third-party Agent".
+- **Developer self-signed packages**: Developer self-distributed (sideloaded), **no repository scan guarantee**. Users bear risk themselves; Gateway warns at install: "Unverified third-party Bot".
 - **Repository-distributed packages**: After passing the repository scan, the repository may re-sign with the **Distribution Key** (Phase 5+) to indicate "this package passed safety scanning". Gateway can be configured to "only install Distribution Key signed packages" (enterprise policy).
-- **Platform-signed packages**: System Agents are exempt from repository scanning (platform has its own trust chain), but the Platform Key signature itself is a stronger trust guarantee.
+- **Platform-signed packages**: System Bots are exempt from repository scanning (platform has its own trust chain), but the Platform Key signature itself is a stronger trust guarantee.
 
 This layered trust model aligns with Android's sideload vs Play Store install model: users can choose free installation (self-signed) or only trust repository-distributed packages (Distribution Key).

@@ -39,7 +39,7 @@
 | Runtime LLM | `Provider::chat(ChatRequest)`、`ChatMessage`、`episode_distill` 调用范式 | 复用 Provider trait、既有 AgentCore/SessionManager 模型解析路径及 request 类型；新建小型 search-summary prompt/parse 函数，不复用语义不同的压缩或 distillation prompt |
 | Gateway Runtime 代理 | `proxy_routes` + `proxy_to_runtime_with_method` | 增加一个显式 POST 路由，透传 body/status/content-type；不加业务逻辑或独立 HTTP client |
 
-> 注意：目前 Runtime `/search` 只负责 agent 内 memory/file/git/conversation 聚合；Desktop 文件 tab 使用 `/workspaces/search`，doc/PM 是独立进程。新协调器以各 tab 当前 API 为准，不迁移聚合责任。
+> 注意：目前 Runtime `/search` 只负责 bot 内 memory/file/git/conversation 聚合；Desktop 文件 tab 使用 `/workspaces/search`，doc/PM 是独立进程。新协调器以各 tab 当前 API 为准，不迁移聚合责任。
 
 ## 3. 模块拓扑与依赖方向
 
@@ -111,11 +111,11 @@ interface SearchRunHandle {
 
 | Adapter | API 与适用条件 | signal / 单源限制 |
 |---|---|---|
-| File | `GET /api/agents/{id}/workspaces/search?q=&workspace_id=&max_results=20&match_file_names=true`；复用现 case/whole-word 参数 | 1 个 signal；无 agent 则 skipped；请求最多 20 条，与 ADR-093 UI 上限一致。`match_file_names` 让同一端点同时返回内容命中与文件名命中（ADR-081 D2） |
+| File | `GET /api/agents/{id}/workspaces/search?q=&workspace_id=&max_results=20&match_file_names=true`；复用现 case/whole-word 参数 | 1 个 signal；无 bot 则 skipped；请求最多 20 条，与 ADR-093 UI 上限一致。`match_file_names` 让同一端点同时返回内容命中与文件名命中（ADR-081 D2） |
 | Git | 复用 `useGitStore.fetchLog(agentId, workspaceId, "", 100, 0)` + `filterGitCommits(query)` | 为现 `fetchLog` 的 `httpGet` 增加可选 `AbortSignal`；不改变已有 503 retry 行为，AbortError 直接退出 |
 | Doc | `searchDocs(query, 20, signal)` | 函数已有 signal 支持；匿名/user scope 按现有 Gateway API 权限处理 |
 | Project | `searchPm(query, 20, signal)` | 函数已有 signal 支持 |
-| Memory | `GET /api/agents/{id}/search?scopes=memory&mode=hybrid&limit=20` | 复用现有 fetch/mapper；无 agent 则 skipped |
+| Memory | `GET /api/agents/{id}/search?scopes=memory&mode=hybrid&limit=20` | 复用现有 fetch/mapper；无 bot 则 skipped |
 | Conversation | 同 Runtime endpoint，`scopes=conversation&mode=hybrid&limit=20` | 同上；索引返回 `not_indexed` 时是 skipped/no hits，而非网络错误 |
 
 **限制**：最多同时启动 6 个来源请求，不再套二级并发池；这是固定小 fan-out，不需要 semaphore。每个 source request 的实际超时由 run deadline 统一管理，必要的单-source fetch deadline 不得超过 run 剩余时间。UI 候选列表保留各来源现排序；Git 的列表按既有 commit log 次序筛选。
@@ -147,7 +147,7 @@ POST /api/agents/{instance_id}/search/summary
 Content-Type: application/json
 ```
 
-新增在 `core/acowork-gateway/src/http/proxy.rs::proxy_routes`。Handler 只提取 agent ID、body bytes 和 headers，调用已有 `proxy_to_runtime_with_method` 转发至 Runtime `/search/summary`。遵循现有 Runtime registry、错误透传和 hop-by-hop header 规则，不自行解析候选、不记录 body、不重试 POST。
+新增在 `core/acowork-gateway/src/http/proxy.rs::proxy_routes`。Handler 只提取 bot ID、body bytes 和 headers，调用已有 `proxy_to_runtime_with_method` 转发至 Runtime `/search/summary`。遵循现有 Runtime registry、错误透传和 hop-by-hop header 规则，不自行解析候选、不记录 body、不重试 POST。
 
 #### Runtime 请求
 
@@ -271,7 +271,7 @@ dialog 高度上限仍使用现 70vh。`Zone 2 + 3` 在 summary disabled（query
 
 ### 5.1 一个 generation，一个固定 fan-out
 
-- 检索由回车/重跑按钮显式触发，输入不自动检索（见 [ADR-081 §4.5.1](../../adr/zh/ADR-081-global-search.md)）。只有 query trim 非空、dialog open、agent 条件满足才创建 run。防抖只降低频率不降低量级：一次 run 是 6 个请求加一次 LLM，逐字符触发会造成数量级放大。
+- 检索由回车/重跑按钮显式触发，输入不自动检索（见 [ADR-081 §4.5.1](../../adr/zh/ADR-081-global-search.md)）。只有 query trim 非空、dialog open、bot 条件满足才创建 run。防抖只降低频率不降低量级：一次 run 是 6 个请求加一次 LLM，逐字符触发会造成数量级放大。
 - 每个 run 固定最多 6 个请求，使用 `Promise.allSettled`/每源回调；无动态递归、无无限队列、无重试风暴。
 - 不串行等待源；每个返回按 source callback 立即更新对应 hits/status。
 - 每源显示 waiting/searching/ok(count)/empty/skipped/error/timeout；overall 计数 `completed / applicable`，不展示虚假的精确百分比。
@@ -347,7 +347,7 @@ Idle
 
 ## 7. 安全与权限
 
-1. `search/summary` 继承现有 agent instance route 和 Gateway 访问权限；不接受调用方指定的 provider、model、endpoint 或工具。
+1. `search/summary` 继承现有 bot instance route 和 Gateway 访问权限；不接受调用方指定的 provider、model、endpoint 或工具。
 2. Runtime 校验请求大小、query、scope、id、数量和字段长度；Gateway 全局 body limit 仍生效。
 3. 命中 snippets 作为不可信 user data 包在 JSON 数据区域；system prompt 指示忽略数据中的指令；`tools=None`。
 4. LLM 输入不含 locators，响应 citation ID 白名单验证，前端再次白名单；两层都不信任模型。
@@ -363,7 +363,7 @@ Idle
 | Runtime summary 503/Provider 无配置 | 列表正常 | 显示“摘要暂不可用” | 可继续浏览来源列表 |
 | Provider 20s timeout | 列表正常 | 显示可重试提示；不自动重试 | 不锁定输入或列表 |
 | LLM 格式坏/引用越权/空文本 | 列表正常 | 拒绝摘要；未知引用不导航 | 原始模型输出不展示 |
-| 查询取消/关闭/切换 agent workspace | 新 generation 独立 | abort，无 toast | 旧结果绝不覆盖当前查询 |
+| 查询取消/关闭/切换 bot workspace | 新 generation 独立 | abort，无 toast | 旧结果绝不覆盖当前查询 |
 
 ## 9. 模块级实施顺序与文件边界
 

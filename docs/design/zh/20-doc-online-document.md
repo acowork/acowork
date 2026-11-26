@@ -6,7 +6,7 @@
 > 关联设计：[`04-gateway.md`](./04-gateway.md)、[`14-desktop-app.md`](./14-desktop-app.md)
 > 关联 ADR：[`ADR-070-doc-standalone-process-and-tree-storage.md`](../../adr/zh/ADR-070-doc-standalone-process-and-tree-storage.md)（doc 独立进程 + 存储选型，本 v1.0 依其定案）、[`ADR-064-pm-standalone-process.md`](../../adr/zh/ADR-064-pm-standalone-process.md)（独立进程范式先例）、[`ADR-055-remote-runtime-node-topology.md`](../../adr/zh/ADR-055-remote-runtime-node-topology.md)（远程节点访问）
 >
-> **一句话**：`acowork-doc` 是 Gateway 托管的本地在线文档服务，提供目录树文档库的 REST API 与 doc MCP Server。人类经 Desktop 本地 React 组件使用；Agent 经 HTTP MCP 工具读写，修改走「PR 式审核流」。
+> **一句话**：`acowork-doc` 是 Gateway 托管的本地在线文档服务，提供目录树文档库的 REST API 与 doc MCP Server。人类经 Desktop 本地 React 组件使用；Bot 经 HTTP MCP 工具读写，修改走「PR 式审核流」。
 
 ---
 
@@ -15,7 +15,7 @@
 ### 1.1 目标
 
 1. 提供基础版在线文档：Markdown 阅读/编辑/渲染、目录树文档库管理（创建/重命名/移动/删除/检索）。
-2. Agent 可直接读写共享文档；**Agent 对已有文档的修改须经人类审核后合并**（PR 式审核流）。
+2. Bot 可直接读写共享文档；**Bot 对已有文档的修改须经人类审核后合并**（PR 式审核流）。
 3. 复用 Gateway sidecar 托管范式（同 `acowork-embed`），可监督、可重启、可远程访问。
 4. 前端复用 Desktop 既有设计系统与 Markdown 渲染组件，保证风格统一。
 
@@ -26,7 +26,7 @@
 | Q1 | **前端 = Desktop 本地 React 组件**（不 WebView 内嵌） | WebView 内嵌独立前端会导致两套技术栈与样式，风格不统一。Desktop 已有成熟的 `MarkdownPreviewView`（react-markdown + remark-gfm + CodeBlock）与设计 token，直接复用。acowork-doc 服务**只提供 REST API**，不内置前端 |
 | Q2 | **add to doc = 快照副本** | 避免工作区后续变化导致的链接失效；导入后与原工作区解耦，KISS |
 | Q3 | **MCP transport = HTTP** | 服务常驻、连接开销低；现有 `McpTransport` 已支持 HTTP |
-| Q4 | **Agent 修改他人已有文档走 PR 式审核流；改自己的文档直接生效** | 治理由策略决定，不由动词决定（`service/policy.rs`）：调用者是文档创建人（或管理员）→ 直接生效；改他人文档 / 文档无创建人记录 → 返回 `pending_review` + `request_id`，人类在 Desktop 审核（approve/reject）后合并入库。**新建文档直接生效**（此时调用者成为创建人，其后续 append 也直通）。结构性操作（`move`/`remove`）按所有权放行，不进审核流——审核模型只表达「内容提案」；无创建人记录时按节点 ACL 放行（避免历史文档不可达） |
+| Q4 | **Bot 修改他人已有文档走 PR 式审核流；改自己的文档直接生效** | 治理由策略决定，不由动词决定（`service/policy.rs`）：调用者是文档创建人（或管理员）→ 直接生效；改他人文档 / 文档无创建人记录 → 返回 `pending_review` + `request_id`，人类在 Desktop 审核（approve/reject）后合并入库。**新建文档直接生效**（此时调用者成为创建人，其后续 append 也直通）。结构性操作（`move`/`remove`）按所有权放行，不进审核流——审核模型只表达「内容提案」；无创建人记录时按节点 ACL 放行（避免历史文档不可达） |
 | Q7 | **暴露给远程节点** | 与 embed 一致：endpoint 用 `advertise_host` 构造，经 MQTT 全局资源/AgentHello 下发，远程 Runtime 可访问 doc MCP（§8） |
 | Q8 | **数据目录 = `$HOME/.acowork/acowork-doc/`** | ADR-070 决策 3：修正草案 `{data}/acowork-doc/`（嵌套 Gateway 数据目录）——与 pm 对齐，doc 数据与 Gateway 数据目录**平级独立**（`$HOME/.acowork/` 下与 gateway/node/pm 并列），生命周期互不耦合 |
 
@@ -128,7 +128,7 @@ trash_retention_days = 30             # 回收站保留天数
 ## 4. REST API 设计
 
 > 前缀 `/api`；错误统一 JSON `{"error": {...}}`；文档写操作用版本号乐观并发，冲突返回 409。
-> **Desktop 访问路径**：经 Gateway 反向代理 `{gw}/api/doc/...`，Gateway 剥掉 `/api/doc` 前缀转发到 doc 服务 `/api/...`（保持单入口 + 鉴权点）。Agent 不调 REST，走 §6 MCP HTTP。
+> **Desktop 访问路径**：经 Gateway 反向代理 `{gw}/api/doc/...`，Gateway 剥掉 `/api/doc` 前缀转发到 doc 服务 `/api/...`（保持单入口 + 鉴权点）。Bot 不调 REST，走 §6 MCP HTTP。
 
 | 方法 | 路径 | 说明 | 鉴权 |
 |------|------|------|------|
@@ -137,19 +137,19 @@ trash_retention_days = 30             # 回收站保留天数
 | POST | `/api/dirs` | 新建目录 `{path, name}` | Desktop |
 | PATCH | `/api/dirs/:id` | 目录重命名/移动 | Desktop |
 | DELETE | `/api/dirs/:id` | 删除目录（级联入回收站） | Desktop |
-| GET | `/api/docs/:id` | 读文档（Markdown 原文 + 版本 + 元数据） | Desktop / Agent |
-| POST | `/api/docs` | 新建文档 `{path, title, content?, import?}` | Desktop / Agent（`import` 记录 add to doc 来源） |
+| GET | `/api/docs/:id` | 读文档（Markdown 原文 + 版本 + 元数据） | Desktop / Bot |
+| POST | `/api/docs` | 新建文档 `{path, title, content?, import?}` | Desktop / Bot（`import` 记录 add to doc 来源） |
 | PUT | `/api/docs/:id` | **直接更新**（人类路径，带 `version`） | Desktop（人类） |
 | DELETE | `/api/docs/:id` | 删除文档（入回收站） | Desktop |
 | POST | `/api/docs/:id/move` | 移动文档 `{to_path}` | Desktop |
-| GET | `/api/search?keyword=` | 跨目录关键字检索 | Desktop / Agent |
+| GET | `/api/search?keyword=` | 跨目录关键字检索 | Desktop / Bot |
 | GET | `/api/requests?status=` | 更新请求列表（审核队列） | Desktop（人类） |
 | POST | `/api/requests/:id/approve` | 审核通过：校验 base_version → 合并入库 | Desktop（人类） |
 | POST | `/api/requests/:id/reject` | 审核拒绝（可附 note） | Desktop（人类） |
-| GET | `/api/docs/:id/requests` | 某文档的更新请求历史 | Desktop / Agent |
+| GET | `/api/docs/:id/requests` | 某文档的更新请求历史 | Desktop / Bot |
 | GET | `/api/trash` / `POST /api/trash/:id/restore` | 回收站查看与恢复（P2） | Desktop |
 
-> `PUT /api/docs/:id` 仅对人类开放；Agent 一律经 MCP 的 `doc_write`。是否需要
+> `PUT /api/docs/:id` 仅对人类开放；Bot 一律经 MCP 的 `doc_write`。是否需要
 > 人工审核由 `service::policy` 判定（改他人文档 → `pending_review`，见 §5），
 > 与走哪个动词无关。服务端在请求层校验调用方身份（MCP 调用带 instance_id）。
 
@@ -159,11 +159,11 @@ trash_retention_days = 30             # 回收站保留天数
 
 ### 5.1 动机
 
-多个 Agent 共享同一文档库，若 Agent 直接覆写他人内容会破坏协作。参照 git PR：
+多个 Bot 共享同一文档库，若 Bot 直接覆写他人内容会破坏协作。参照 git PR：
 **改他人内容的修改先提交请求，人类审核后合并**。
 
 关键点：**审核是治理策略，不是动词**。调用者改自己的文档（`creator == actor`）
-直接生效——这是 Agent 迭代自己产出的常见路径，把人类放在这里只会让流程瘫掉；
+直接生效——这是 Bot 迭代自己产出的常见路径，把人类放在这里只会让流程瘫掉；
 改他人文档才进审核队列。策略实现见
 [service/policy.rs](../../../core/acowork-doc/src/service/policy.rs)，判定表：
 
@@ -178,7 +178,7 @@ trash_retention_days = 30             # 回收站保留天数
 不进审核流，按所有权放行——审核请求模型只能表达「内容提案」。
 
 **无创建人记录的结构性操作**（同一张表里内容写入取「进审核」的安全侧）不走
-所有权拒绝：结构性操作没有审核通道，一律拒绝等于让这类历史文档在 Agent 面上
+所有权拒绝：结构性操作没有审核通道，一律拒绝等于让这类历史文档在 Bot 面上
 永久不可达（既不能改名也不能删）——那不是保护，是死锁。因此改由节点 ACL 裁决
 （`gate_owner` 返回 `Unowned` → `AclService::check(Doc, Edit)`）：ACL 默认公开，
 显式收紧时才拦人，admin 在 ACL 层内豁免。
@@ -230,19 +230,19 @@ sequenceDiagram
 
 ### 5.4 合并语义
 
-- **approve**：服务端再次校验 `base_version == 当前版本`；若已被其他更新抢占（版本已变），拒绝合并并提示 Agent 重新基于新版本提交（与 git push 被拒同语义）。
-- **expired**：超过 `request_ttl_hours` 未审核自动标记 expired，由 Agent 重新提交。
-- 审核通过写库后版本号 +1，所有已读客户端（含其他 Agent 的缓存）应感知版本变化。
+- **approve**：服务端再次校验 `base_version == 当前版本`；若已被其他更新抢占（版本已变），拒绝合并并提示 Bot 重新基于新版本提交（与 git push 被拒同语义）。
+- **expired**：超过 `request_ttl_hours` 未审核自动标记 expired，由 Bot 重新提交。
+- 审核通过写库后版本号 +1，所有已读客户端（含其他 Bot 的缓存）应感知版本变化。
 
-### 5.5 Agent 端暂存（Q4 细节）
+### 5.5 Bot 端暂存（Q4 细节）
 
 协议里**没有**「服务端给建议缓存路径」这一步：`doc_read` 返回正文，`doc_stat`
-返回版本，Agent 想落盘就用自己的文件工具落盘——doc 进程与 Agent 工作区可能不
-在同一信任边界（远程 Agent），落盘职责只能归 Agent 侧。若 Agent 需要暂存，位置
+返回版本，Bot 想落盘就用自己的文件工具落盘——doc 进程与 Bot 工作区可能不
+在同一信任边界（远程 Bot），落盘职责只能归 Bot 侧。若 Bot 需要暂存，位置
 按工作区约定：
 
-1. 当前 Agent 工作区根下 `.acowork/tmp/docs/{doc_id}.md`；
-2. **例外**：Agent 工作区即 agent home（无独立 workspace 目录）时，用系统 tmp
+1. 当前 Bot 工作区根下 `.acowork/tmp/docs/{doc_id}.md`；
+2. **例外**：Bot 工作区即 bot home（无独立 workspace 目录）时，用系统 tmp
    `{temp_dir()}/acowork-doc/{instance_id}/{doc_id}.md`；
 3. 或者干脆不落盘——库内 `报告.md.tmp.md` + `doc_move` 就是原子发布方案
    （§6.2），不需要本地临时文件。
@@ -251,10 +251,10 @@ sequenceDiagram
 
 ---
 
-## 6. MCP 工具设计（Agent 接口，HTTP transport）
+## 6. MCP 工具设计（Bot 接口，HTTP transport）
 
 - MCP Server 端点：`http://127.0.0.1:{doc_port}/mcp`（doc 进程内部端点，仅 loopback；Q3 = HTTP）。Gateway 反代公开入口为 `http://{advertise_host}:{gw_http_port}/api/doc/mcp`（§8）。
-- Gateway 将 doc MCP 配置注入每个 Agent 的 `catalog` 列表（`auto_inject_mcp=true` 时），Agent 默认获得 `doc_*` 工具。
+- Gateway 将 doc MCP 配置注入每个 Bot 的 `catalog` 列表（`auto_inject_mcp=true` 时），Bot 默认获得 `doc_*` 工具。
 - 每个工具调用携带 **`agent_instance_id`**（ADR-073：Runtime 实例 UUID；由
   Gateway 经 `X-MCP-Actor` 注入，缺失即匿名只读），服务端据此做身份归属与
   所有权判定（NFR-04）。包 id（`agent_id`）不上 wire。
@@ -310,7 +310,7 @@ sequenceDiagram
 纯文本 `Failed to buffer the request body: length limit exceeded`，调用方分不清
 「太大」和「JSON 坏了」）。
 
-> Agent 与现有内置工具一致地调用 `doc_*`（经 Runtime `McpManager`），无需改动 Agent 本体。
+> Bot 与现有内置工具一致地调用 `doc_*`（经 Runtime `McpManager`），无需改动 Bot 本体。
 
 ---
 
@@ -333,7 +333,7 @@ sequenceDiagram
 - doc 服务作为 **global scope** sidecar 部署在 Gateway 机器，只绑定 `127.0.0.1`（内部端口 18081），**不直接暴露公网**。
 - 对外 endpoint 用 Gateway `advertise_host` + HTTP 端口构造（D4-1 在 [gateway/mod.rs:702](../../../core/acowork-gateway/src/gateway/mod.rs#L702) 定案）：`http://{advertise_host}:{gw_http_port}/api/doc/mcp`——远程 Runtime 先到 Gateway 公共 HTTP 入口，由 `doc_proxy` 校验身份后反代到 doc 进程 `/mcp`。
 - 下发路径：Gateway 启动时把 `doc_mcp_url` 写入共享状态，经 MQTT 全局资源 `build_available_mcps` 注入（[global_resources_builders.rs:180](../../../core/acowork-gateway/src/mqtt/global_resources_builders.rs#L180)），远程 Runtime 收到 endpoint 后 HTTP 调用 doc MCP；REST 与 MCP 两路均由 doc_proxy 鉴权（`X-Actor: human` 注入 / `X-MCP-Actor` 校验）。
-- **安全**：MCP HTTP 端点的身份校验发生在 Gateway `doc_proxy`（单一鉴权点）——`X-MCP-Actor ∈ installed_agents` 才透传（受信 agent），否则剥离为匿名（仅只读工具 list/read/search/pull/check_request）。禁止匿名写操作。明细见 §9。
+- **安全**：MCP HTTP 端点的身份校验发生在 Gateway `doc_proxy`（单一鉴权点）——`X-MCP-Actor ∈ installed_agents` 才透传（受信 bot），否则剥离为匿名（仅只读工具 list/read/search/pull/check_request）。禁止匿名写操作。明细见 §9。
 
 ```mermaid
 graph LR
@@ -357,9 +357,9 @@ graph LR
 
 | 威胁 | 缓解 |
 |------|------|
-| MCP 端点暴露到 advertise_host 被匿名调用 | MCP HTTP 端点要求鉴权：连接时校验 Runtime 携带的 agent 身份 / node token（Gateway 注入）；无身份调用仅允许只读工具（doc_list/read/search），写操作（add/submit_update/mkdir）必须带可信 agent_id |
-| Agent 改他人文档 | 策略判定 → `doc_write` 返回 `pending_review`，正文不进库；请求记录 `submitted_by`（§5） |
-| Agent `move`/`remove` 他人文档 | 所有权校验失败 → `forbidden`（无审核兜底：审核模型无法表达删除/改名） |
+| MCP 端点暴露到 advertise_host 被匿名调用 | MCP HTTP 端点要求鉴权：连接时校验 Runtime 携带的 bot 身份 / node token（Gateway 注入）；无身份调用仅允许只读工具（doc_list/read/search），写操作（add/submit_update/mkdir）必须带可信 agent_id |
+| Bot 改他人文档 | 策略判定 → `doc_write` 返回 `pending_review`，正文不进库；请求记录 `submitted_by`（§5） |
+| Bot `move`/`remove` 他人文档 | 所有权校验失败 → `forbidden`（无审核兜底：审核模型无法表达删除/改名） |
 | 大文档一次写不完 | `doc_write(mode=append)` 分段 + `doc_move` 原子发布（§6.2）；读者看不到半成品 |
 | 请求体超过上限 | 文档超限 → `payload_too_large` 且消息含实际字节数与上限；传输超限 → 413 + `payload_too_large` JSON 信封（§6.3） |
 | 并发覆盖 | 版本号乐观并发：写库/合并均校验 `base_version`，冲突 409 |
@@ -385,7 +385,7 @@ graph LR
 | **D1 存储 + REST** | 目录树存储（library.json + .md）、REST API（tree/docs/search/dirs）、版本号并发 | 服务端完整 |
 | **D2 Desktop docs 视图** | 目录树组件 + 复用 MarkdownPreviewView 编辑器 + 服务离线态，接入 AppLayout | 人类可用基础在线文档 |
 | **D3 更新审核流** | `.requests/` 模型、`doc_write` 命中策略 → `pending_review`、approve/reject、审核队列 UI、MQTT 通知 | PR 式审核全链路 |
-| **D4 Agent 接口 + 远程** | doc MCP HTTP Server（§6 全部工具）、Gateway catalog 自动注入、advertise endpoint 下发、身份校验 | Agent 可用；远程可用 |
+| **D4 Bot 接口 + 远程** | doc MCP HTTP Server（§6 全部工具）、Gateway catalog 自动注入、advertise endpoint 下发、身份校验 | Bot 可用；远程可用 |
 
 ---
 
@@ -393,8 +393,8 @@ graph LR
 
 | 编号 | 问题 | 决策（实施定案） |
 |------|------|------|
-| OD-1 | `.acowork/tmp` 缓存是否需要在 Agent 重启/会话结束时清理？ | **服务端不落盘，也不再提供「建议缓存路径」**：`doc_read` 返回正文、`doc_stat` 返回版本，落盘由 Agent 自己的文件工具负责（信任边界见 §5.5）。库内 `doc_write(mode=append)` + `doc_move` 已能覆盖大文档原子发布，Agent 侧缓存是可选项。见 [mcp/tools.rs](../../../core/acowork-doc/src/mcp/tools.rs) |
-| OD-2 | 更新请求是否支持「驳回后 Agent 重新提交」的迭代，还是每次新请求？ | **每次新请求**（简单、可审计）；reject 保留 `review_note` 供 Agent 参考重新提交 |
+| OD-1 | `.acowork/tmp` 缓存是否需要在 Bot 重启/会话结束时清理？ | **服务端不落盘，也不再提供「建议缓存路径」**：`doc_read` 返回正文、`doc_stat` 返回版本，落盘由 Bot 自己的文件工具负责（信任边界见 §5.5）。库内 `doc_write(mode=append)` + `doc_move` 已能覆盖大文档原子发布，Bot 侧缓存是可选项。见 [mcp/tools.rs](../../../core/acowork-doc/src/mcp/tools.rs) |
+| OD-2 | 更新请求是否支持「驳回后 Bot 重新提交」的迭代，还是每次新请求？ | **每次新请求**（简单、可审计）；reject 保留 `review_note` 供 Bot 参考重新提交 |
 | OD-3 | 文档编辑是否需要「草稿」概念？ | **不需要**——仅 Desktop 客户端本地状态（editorStore dirty + 409 conflict 引导刷新）；服务端无草稿 |
 | OD-4 | 回收站是否纳入 v1 范围？ | **纳入 v1**：`.trash/` + sidecar（恢复信息）+ `trash_retention_days`（默认 30 天）启动惰性清理；Desktop TrashDialog 支持 restore / purge |
 
@@ -408,6 +408,6 @@ graph LR
 | D1 存储 + REST | 目录树存储（library.json + .md + reconcile）、REST API（tree/docs/dirs/search/trash/requests）、版本号乐观并发、Service 层封装 | ✅ 已交付（97 测试） |
 | D2 Desktop docs 视图 | 目录树 + 编辑器（Markdown 同栈预览）+ 审核队列 + 回收站 + 离线降级，接入 AppLayout | ✅ 已交付（vite build 通过） |
 | D3 更新审核流 + MCP | PR 式审核全链路（REST + MCP 工具 8 个 + 身份校验 + catalog 自动注入） | ✅ 已交付（MCP e2e 闭环） |
-| D4 Agent 接口 + 远程 | doc MCP HTTP（8 工具）、Gateway catalog 注入、advertise endpoint 下发、远程 e2e | ✅ 已交付（remote_e2e 2 场景） |
+| D4 Bot 接口 + 远程 | doc MCP HTTP（8 工具）、Gateway catalog 注入、advertise endpoint 下发、远程 e2e | ✅ 已交付（remote_e2e 2 场景） |
 
 > 注：实施顺序为 D0 → D1 → D3（MCP 服务端先行，与 D2 并行无冲突）→ D2（Desktop）→ D4（远程验证）。全套测试 114+ 全绿，clippy 0 warning。

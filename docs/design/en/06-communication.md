@@ -7,7 +7,7 @@
 
 ACowork's communication protocol covers three communication paths:
 
-1. **Gateway ↔ Agent Runtime IPC** — MQTT pub/sub (real-time events) + HTTP reverse proxy (large data queries)
+1. **Gateway ↔ Bot Runtime IPC** — MQTT pub/sub (real-time events) + HTTP reverse proxy (large data queries)
 2. **Cross-Agent Intent routing** — Reuses the same MQTT topic tree, with Gateway as router
 3. **Desktop App / CLI ↔ Gateway access layer** — HTTP API (REST) + MQTT subscription (streaming events)
 
@@ -36,7 +36,7 @@ ACowork's communication protocol covers three communication paths:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-## 1. Gateway ↔ Agent Runtime IPC (MQTT + HTTP Reverse Proxy)
+## 1. Gateway ↔ Bot Runtime IPC (MQTT + HTTP Reverse Proxy)
 
 Post-ADR-033 IPC is unified as **MQTT pub/sub + HTTP reverse proxy**:
 
@@ -99,8 +99,8 @@ acowork/
 
 - `agents/{agent_id}/sessions/{session_id}/messages/+` — Session-level message stream, Gateway pushes to Desktop App via fanout
 - `agents/{agent_id}/sessions/{session_id}/inbound/+` — Gateway → Runtime reverse control channel (chat message, interrupt, system notification)
-- `agents/{agent_id}/lifecycle/+` — Agent lifecycle events (hello, ready, goodbye, config_update)
-- `agents/{agent_id}/status` — Agent status (Retained message, new subscribers get latest status immediately)
+- `agents/{agent_id}/lifecycle/+` — Bot lifecycle events (hello, ready, goodbye, config_update)
+- `agents/{agent_id}/status` — Bot status (Retained message, new subscribers get latest status immediately)
 - `system/intents/+` — Cross-Agent Intent routing
 - `system/approvals/+` — User approval flow (Gateway ↔ Runtime ↔ Desktop App)
 
@@ -262,7 +262,7 @@ MQTT's Will + Retained features are key to Gateway learning Runtime status:
 }
 ```
 
-Gateway subscribes `acowork/agents/+/lifecycle/goodbye` — when a Runtime abnormally disconnects, broker fires the Will message, Gateway cleans up Agent state.
+Gateway subscribes `acowork/agents/+/lifecycle/goodbye` — when a Runtime abnormally disconnects, broker fires the Will message, Gateway cleans up Bot state.
 
 **Retained messages** (last value preserved by broker, new subscribers get immediately):
 
@@ -278,7 +278,7 @@ Gateway subscribes `acowork/agents/+/lifecycle/goodbye` — when a Runtime abnor
 }
 ```
 
-This solves the problem of "Desktop App just started, doesn't know current Agent status" — via Retained messages, new subscribers immediately know the latest state.
+This solves the problem of "Desktop App just started, doesn't know current Bot status" — via Retained messages, new subscribers immediately know the latest state.
 
 ### 1.5 AgentHello Handshake (Identity, Key, Config Push)
 
@@ -356,8 +356,8 @@ Gateway acts as reverse proxy; Desktop App doesn't directly know Runtime's port 
 - `GET /api/agents/:id/sessions` — list session history (large list)
 - `GET /api/agents/:id/sessions/:sid/messages` — paginate messages within session
 - `PUT /api/agents/:id/sessions/:sid/messages/:mid` — edit message (debug mode re-execute)
-- `GET /api/agents/:id/config` — get Agent config
-- `PUT /api/agents/:id/config` — update Agent config
+- `GET /api/agents/:id/config` — get Bot config
+- `PUT /api/agents/:id/config` — update Bot config
 
 ### 1.7 Stream Event Flow (End-to-End)
 
@@ -413,7 +413,7 @@ Complete flow of user sending message and receiving response:
 
 ## 2. Cross-Agent Intent Routing
 
-Intent is the mechanism for Agents to communicate. When Agent A needs to call Agent B's capability, it sends an Intent message via Gateway.
+Intent is the mechanism for Bots to communicate. When Bot A needs to call Bot B's capability, it sends an Intent message via Gateway.
 
 ### 2.1 Intent Message Format
 
@@ -470,7 +470,7 @@ Runtime A (Tool Dispatcher)
 
 ### 2.3 Authorization
 
-Intent send requires the sender Agent to declare permission `intent:send:<target_agent_id>`:
+Intent send requires the sender Bot to declare permission `intent:send:<target_agent_id>`:
 
 ```toml
 [[permissions]]
@@ -478,7 +478,7 @@ type = "IntentSend"
 value = "com.example.calendar"
 ```
 
-Gateway checks the permission table; if Agent A doesn't declare `intent:send:com.example.calendar`, the Intent is rejected and an error is returned.
+Gateway checks the permission table; if Bot A doesn't declare `intent:send:com.example.calendar`, the Intent is rejected and an error is returned.
 
 ## 3. Desktop App / CLI ↔ Gateway Access Layer
 
@@ -497,7 +497,7 @@ See [04-gateway.md §9](./04-gateway.md) for complete HTTP API definitions.
 
 ### 3.2 MQTT Subscription (Streaming Events)
 
-Desktop App subscribes to `acowork/agents/+/sessions/+/messages/+` to receive streaming conversation events of all Agents:
+Desktop App subscribes to `acowork/agents/+/sessions/+/messages/+` to receive streaming conversation events of all Bots:
 
 ```javascript
 // Desktop App frontend
@@ -530,7 +530,7 @@ client.on('message', (topic, payload) => {
 
 | Scenario | HTTP API | MQTT |
 |----------|----------|------|
-| Install/uninstall Agent | ✅ One-shot request | ❌ Unsuitable |
+| Install/uninstall Bot | ✅ One-shot request | ❌ Unsuitable |
 | Send message | ✅ One-shot, returns immediately | ❌ Unsuitable |
 | Receive streaming response | ❌ Unsuitable (HTTP request/response) | ✅ Pub/sub natural fit |
 | Query session history | ✅ Pagination | ❌ Unsuitable |

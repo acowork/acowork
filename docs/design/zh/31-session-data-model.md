@@ -6,8 +6,8 @@
 >
 > 修订记录
 > - v1.5（P4 落地）：**卡片的"回答"也归服务端**。`session_choice` / `confirm_continue` 的回答是"人类自己那句话、换了个地址重投"，以前两个前端各写一份 `buildCardAnswer`，靠自己的已加载窗口找原行——窗口外的卡片因此成了**活按钮、点了没反应**（`if (!answer) return` 静默返回）。现在 `acowork-user` 新增 `chat_card::answer`（按坐标取原行、校验卡未答、校验操作者就是被问的那个人），`GET /api/chat-sessions/{id}/messages/{message_id}/answer` 下发"这句话 + 附件 + 已钉住的 `refs` + 原行 id"，前端只把点击（投给哪个 session / 开新活）折进去。同时修掉上一轮遗留的两处形状缺陷：`delivery.target` 改 `targets`（群 `@` 扇出一个目标一条 round，`find` 只取第一条把"投给谁"讲漏了）、sidecar 追加路径补写 `#v2` 头（首次写入不带头的文件每次重启都被判 v1 而全量重扫）。
-> - v1.4（P3 落地）：红线进 CI——`dev/ci.sh run_chat_projection_redline` 查四件事：写入口（注册表兜底 + 唯一写入口内的契约校验）没被拆掉、公共页仍走投影而 Agent 侧页仍是裸行（两者方向都查，避免有人"统一"成一种）、surface 不得对 `in_reply_to` 做聚合推导（`some/filter/every/new Set/includes`；按坐标 `.find` 取一条已知行仍允许——§6 末段留给展示层的正是这个）、写者发出的 `notice_type` 必须已在 `chat_kinds` 注册。落地时发现词汇表缺一类：`budget_exhausted` / `truncated` / `unavailable` 报告的是**通道极限**，所指的请求从未成为行，因此不可能有坐标——新增 `LIMIT_NOTICES` 把它显式化（`delivery_failed` 不在此列，它欠的消息存在）。同时用 `chat_notice_write_classes_are_disjoint` 钉住"写契约"轴上的互斥，并记录 `RETIRED_NOTICES` 是另一条正交的轴（管渲染与结算）。
-> - v1.3（P2 落地）：唯一推导点已实现——`acowork-user` 新增 `chat_view` 读模型，公共 `GET /api/chat-sessions/{id}/messages` 下发的每一行都带 `delivery`（`answered` / `answered_by` / `target` / `question`），两份前端的全部状态推导被删除。实现中确认三处边界，写进 §6.1：①推导必须能"只读被问的那几行"，因此存储层新增 `in_reply_to` 反向边（sidecar 升 v2，可按字节跨度取答复行，不做全量扫描）；②`question.answered` 的判据是"该消息出现了 round 引用行"，卡片自身不是答案（否则卡片一落盘就自我宣告已答）；③面向 Agent 的 `chat_history_read` 仍返回裸行——它把行喂给模型、按行计字节预算，派生状态在那里既无人渲染也挤占预算。另修一处升级缺陷（由测试逼出）：旧 v1 sidecar 被丢弃后，对账走的是"增量追加"分支，于是新写的行没有格式标记，进程每次启动都得全量重扫；现在"侧车不可信"会强制走"全量重扫 + 重写文件"。
+> - v1.4（P3 落地）：红线进 CI——`dev/ci.sh run_chat_projection_redline` 查四件事：写入口（注册表兜底 + 唯一写入口内的契约校验）没被拆掉、公共页仍走投影而 Bot 侧页仍是裸行（两者方向都查，避免有人"统一"成一种）、surface 不得对 `in_reply_to` 做聚合推导（`some/filter/every/new Set/includes`；按坐标 `.find` 取一条已知行仍允许——§6 末段留给展示层的正是这个）、写者发出的 `notice_type` 必须已在 `chat_kinds` 注册。落地时发现词汇表缺一类：`budget_exhausted` / `truncated` / `unavailable` 报告的是**通道极限**，所指的请求从未成为行，因此不可能有坐标——新增 `LIMIT_NOTICES` 把它显式化（`delivery_failed` 不在此列，它欠的消息存在）。同时用 `chat_notice_write_classes_are_disjoint` 钉住"写契约"轴上的互斥，并记录 `RETIRED_NOTICES` 是另一条正交的轴（管渲染与结算）。
+> - v1.3（P2 落地）：唯一推导点已实现——`acowork-user` 新增 `chat_view` 读模型，公共 `GET /api/chat-sessions/{id}/messages` 下发的每一行都带 `delivery`（`answered` / `answered_by` / `target` / `question`），两份前端的全部状态推导被删除。实现中确认三处边界，写进 §6.1：①推导必须能"只读被问的那几行"，因此存储层新增 `in_reply_to` 反向边（sidecar 升 v2，可按字节跨度取答复行，不做全量扫描）；②`question.answered` 的判据是"该消息出现了 round 引用行"，卡片自身不是答案（否则卡片一落盘就自我宣告已答）；③面向 Bot 的 `chat_history_read` 仍返回裸行——它把行喂给模型、按行计字节预算，派生状态在那里既无人渲染也挤占预算。另修一处升级缺陷（由测试逼出）：旧 v1 sidecar 被丢弃后，对账走的是"增量追加"分支，于是新写的行没有格式标记，进程每次启动都得全量重扫；现在"侧车不可信"会强制走"全量重扫 + 重写文件"。
 > - v1.2（P1 落地）：写入口契约已实现——`IntentMeta` 成为 payload 注册表（`options` / `allow_new_task` / `refs` / `error_code`），未注册键用 `serde(flatten)` 兜住（读侧原样保留、不再二次丢弃），写侧在唯一写入口 `check_write_contract` 拒绝并返回 422；回复类行的线程坐标（`agent_message` / `interaction_request` / 线程型 notice）由写入口强制，卡片另需 `options` 与 `allow_new_task`。落地时按事实修正一处：`execution_round` **不是**回复类行——它是"回答行或起源行"，从 PM 任务 / 群 `@` 扇出 / 执行界面对话发起的 turn 在 chat 里没有上文，空坐标即该事实，强行要求坐标会把 block 挂到幻影消息下。实测另发现两个同类字段丢失：`refs`（ADR-106 修订的四元组，写入方一直在写，存储一直在丢，chips 因此不显示）与 `error_code`（`delivery_failed` 回执的原因码），已一并注册。
 > - v1.1（评审后）：撤回 v1.0 的两处越界结论——①**不再把 `turn` / `question` 的终态结算进 `rounds.sqlite`**（该文件按 ADR-106 D5 是**可丢弃缓存**，`messages.jsonl` 是 chat 的唯一真相，把权威状态放进去会直接破坏 R1）；②**不再新增 `message.address` 字段**（投递地址已经由"round 引用行"承载，新增即为第二份表示）。相应地把"缺存储"重新定性为"缺写入契约 + 缺唯一推导点"。同时按评审补齐：Chat 数据归属、运行时状态宿主、与 ADR-106 D3 判据的关系、受影响的写入调用点。
 >
@@ -89,7 +89,7 @@
 | `message` | 持久实体 | 日志行：`kind` / `body` / `from` / `to` / `mentions` / `refs` / payload | 发送中、上传中、重试 | Chat 内的两类写者（见 §5.2） |
 | `round_ref` | 持久实体 | 日志行：`{agent_instance_id, agent_session_id, round_id}` + `opened_new` | 该 round 是否仍在跑（执行侧回答） | Runtime（经 relay） |
 | `turn`（一次投递） | **派生视图，不是实体** | 无独立载体：终态由"回答行"承载（`round_ref` / `agent_message` / 回执 `system_notice`，三者都以 `in_reply_to` 指向人类行） | pending / routed / 存活 | 投递层（Gateway mailbox）持有过程，不写转录 |
-| `question`（一次问询） | **派生视图，不是实体** | 无独立载体：问句内容一次写入所在日志行即为终态；"已答"由指向被问消息的 `round_ref` 回答 | 开着的问句 | 提问方（agent 经 relay）写问句行；作答方写回答行 |
+| `question`（一次问询） | **派生视图，不是实体** | 无独立载体：问句内容一次写入所在日志行即为终态；"已答"由指向被问消息的 `round_ref` 回答 | 开着的问句 | 提问方（bot 经 relay）写问句行；作答方写回答行 |
 
 推论（四条硬约束）：
 
@@ -98,7 +98,7 @@
 - **每条回答行必须线程到被答复行**（`in_reply_to` = 被答复行的 `message_id`）。这是让派生可复算的前提，也是本轮缺陷的直接成因。
 - **payload 是终态**：一次写死、原样持久化；未注册键在写入边界**报错**，不得静默丢弃。
 
-**关于"投递地址"**：地址不是人类行上的字段。人类行落库先于投递（落库先于投递，§5.1），而"投给哪个 session"要到路由/重投递时才确定——因此地址的终态载体就是 `round_ref` 的 `agent_session_id`（配 `opened_new` 区分新建/续投）。既有 `to` 只表示"投给哪个 agent"（1:1 场景为目标实例，群聊场景为空并由 `mentions` 表达），`meta.agent_session_id` 不出现在人类行上。**新增 `address` 字段会构成第二份表示**，故不采纳。
+**关于"投递地址"**：地址不是人类行上的字段。人类行落库先于投递（落库先于投递，§5.1），而"投给哪个 session"要到路由/重投递时才确定——因此地址的终态载体就是 `round_ref` 的 `agent_session_id`（配 `opened_new` 区分新建/续投）。既有 `to` 只表示"投给哪个 bot"（1:1 场景为目标实例，群聊场景为空并由 `mentions` 表达），`meta.agent_session_id` 不出现在人类行上。**新增 `address` 字段会构成第二份表示**，故不采纳。
 
 ## 5. 一致性规则
 
@@ -130,7 +130,7 @@
 
 1. **推导必须能只读被问的行。** 反向边 `in_reply_to → 答复行` 由存储层维护（`LineIndex.answers`，sidecar 升 v2 记录每行的线程坐标），查询按字节跨度只读命中行；全程不扫转录。它仍是**可丢弃派生索引**：丢了就重建，权威仍是 `messages.jsonl`。
 2. **卡片不是自己的答案。** `question.answered` 只认"该消息出现 `execution_round` 引用行"；若按"任何回答行"计，卡片一落盘就自我宣告已答（这正是把"是否已答"交给通用 `is_answer_row` 会踩的坑）。
-3. **Agent 侧读仍是裸行。** `chat_history_read` 走 `/internal/.../messages`，返回不带 `delivery` 的行：那份页按行计字节预算喂给模型，派生状态无人渲染且挤占预算。要状态就向服务要，不许自己推。
+3. **Bot 侧读仍是裸行。** `chat_history_read` 走 `/internal/.../messages`，返回不带 `delivery` 的行：那份页按行计字节预算喂给模型，派生状态无人渲染且挤占预算。要状态就向服务要，不许自己推。
 
 **仍然留给展示层的（不是状态推导）**：按 `in_reply_to` 把 round 引用行折叠到它所属的那条人类消息（`chatTranscriptGroups`）、按坐标取被回答行的正文/发送者（引用、标题种子）。这些是"按身份取一条已知行"，判据本身在投影里；只要没有第二处判断"答没答、投给谁、还在不在"，就不算违反 §6。
 
@@ -162,7 +162,7 @@
 | 投影是唯一推导点 | `chat_view::read_page` + `DeliveryView` / `QuestionState`；公共消息页返回 `Vec<ChatRowView>` | `chat_view` 单测（人类行未答/已答/目标、卡片自问、旧里程碑不算答案）、`message_page_projects_delivery_state`（HTTP 端到端形状） |
 | 只读被问的行，不扫转录 | `LineIndex.answers` 反向边 + sidecar v2（每行一列 `in_reply_to`）；`answering_rows` 按字节跨度取行，指纹不符（v1 sidecar）时全量重扫一次 | `answering_rows_reads_only_the_hit_lines`、`a_v1_sidecar_is_rebuilt_into_v2_instead_of_trusted` |
 | 前端零推导 | Desktop：`turnSettled` 改读 `delivery.answered`，卡片选项/已答改读 `delivery.question`，删除 `roundTriggers` 集合与 `cardAnswered` 参数；Mobile 同构删除 | `chatTurnInflight.test` / `AgentChatView.test` / `GroupChatPanel.waitLine.test` / mobile `chat-turn-inflight` / `chat-notice-row` / `chat-turn-status` |
-| Agent 侧读不带派生 | `RawMessagePage`（`/internal/.../messages`） | 既有 `chat_history_read` 用例 |
+| Bot 侧读不带派生 | `RawMessagePage`（`/internal/.../messages`） | 既有 `chat_history_read` 用例 |
 
 ### 7.3 P3 的落地位置
 
@@ -171,7 +171,7 @@
 | 约束 | 落地 | 反例 |
 |---|---|---|
 | 写入口不被拆掉 | `IntentMeta::unregistered` 与 `check_write_contract` 必须在，且后者在 `append_message` 内被调用 | 把注册表兜底或契约校验删掉，payload 又会静默丢键 |
-| 一个推导点、两份页 | 公共页必须是 `Vec<chat_view::ChatRowView>`，内部页必须仍是 `RawMessagePage` | 有人把 Agent 侧页也改成投影（按行计预算的页被派生字段挤占）或把公共页改回裸行 |
+| 一个推导点、两份页 | 公共页必须是 `Vec<chat_view::ChatRowView>`，内部页必须仍是 `RawMessagePage` | 有人把 Bot 侧页也改成投影（按行计预算的页被派生字段挤占）或把公共页改回裸行 |
 | 禁聚合推导 | surface 里 `in_reply_to` 不得与 `some(` / `filter(` / `every(` / `new Set` / `.includes(` 同现（注释行除外） | 原故障：`rows.some(r => r.meta.message_id === x.meta.in_reply_to)` 判"答没答"。按坐标 `.find(` 取一条已知行仍然允许（§6 末段） |
 | 通知类型词汇表封闭 | 写者（runtime / gateway）发出的 `notice_type` 字面量必须出现在 `chat_kinds` 里 | 新造一个通知类型却不进 `THREADED_NOTICES` / `CARD_NOTICES` / `LIMIT_NOTICES`，它就绕过了坐标强制，落成孤儿行 |
 

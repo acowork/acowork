@@ -15,7 +15,7 @@ This document is retained as historical reference, explaining why Socket API was
 
 ### 1.1 Original Design
 
-In v3.0 and earlier, Gateway ↔ Agent Runtime IPC used Socket API:
+In v3.0 and earlier, Gateway ↔ Bot Runtime IPC used Socket API:
 - **Linux**: Unix Domain Socket (e.g. `/tmp/gateway-{agent_id}.sock`)
 - **Windows**: Named Pipe (e.g. `\\.\pipe\acowork-{agent_id}`)
 - **macOS**: Unix Domain Socket (same as Linux)
@@ -36,7 +36,7 @@ After v3.0 running for some time, we found:
 | No multiplexing | Each message type needs separate connection, low efficiency | Medium |
 | Manual message framing | Each message type needs custom serialization/deserialization | High |
 | No schema validation | Message structure errors only discovered at runtime | High |
-| No automatic reconnection | Agent Runtime restart requires Gateway actively re-establish all Sockets | Medium |
+| No automatic reconnection | Bot Runtime restart requires Gateway actively re-establish all Sockets | Medium |
 | Cross-platform inconsistency | Linux/Windows/macOS implementations differ, code complexity | Medium |
 | Cross-language clients | CLI / Desktop App (TypeScript) cannot directly call, need HTTP bridge | High |
 | No streaming | Large data transmission needs custom chunking | Medium |
@@ -196,7 +196,7 @@ fn build_identity_delivery(agent: &RunningAgent) -> IdentityDelivery {
 }
 ```
 
-**Issue**: This mechanism requires Gateway to know each Agent's `identity_deps`, then deliver corresponding fields. Adds per-Agent configuration burden.
+**Issue**: This mechanism requires Gateway to know each Bot's `identity_deps`, then deliver corresponding fields. Adds per-Agent configuration burden.
 
 ## 4. Problems Found in v3.1 (Leading to v3.2)
 
@@ -215,7 +215,7 @@ Browser and some HTTP/2 clients have connection limit (usually 6 per origin). De
 
 ### 4.3 Identity Delivery Coupling
 
-`identity_deps` requires Agent to declare required fields in manifest, increasing manifest complexity. Many Agents declare same fields, manifest maintainability drops.
+`identity_deps` requires Bot to declare required fields in manifest, increasing manifest complexity. Many Bots declare same fields, manifest maintainability drops.
 
 ### 4.4 No Native Pub/Sub
 

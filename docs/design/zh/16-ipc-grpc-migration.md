@@ -11,7 +11,7 @@
 
 ### 1.1 背景与动机
 
-当前 Gateway 与 Agent Runtime 的 IPC 通信采用**自定义二进制帧协议**：5 字节定长头（`[body_len: u32 BE][msg_type: u8]`）+ JSON body。该协议在实现上存在以下结构性问题：
+当前 Gateway 与 Bot Runtime 的 IPC 通信采用**自定义二进制帧协议**：5 字节定长头（`[body_len: u32 BE][msg_type: u8]`）+ JSON body。该协议在实现上存在以下结构性问题：
 
 | 问题                             | 根因                                                                                                                              | 后果                                                                                                                    |
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
@@ -118,7 +118,7 @@
 ### 2.3 已知缺陷
 
 1. **帧交错（Frame Interleaving）**：
-   - Gateway `handle_connection` 使用 `tokio::select!` 同时等待：① Agent 请求 ② Server Push ③ CapabilityUpdate 广播
+   - Gateway `handle_connection` 使用 `tokio::select!` 同时等待：① Bot 请求 ② Server Push ③ CapabilityUpdate 广播
    - 当 Branch 2（Push）或 Branch 3（Broadcast）先就绪时，推送帧会被写入连接，**在** Branch 1 的响应帧之前到达 Runtime
    - Runtime 的 `send_and_recv()` 期望读取响应，却收到 Push 消息，导致协议错误
 
@@ -546,7 +546,7 @@ message ConversationEntryDto {
 | ------------------------------------------------- | --------------------------- | ---------- | ------------------------ |
 | `KeyReleaseRequest` / `KeyReleaseResult`          | Runtime → Gateway → Runtime | req-resp   | API Key 获取             |
 | `IntentSendRequest` / `IntentDelivered`           | Runtime → Gateway → Runtime | req-resp   | Intent 同步发送          |
-| `IntentReceived`                                  | Gateway → Runtime           | **push**   | 外部 Agent 发来的 Intent |
+| `IntentReceived`                                  | Gateway → Runtime           | **push**   | 外部 Bot 发来的 Intent |
 | `BudgetQueryRequest` / `BudgetInfo`               | Runtime → Gateway → Runtime | req-resp   | 预算查询                 |
 | `UsageReportRequest` / `UsageReportAck`           | Runtime → Gateway → Runtime | req-resp   | 用量上报                 |
 | `ContextUsageReportRequest` / `ContextUsageAck`   | Runtime → Gateway → Runtime | req-resp   | 上下文用量上报           |
@@ -644,7 +644,7 @@ let channel = Endpoint::from_static("http://127.0.0.1:19877")
 **结论**：**保留 Axum HTTP API**。
 
 - Tauri WebView 前端调用 gRPC-Web 需要额外 JS 依赖和代理层，复杂度高于原生 HTTP
-- Desktop App 的 chat / settings / agent list 等界面使用 REST + WebSocket 已足够，无需 gRPC 的 streaming 能力
+- Desktop App 的 chat / settings / bot list 等界面使用 REST + WebSocket 已足够，无需 gRPC 的 streaming 能力
 - Gateway 同时暴露两个端口：19876（HTTP API for Desktop）+ 19877（gRPC IPC for Runtime），职责清晰
 - 未来若需要，可将 HTTP API 的 handler 内部通过 gRPC client 调用 GatewayService，实现架构统一
 

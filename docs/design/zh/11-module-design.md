@@ -6,7 +6,7 @@
 |------|------|
 | [00-overview.md](../module-design/zh/00-overview.md) | 设计原则 + Workspace 结构 |
 | [01-core.md](../module-design/zh/01-core.md) | acowork-core — 共享类型层 |
-| [02-runtime.md](../module-design/zh/02-runtime.md) | acowork-runtime — Agent Runtime（工具系统、主循环、Provider） |
+| [02-runtime.md](../module-design/zh/02-runtime.md) | acowork-runtime — Bot Runtime（工具系统、主循环、Provider） |
 | [03-gateway.md](../module-design/zh/03-gateway.md) | acowork-gateway — Gateway 守护进程 |
 | [04-memory-sqlite.md](../module-design/zh/04-memory-sqlite.md) | acowork-memory + acowork-sqlite — 记忆引擎（trait + SQLite 后端） |
 | [05-vault-sign.md](../module-design/zh/05-vault-sign.md) | acowork-vault + acowork-sign — 密钥存储 + 签名工具链 |

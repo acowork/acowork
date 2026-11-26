@@ -43,7 +43,7 @@ Agent Runtime ── {mcp.gateway_path} ──►│  *_proxy (兼容别名)  �
 |---|---|---|
 | 顶层 | `id` / `version` / `name` / `description` / `icon` / `builtin` | `id` 必须 `[a-z][a-z0-9_-]{0,63}`，会作为 URL 段、目录名、cookie path |
 | `[process]` | `binary` / `port_hint` / `runtime` / `legacy_slot` / `port_file` / `health_path` / `extra_args` / `env` | `binary` 只允许可执行文件名（禁止 `/`、`..`）；`runtime = legacy \| generic`；模板占位 `{gateway_url}` / `{data_dir}` / `{internal_service_token}` / `{publisher_token}` / `{app_id}` |
-| `[mcp]` | `path` / `protocol` / `auto_inject` / `gateway_path` | `gateway_path` 是 Agent 侧经 Gateway 访问的 URL，如 `/api/pm/mcp` |
+| `[mcp]` | `path` / `protocol` / `auto_inject` / `gateway_path` | `gateway_path` 是 Bot 侧经 Gateway 访问的 URL，如 `/api/pm/mcp` |
 | `[ui]` | `path` / `mode` / `[ui.nav]` | `mode = webview \| native`；nav 只提供 `label` / `icon` / `order` 一个槽位 |
 | `[activation]` | `events` | `onStartup` / `onNavigate` / `onMcpCall`（当前为提示，built-in 随 Gateway 启动） |
 | `[permissions]` | `platform[]` | 默认拒绝；可选 `identity.read` / `context.read` / `agents.read` / `notify` |
@@ -80,7 +80,7 @@ Agent Runtime ── {mcp.gateway_path} ──►│  *_proxy (兼容别名)  �
 |---|---|---|
 | GET `/api/platform/identity` | `identity.read` | `user_id` / `role` / `app_id` |
 | GET `/api/platform/context` | `context.read` | instance、advertise_host、http/mqtt 端口、启动时间 |
-| GET `/api/platform/agents` | `agents.read` | 已安装 agent 的 id/name 列表 |
+| GET `/api/platform/agents` | `agents.read` | 已安装 bot 的 id/name 列表 |
 | POST `/api/platform/notify` | `notify` | `{ accepted: true }`（仅结构化日志，无副作用） |
 
 调用方 = 应用后端，凭证 = supervisor 注入的 internal service token + `X-App-Id`。Gateway 按 registry 的声明权限默认拒绝（403 `capability_not_declared`）。webview 从不直接调用这些端点。
@@ -118,7 +118,7 @@ mac    := HMAC-SHA256(secret, "acowork/app-session/v1|<exp>|<len>:<app_id>|<len>
 |---|---|---|
 | 安装归属 | **Gateway 宿主机**（`{data_dir}` 下） | supervisor 跑在 Gateway 进程内（`gateway/mod.rs`）；远程 node 目前只托管 Runtime，不托管应用的进程与数据 |
 | 分发形态 | 单个 `.app` 文件（ZIP + Signing Block） | 与 `.agent` 共用一套签名体系，密码学部分不重写 |
-| 信任默认值 | **拒绝未签名包** | 应用会拉起一个本地任意进程，风险面大于 agent 包 |
+| 信任默认值 | **拒绝未签名包** | 应用会拉起一个本地任意进程，风险面大于 bot 包 |
 | memory | 仍排除 | 面板型 UI 契约未定（§1） |
 
 远程分发（把应用推到某个 node 上运行）**不在本章**：它要求 node 侧新增 app supervisor、数据目录与准入语义，属于独立 ADR，不能顺手塞进来。
@@ -230,7 +230,7 @@ entry = "bin/acowork-pm"
 | 未签名包 | 默认拒绝；`apps.allow_unsigned = true` 时才接受并 `warn` | `unsigned_package` |
 | 内置应用 | 无包、无签名，随 Gateway 构建分发 | — |
 
-> 与 `.agent` Phase 1「未签名可选」不同，`.app` **默认拒绝未签名**：安装一个应用等于允许一个本地进程长期运行，风险面远大于 agent 包。开发期用 `allow_unsigned` 显式放行，生产建议关闭。
+> 与 `.agent` Phase 1「未签名可选」不同，`.app` **默认拒绝未签名**：安装一个应用等于允许一个本地进程长期运行，风险面远大于 bot 包。开发期用 `allow_unsigned` 显式放行，生产建议关闭。
 
 ### 6.7 安装流程
 
@@ -310,7 +310,7 @@ entry = "bin/acowork-pm"
 
 1. **`AppRegistry::reload()`**：现在 `load()` 只在 `GatewayState::new()` 调一次，之后不会重读磁盘。新增 `reload()`（读盘 + 整体替换 registry），安装 / 卸载 / 回滚后调用。
 2. **动态 supervisor**：现在 generic app 的 supervisor 只在 Gateway 启动期起。需要 `start_app(id)` / `stop_app(id)`，供安装后拉起、卸载前停止、回滚后重启；失败不 panic，落 `status=error`。
-3. **catalog hot push**：复用 `enable/disable` 已有的 `mqtt_publisher_trigger.trigger()`，安装成功后触发一次，Agent 侧无需重启即可见。
+3. **catalog hot push**：复用 `enable/disable` 已有的 `mqtt_publisher_trigger.trigger()`，安装成功后触发一次，Bot 侧无需重启即可见。
 
 ### 6.11 Desktop 入口
 
@@ -348,7 +348,7 @@ acowork-verify ./build/pm-1.0.1.app
 | **P3.2** | `build_app_package` + `build-app.sh` + 本地上传安装 + 卸载 | P3.1 |
 | **P3.3** | 签名强制 + 指纹锁定 + `install-url` + 版本列表 / 回滚 + Desktop 入口 | P3.2 |
 
-P3.1 可独立验证：把 PM 打成一个包，换 id（如 `pm-local`）装进 `apps/pm-local/`，与内置 `pm` 并存；能出现在 `/api/apps`、能启动、MCP 能被 Agent 看到。这一步不依赖签名与解析器，却已经把最容易返工的两个契约（二进制寻址、数据目录分离）钉死。
+P3.1 可独立验证：把 PM 打成一个包，换 id（如 `pm-local`）装进 `apps/pm-local/`，与内置 `pm` 并存；能出现在 `/api/apps`、能启动、MCP 能被 Bot 看到。这一步不依赖签名与解析器，却已经把最容易返工的两个契约（二进制寻址、数据目录分离）钉死。
 
 ### 6.14 验证清单
 
@@ -361,7 +361,7 @@ P3.1 可独立验证：把 PM 打成一个包，换 id（如 `pm-local`）装进
 7. 卸载 → 从 catalog 消失、`apps/{id}` 进 `.trash`、`app-data/{id}` 仍在。
 8. `platforms` 不含当前平台 → `400 platform_unsupported`。
 9. 包内含 `../evil` 条目 → `400 package_malformed`，且 `.staging` 清理干净。
-10. 安装后**不做任何重启**，Agent 侧 `acowork/global/mcps` 已含该应用的 MCP server。
+10. 安装后**不做任何重启**，Bot 侧 `acowork/global/mcps` 已含该应用的 MCP server。
 
 ### 6.15 明确不做
 
@@ -443,4 +443,4 @@ curl -H "Authorization: Bearer $TOKEN" \
 - **legacy slot**：PM/DOC 通过 `legacy_slot` 映射到既有 `pm_process` / `doc_process` 状态字段，避免改动已有身份注入测试；这是有意的迁移桥，不是长期结构。
 - **`navigation_policy.rs`**：桌面端 `AppFrame` iframe 的目标是 Gateway 反代路径（`http(s)` + 深层路径），需要在部署时确认导航防火墙对该前缀放行。ADR-118 之后该例外已按 webview 角色显式建模（`NavigationRole::App` 白名单 / `NavigationRole::Preview` 允许外部 `http(s)`），`UrlPreviewView` 不再是 iframe 而是子 Webview。
 - `ExtensionsView` 仍无 `extensions` i18n 命名空间（沿用原有 TODO）。
-- **用户画布 vs Agent 工作态**（ADR-116 未规定 Agent 改哪一份状态）：见 [ADR-121](../../adr/zh/ADR-121-hosted-app-dual-canvas.md) 与 [设计文档 35](./35-hosted-app-dual-canvas.md)。左侧导航是用户画布；MCP 默认不 attach；`visual` 应用的聊天预览是常驻栏 iframe，不是转录行。
+- **用户画布 vs Bot 工作态**（ADR-116 未规定 Bot 改哪一份状态）：见 [ADR-121](../../adr/zh/ADR-121-hosted-app-dual-canvas.md) 与 [设计文档 35](./35-hosted-app-dual-canvas.md)。左侧导航是用户画布；MCP 默认不 attach；`visual` 应用的聊天预览是常驻栏 iframe，不是转录行。

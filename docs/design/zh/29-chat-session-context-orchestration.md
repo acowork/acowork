@@ -78,21 +78,21 @@ Block C 与当前消息合并成一条 user 消息，避免连续两条 user 消
 
 基座由 Runtime 维护，包含：
 
-1. 角色边界：你是 `<agent display_name>` 的对话前台，只能回答、查一个信息、路由或新建执行会话；
+1. 角色边界：你是 `<bot display_name>` 的对话前台，只能回答、查一个信息、路由或新建执行会话；
 2. 工具契约：路由 act 只有 `exec_session_create(background)`（无 `target`，只能新开；`background` 只补背景、不复述人的原话——原话由 Runtime 原样投递，背景作为引用部件跟在 `user` 行之后，ADR-107；原 `new_task`）与 `exec_session_route_confirm(target, why)`（续投确认：写卡后本轮挂起等待点击，点击结果作为 tool result 回到模型；`why` 必须给——一张不写理由的卡等于把路由工作推回给人类；2026-11-11 由 `exec_session_propose_continue` 工具化更名，见 §12）；另有只读信息工具 `memory_recall` / `http_request`（GET-only，按启用状态拼接）与恒常暴露的 `exec_session_read_round(target, rounds)`（2026-11-04 增设，见 §11），轮数由提示词软约束（"通常零次，最多一两次"），不用代码硬上限；
 3. 决策规则：回答 / 转交 / 新建 / 澄清的判据（与 ADR-099「路由行为准则」一致，核心是路由代价不对称：错发远比漏发贵，不确定就问）；
-4. 安全规则：只使用候选清单中的信息；不复述其他 chat 的内容；不承诺执行细节；不代人类 @ 其他 agent。
+4. 安全规则：只使用候选清单中的信息；不复述其他 chat 的内容；不承诺执行细节；不代人类 @ 其他 bot。
 
-`chat.md` 存在且非空白时**整段替换**内置 chat prompt 正文（基座 + Persona + 场景段），只替换 `{{agent_name}}`；缺省时使用内置默认。有两部分不是该文件能删掉的。其一，`# Safety` 不变量是一段不可裁剪的尾块，Runtime 每轮都会重新追加到正文末尾（`chat_prompt::with_chat_prompt_tail`），从 `chat.md` 里删掉它对模型实际看到的内容没有影响。其二，安全边界由结构而非提示词字面量保证：router 只持有 `exec_session_create` / `exec_session_route_confirm` 与只读工具，改写提示词不会给它新的能力（ADR-099 D6）。此外，群聊的 `chat.md` **仅群主或管理员可写**（ADR-098 治理），任何成员可读，因此单个成员无法注入一段去操控他人 agent 的提示词。群聊右侧设置面板只编辑正文——`# Safety` 尾块不在面板中显示（`chat-md` 接口返回的是剥掉尾块后的正文），保存时由存储与 Runtime 重新追加，因此不会把成员改不动的内容摆进可编辑框再静默还原。
+`chat.md` 存在且非空白时**整段替换**内置 chat prompt 正文（基座 + Persona + 场景段），只替换 `{{agent_name}}`；缺省时使用内置默认。有两部分不是该文件能删掉的。其一，`# Safety` 不变量是一段不可裁剪的尾块，Runtime 每轮都会重新追加到正文末尾（`chat_prompt::with_chat_prompt_tail`），从 `chat.md` 里删掉它对模型实际看到的内容没有影响。其二，安全边界由结构而非提示词字面量保证：router 只持有 `exec_session_create` / `exec_session_route_confirm` 与只读工具，改写提示词不会给它新的能力（ADR-099 D6）。此外，群聊的 `chat.md` **仅群主或管理员可写**（ADR-098 治理），任何成员可读，因此单个成员无法注入一段去操控他人 bot 的提示词。群聊右侧设置面板只编辑正文——`# Safety` 尾块不在面板中显示（`chat-md` 接口返回的是剥掉尾块后的正文），保存时由存储与 Runtime 重新追加，因此不会把成员改不动的内容摆进可编辑框再静默还原。
 
-基座还是这条链路上**唯一会随每个 agent 的每一轮 chat 一起发送**的文本，因此它带一个字节预算（5 KiB，由 `chat_prompt::tests::kernel_stays_within_its_byte_budget` 断言；算上 Persona、场景段与尾块，整份内置默认约 6 KiB）。预算是上限而非目标：只花在政策与约束上，不花在措辞上。两条规则保证它不被悄悄撑大——一条规则只在一处出现（决策规则不复述场景段和 `# Safety` 尾块已说过的话）；每个工具名、参数名与内联块名（`[candidates]` / `[attachments]` / `[attached refs]` / `[referenced rounds]`）都必须按字面教会，因为基座与 wire schema 是同一份契约的两半（`chat_prompt::tests::compression_kept_every_contract_token`，以及 `acowork-runtime` 的 `the_prompt_teaches_exactly_the_tools_the_wire_offers`）。因此新增一条规则意味着压缩别处，或者有意识地抬高预算。
+基座还是这条链路上**唯一会随每个 bot 的每一轮 chat 一起发送**的文本，因此它带一个字节预算（5 KiB，由 `chat_prompt::tests::kernel_stays_within_its_byte_budget` 断言；算上 Persona、场景段与尾块，整份内置默认约 6 KiB）。预算是上限而非目标：只花在政策与约束上，不花在措辞上。两条规则保证它不被悄悄撑大——一条规则只在一处出现（决策规则不复述场景段和 `# Safety` 尾块已说过的话）；每个工具名、参数名与内联块名（`[candidates]` / `[attachments]` / `[attached refs]` / `[referenced rounds]`）都必须按字面教会，因为基座与 wire schema 是同一份契约的两半（`chat_prompt::tests::compression_kept_every_contract_token`，以及 `acowork-runtime` 的 `the_prompt_teaches_exactly_the_tools_the_wire_offers`）。因此新增一条规则意味着压缩别处，或者有意识地抬高预算。
 
 ### 3.3 Persona 与 chat.md 来源优先级
 
 任一份非空白的 `chat.md` 都整段替换内置 prompt，**不再只替换 Persona 段**。按序查找：
 
 1. 会话级 `chat.md`：`acowork-user` 的 `chat-sessions/{id}/chat.md`，仅 `user_group` / `project_group`，任何成员可读、仅群主或管理员可写（ADR-098），从群聊右侧设置面板编辑；首读时用内置默认（群聊变体，含不可裁剪的 `# Safety` 尾块）生成；
-2. 包级 `prompts/chat.md`（≤ 16KB，空白文件视为缺失；agent 启动时若无则用内置默认生成，单聊走这一档）；
+2. 包级 `prompts/chat.md`（≤ 16KB，空白文件视为缺失；bot 启动时若无则用内置默认生成，单聊走这一档）；
 3. 内置默认 = 基座 + manifest 人格（`display_name` / `name` + `role` + `description` 拼成一句）+ 场景段。
 
 `chat.md` 纳入 ADR-063 的 `OVERRIDABLE_PROMPTS` 清单：
@@ -119,7 +119,7 @@ Block A 禁止出现：
 - 随机数、请求 id、消息 id；
 - 任何按 HashMap 顺序序列化的结构。
 
-`identity_context` 只在用户语言/时区变化时改变（低频），可接受。`## Capabilities`（§3.7）只从 agent 级能力集派生、并按名称排序，与轮次无关；能力集本身变了（装/卸 MCP、增删 skill）前缀才 miss 一次，属预期。
+`identity_context` 只在用户语言/时区变化时改变（低频），可接受。`## Capabilities`（§3.7）只从 bot 级能力集派生、并按名称排序，与轮次无关；能力集本身变了（装/卸 MCP、增删 skill）前缀才 miss 一次，属预期。
 
 ### 3.6 与 execute prompt 的隔离
 
@@ -138,7 +138,7 @@ router **不加载**：
 
 ### 3.7 `## Capabilities`：能力面与唯一入口
 
-chat 轮里 router 的 wire 工具只有两个 act 与两个只读工具（§3.2），而 agent 真正的能力——MCP server、skills、内置工具——只在执行会话里可用。缺这一段时，模型对「我能做什么」的全部认知就是那几个工具；而「你能做 X 吗」按内核决策规则属于关于自身的小闲聊、可直接文字回答不路由，Safety 尾块又禁止承诺结果，于是「我不能」成了唯一自洽的答案——哪怕执行会话完全具备该能力。清单本身也不够：只知道手里有 `shell` 却不知道怎么用，模型要么声称已经做过，要么发明一个 `session_config` 开关。
+chat 轮里 router 的 wire 工具只有两个 act 与两个只读工具（§3.2），而 bot 真正的能力——MCP server、skills、内置工具——只在执行会话里可用。缺这一段时，模型对「我能做什么」的全部认知就是那几个工具；而「你能做 X 吗」按内核决策规则属于关于自身的小闲聊、可直接文字回答不路由，Safety 尾块又禁止承诺结果，于是「我不能」成了唯一自洽的答案——哪怕执行会话完全具备该能力。清单本身也不够：只知道手里有 `shell` 却不知道怎么用，模型要么声称已经做过，要么发明一个 `session_config` 开关。
 
 段落由 `chat_router::prompt::build_capability_section` 生成，规则在前、数据在后：
 
@@ -146,9 +146,9 @@ chat 轮里 router 的 wire 工具只有两个 act 与两个只读工具（§3.2
 2. `- available now:` MCP server（按 `mcp_<server>__<tool>` 汇总出 server 名与工具数）、skill 名、内置工具名；
 3. `- declared but not installed:` manifest `[[mcp_servers]]` 减去已连接的 server——二元结论由代码算好，不把集合差留给一个小模型。
 
-追加点与 `## Identity` 相同（`build_block_a` 内、`# Safety` 尾块之后），所以 `chat.md` 覆盖能换掉人格，换不掉「我能做什么、怎么用」这一句：它陈述的是 agent 事实，不是人格文案。没有任何一项能力时整段省略，空包拿到与从前逐字节相同的 Block A。每组名称上限 12 / 16 / 32（server / skill / 内置工具）、声明缺口 8 个、单个名字 40 字节，溢出渲染成 `(+N more)` 并在规则里教会模型不要把缺口读成「没装」。整节不解释模型已经知道的事（`# Safety` 尾块已有的「不承诺结果」不复述）。满配实测 1004 B。
+追加点与 `## Identity` 相同（`build_block_a` 内、`# Safety` 尾块之后），所以 `chat.md` 覆盖能换掉人格，换不掉「我能做什么、怎么用」这一句：它陈述的是 bot 事实，不是人格文案。没有任何一项能力时整段省略，空包拿到与从前逐字节相同的 Block A。每组名称上限 12 / 16 / 32（server / skill / 内置工具）、声明缺口 8 个、单个名字 40 字节，溢出渲染成 `(+N more)` 并在规则里教会模型不要把缺口读成「没装」。整节不解释模型已经知道的事（`# Safety` 尾块已有的「不承诺结果」不复述）。满配实测 1004 B。
 
-数据只来自 agent 级集合（manifest、`core.all_tools`、skill registry），与轮次无关，因而对同一能力集字节稳定、进缓存前缀；能力集本身变化（装卸 MCP、增删 skill）才让前缀 miss 一次。
+数据只来自 bot 级集合（manifest、`core.all_tools`、skill registry），与轮次无关，因而对同一能力集字节稳定、进缓存前缀；能力集本身变化（装卸 MCP、增删 skill）才让前缀 miss 一次。
 
 ## 4. Block B：append-only 历史投影
 
@@ -159,7 +159,7 @@ chat 轮里 router 的 wire 工具只有两个 act 与两个只读工具（§3.2
 | chat kind | role | content 格式 |
 |---|---|---|
 | `user_message` | user | `[user:<from>] <body>` |
-| `agent_message` | assistant | `[agent:<from>] <body>` |
+| `agent_message` | assistant | `[bot:<from>] <body>` |
 | `interaction_request` | user | `[card] <title>` + 选项（固定格式）。**P6 后不再新增**，仅为旧转录保留投影（ADR-106 D8 / D14） |
 | `system_notice` | user | `[system] <固定文案>`（见 §4.3） |
 | `execution_round` | —— | **不进上下文**：它是空正文指针，不是可读的一句话；本轮的内容在引用行下方的 `user_message` 里，Router 读那一条（ADR-106 D3） |
@@ -196,7 +196,7 @@ chat 轮里 router 的 wire 工具只有两个 act 与两个只读工具（§3.2
 | `delivery_failed` | `[system] Delivery failed`（遗留臂：2026-11-06 起无写者，仅供读旧转录，ADR-105 D5 修订） |
 | `budget_exhausted` | `[system] Conversation budget exhausted` |
 | `truncated` | `[system] Response truncated` |
-| `unavailable` | `[system] Agent unavailable` |
+| `unavailable` | `[system] Bot unavailable` |
 | `router_fallback` | `[system] Routed automatically` |
 
 `turn_started` / `router_fallback` 两行与上表的 `interaction_request` 同理：**P4 / P6 后不再有生产者**，投影留着只为了让旧历史逐字节读起来不变（§4.2 确实定性与 ADR-106 D14：呈现层隐藏，上下文不隐藏）。今天仍在写入的寻址类 `notice_type` 是 `session_choice` / `confirm_continue`（ADR-106 D6），它们进上下文，因为那就是摆在人类面前的一个问题——但走的是 `notice_text` 的兜底臂 `[system] Notice: {notice_type}`，不是上表里的固定文案；上表列的是遗留臂与仍有专属文案的通道事实。
@@ -210,7 +210,7 @@ chat 轮里 router 的 wire 工具只有两个 act 与两个只读工具（§3.2
 窗口按**上下文大小（tokens）**计量，而不是按条数：一条「好的」和一份 2KB 的故障报告不是同等量的上下文，固定条数对闲聊型对话过于宽松、对信息密集的对话又过于苛刻。因此裁剪判据是 `max_tokens`，条数只作为传输层上限（网关单页）。
 
 - `anchor_seq`：窗口前端边界——已排除的最新一条消息的 `seq`，返回的窗口全部满足 `seq > anchor_seq`；
-- `max_tokens`：默认 8000 tokens（Agent Setup 面板可配，`chat_router.history_max_tokens`，clamp 1000–64000），按 `crate::token::count_text` 统一口径估算；网关单页字节上限 32 KiB 在默认 3.5 chars/token 下约 9.1k tokens，因此默认值正好落在传输上限之内；
+- `max_tokens`：默认 8000 tokens（Bot Setup 面板可配，`chat_router.history_max_tokens`，clamp 1000–64000），按 `crate::token::count_text` 统一口径估算；网关单页字节上限 32 KiB 在默认 3.5 chars/token 下约 9.1k tokens，因此默认值正好落在传输上限之内；
 - `slack_tokens`：默认 `max_tokens / 8`，即允许窗口超出预算的容忍量；
 - `retain_tokens`：默认 `max_tokens / 2`，即重建后保留的上下文量；
 - `max_rows`：网关单页可承载的行数（50 减去当前消息与锚点行的余量），仅由传输层决定，可在配置里进一步收紧（`chat_router.history_window`，已降级为条数上限）；重建后保留 `max_rows / 2` 条。
@@ -310,7 +310,7 @@ S2  idle      3h    task   Review ADR-098
 跨轮必须逐字节一致：
 
 - `model` / `provider`（来自 `chat_router` 配置，不随消息变化）；
-- `temperature`（默认 0）、`max_tokens`（默认 8192，`chat_router.max_output_tokens`，clamp 1024–32768，Config 文件可配、不上 UI wire）。这个上限必须同时容纳一次信息轮的 think + 工具参数 + 终稿**和**一份 `exec_session_create` 简报——旧值 2048 容不下后者，被截断的响应里工具调用 JSON 是不完整的，`act_call()` 找不到 act，于是整轮降级成一句聊天回复：用户看到一条 agent 消息，执行会话根本没建。`finish_reason == "length"`（Anthropic 的 `max_tokens` 在 provider 层已归一化为 `length`）现在被显式检查，按截断降级而不是当作决策，日志里也不会再伪装成 `reply` / `empty reply`；
+- `temperature`（默认 0）、`max_tokens`（默认 8192，`chat_router.max_output_tokens`，clamp 1024–32768，Config 文件可配、不上 UI wire）。这个上限必须同时容纳一次信息轮的 think + 工具参数 + 终稿**和**一份 `exec_session_create` 简报——旧值 2048 容不下后者，被截断的响应里工具调用 JSON 是不完整的，`act_call()` 找不到 act，于是整轮降级成一句聊天回复：用户看到一条 bot 消息，执行会话根本没建。`finish_reason == "length"`（Anthropic 的 `max_tokens` 在 provider 层已归一化为 `length`）现在被显式检查，按截断降级而不是当作决策，日志里也不会再伪装成 `reply` / `empty reply`；
 - `tools` 数组：`exec_session_create` + `exec_session_route_confirm` + 按启用状态拼接的只读信息工具（`memory_recall`、GET-only `http_request`）+ 恒在末尾的只读 `exec_session_read_round`，schema 用固定字面量序列化，字段顺序固定，对固定的（二进制版本，启用集合）逐字节稳定；提示词里教到的动作名与这里下发的集合由单测钉死（`tool.rs::the_prompt_teaches_exactly_the_tools_the_wire_offers`），两者漂移过一次就够；
 - `tool_choice`：默认 `auto`，不随轮次变化；
 - 信息轮次产生的 `assistant(tool_calls)` / `tool` 消息只存在于本轮 request 内，不写回 chat 历史，不进入 Block B。
@@ -415,9 +415,9 @@ S2  idle      3h    task   Review ADR-098
 
 **可观测性**。决策日志（`chat-router-decisions.jsonl`）新增 `confirm_wait_ms`（挂起等待时长）与 `confirm_result`（`continue`/`new_task`/`timeout`）两列，均 `skip_serializing_if` 可选；`act` 列出现 `exec_session_route_confirm:S_x` 即代表本轮写过卡。
 
-## 13. 修订（2026-11-23）：`## Capabilities`——agent 能力面进入 Block A
+## 13. 修订（2026-11-23）：`## Capabilities`——bot 能力面进入 Block A
 
-**缺陷形状**。人在 chat 里问「你能做 X 吗」，router 答「我不能」，而 X 恰恰是执行会话的强项：MCP 具在，只是不在 router 手里。取证是三处叠加——router 的 wire 工具只有 act 与两个只读工具；内核 `CHAT_ROUTER_BASE_PROMPT` 写死「这四个 act 就是你的全部工具」，并把「关于自身的问题」归入不路由、直接文字回答的一类；Safety 尾块禁止承诺结果。agent 的真实能力面（`[[mcp_servers]]`、`core.all_tools`、skill registry）从未进入 router 上下文，所以「我不能」是唯一自洽的答案。
+**缺陷形状**。人在 chat 里问「你能做 X 吗」，router 答「我不能」，而 X 恰恰是执行会话的强项：MCP 具在，只是不在 router 手里。取证是三处叠加——router 的 wire 工具只有 act 与两个只读工具；内核 `CHAT_ROUTER_BASE_PROMPT` 写死「这四个 act 就是你的全部工具」，并把「关于自身的问题」归入不路由、直接文字回答的一类；Safety 尾块禁止承诺结果。bot 的真实能力面（`[[mcp_servers]]`、`core.all_tools`、skill registry）从未进入 router 上下文，所以「我不能」是唯一自洽的答案。
 
 **决策：清单进 Block A，且必须带上唯一入口**。只给清单会制造第二种困惑——知道有 `shell` 却不知道怎么启用——因此规则与数据一起加、规则在前：清单里的能力一件都不可在 router 内执行；从能力到动作只有 `exec_session_create` 一扇门；门前没有开关（SessionToolLayer 的 B 层只能减不能加，`session_config` 不是启用按钮）。`declared but not installed` 的差集由代码算好。位置与 `## Identity` 同一处（尾块之后），`chat.md` 覆盖删不掉它。
 

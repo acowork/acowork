@@ -37,7 +37,7 @@ acowork 的 LSP relay 当前只传了一个 rootUri，没有利用 `didOpen` 的
 2. **自动发现**：根据文件路径 + 语言自动推导项目根，无需用户手动配置
 3. **最小改动**：利用现有 LSP Pool 的 key 隔离机制，不改 pool 层
 4. **声明式扩展**：新增语言只需在配置中加一行标记文件
-5. **双路径覆盖**：WebSocket relay 路径（编辑器交互）和 Codebase RPC 路径（Agent Runtime 代码智能）都支持
+5. **双路径覆盖**：WebSocket relay 路径（编辑器交互）和 Codebase RPC 路径（Bot Runtime 代码智能）都支持
 
 ## 3. 核心概念：Project Root vs Workspace Root
 
@@ -506,7 +506,7 @@ ensure_initialized(entry, project_root)
 | 同一语言多个项目（如两个 tsconfig.json） | Pool key 包含 project_root，自动隔离为独立 LSP 进程 |
 | 文件在 monorepo root 直接下（无项目标记） | fallback 到 workspace root |
 | Rust workspace Cargo.toml vs crate Cargo.toml | 取最近的 Cargo.toml；rust-analyzer 自身能处理 workspace 边界 |
-| Agent Runtime codebase RPC 的 params 中无 file URI | fallback 到 `req.workspace_root` |
+| Bot Runtime codebase RPC 的 params 中无 file URI | fallback 到 `req.workspace_root` |
 | 标记文件检查失败（权限/IO 错误） | `exists()` 异常视为不存在，继续向上查找 |
 | rootless 语言（JSON/YAML/HTML/CSS/Markdown） | 不执行发现，直接用 workspace root |
 | Tauri fs plugin 不可用（非 Tauri 环境） | `discoverProjectRoot` 捕获异常，fallback 到 workspace root |
@@ -535,5 +535,5 @@ ensure_initialized(entry, project_root)
 | Rust 不受影响 | 打开 `core/acowork-core/src/` 下的 .rs 文件，确认 rust-analyzer 正常工作 |
 | 多项目隔离 | （若存在多个 tsconfig.json）分别打开不同项目的文件，确认各自使用独立的 LSP 进程 |
 | rootless 语言 | 打开 .json / .yaml 文件，确认 LSP 正常连接 |
-| Codebase RPC | Agent Runtime 发起 `textDocument/definition` 请求，确认返回正确结果 |
+| Codebase RPC | Bot Runtime 发起 `textDocument/definition` 请求，确认返回正确结果 |
 | fallback 场景 | 打开 monorepo root 下的文件（无标记文件），确认 fallback 到 workspace root |

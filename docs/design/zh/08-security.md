@@ -6,22 +6,22 @@
 
 ## 1. 进程隔离
 
-- 每个 Agent 独立进程，一个崩溃不影响其他。
-- Agent Runtime 是平台信任的二进制，.agent 包无可执行代码。
+- 每个 Bot 独立进程，一个崩溃不影响其他。
+- Bot Runtime 是平台信任的二进制，.bot 包无可执行代码。
 
 ## 2. 文件系统隔离
 
 ### 2.1 策略级隔离（Phase 1）
 
-- Agent 只能写入自己的工作区目录和用户明确授权的目录。
+- Bot 只能写入自己的工作区目录和用户明确授权的目录。
 - 私有 SQLite DB 文件在工作区内，沙箱层面强制隔离。
 - Runtime 对 `file_read` / `file_write` 等工具的路径参数做白名单检查，拒绝越界访问。
 
-**已知局限**：策略级隔离依赖 Runtime 主动检查，无法防御 Agent 通过 shell 工具启动子进程绕过路径限制。子进程继承用户进程的全部 OS 权限，可以读写工作区外的任意文件。详见 §11 和 ADR-005。
+**已知局限**：策略级隔离依赖 Runtime 主动检查，无法防御 Bot 通过 shell 工具启动子进程绕过路径限制。子进程继承用户进程的全部 OS 权限，可以读写工作区外的任意文件。详见 §11 和 ADR-005。
 
 ### 2.2 OS 级强制隔离（Phase 7，平台相关）
 
-> **2026-04-25 决策（ADR-007）**：进程级沙箱从原 Phase 3 延后至 Phase 7。当前威胁模型（个人桌面、自选 Agent）不需要内核级隔离，应用层防御（权限框架 + Shell 分级 + WASM 沙箱 + Approval Gate）已构成完整的第一层防线。Phase 7 将与 macOS Seatbelt 一起实现跨平台进程级沙箱。
+> **2026-04-25 决策（ADR-007）**：进程级沙箱从原 Phase 3 延后至 Phase 7。当前威胁模型（个人桌面、自选 Bot）不需要内核级隔离，应用层防御（权限框架 + Shell 分级 + WASM 沙箱 + Approval Gate）已构成完整的第一层防线。Phase 7 将与 macOS Seatbelt 一起实现跨平台进程级沙箱。
 
 | 平台 | 机制 | 说明 |
 |------|------|------|
@@ -33,10 +33,10 @@ OS 级隔离由内核强制执行，即使子进程也无法绕过。Phase 7 之
 
 ## 3. 包签名验证
 
-- 所有 .agent 包安装前必须通过签名验证（详见 [02-agent-package.md](./02-agent-package.md)），未签名或签名无效的包拒绝安装。
-- 系统 Agent（manifest 中 `system: true`）必须是 Platform 签名，Gateway 内置平台根公钥用于验证。
-- Agent 升级时，新包的签名证书指纹必须与已安装版本一致，防止恶意包覆盖。
-- Gateway 配置中可定义基于签名者的信任规则（`trusted_signers`），特定签名的 Agent 可自动获得额外权限。
+- 所有 .bot 包安装前必须通过签名验证（详见 [02-agent-package.md](./02-agent-package.md)），未签名或签名无效的包拒绝安装。
+- 系统 Bot（manifest 中 `system: true`）必须是 Platform 签名，Gateway 内置平台根公钥用于验证。
+- Bot 升级时，新包的签名证书指纹必须与已安装版本一致，防止恶意包覆盖。
+- Gateway 配置中可定义基于签名者的信任规则（`trusted_signers`），特定签名的 Bot 可自动获得额外权限。
 - 签名覆盖整个 ZIP 内容（Local Files + Central Directory + End of Directory），不存在未签名区域。
 
 ## 4. 网络隔离
@@ -48,7 +48,7 @@ OS 级隔离由内核强制执行，即使子进程也无法绕过。Phase 7 之
 ## 5. 权限最小化
 
 - manifest 必须声明所有权限，用户安装时可拒绝。
-- 运行时权限请求：Agent 可通过 Gateway 请求额外权限，Gateway 弹出对话框让用户确认。
+- 运行时权限请求：Bot 可通过 Gateway 请求额外权限，Gateway 弹出对话框让用户确认。
 
 ```json
 {
@@ -62,8 +62,8 @@ OS 级隔离由内核强制执行，即使子进程也无法绕过。Phase 7 之
 
 - Key 集中存储在 Gateway Vault（加密）。
 - 不通过环境变量分发（避免 ps/procfs 泄露）。
-- Agent Runtime 启动后通过 gRPC（详见 06-communication.md §1）一次性获取，存于进程内存。
-- Agent Runtime 是可信二进制，.agent 包无可执行代码，WASM 工具在沙箱内无法读取宿主内存。
+- Bot Runtime 启动后通过 gRPC（详见 06-communication.md §1）一次性获取，存于进程内存。
+- Bot Runtime 是可信二进制，.bot 包无可执行代码，WASM 工具在沙箱内无法读取宿主内存。
 
 ## 7. WASM 工具沙箱
 
@@ -81,9 +81,9 @@ OS 级隔离由内核强制执行，即使子进程也无法绕过。Phase 7 之
 
 ## 9. Prompt Injection 防护
 
-- Agent Runtime 内置 Prompt Guard，检测和过滤可疑输入。
+- Bot Runtime 内置 Prompt Guard，检测和过滤可疑输入。
 - 高风险工具执行（文件写入、网络请求、Intent 发送）需用户确认（approval 机制）。
-- 审计日志：Agent 发出的所有工具调用和 Intent 都被记录和可回溯。
+- 审计日志：Bot 发出的所有工具调用和 Intent 都被记录和可回溯。
 
 ## 10. Memory 传输加密
 
@@ -136,7 +136,7 @@ enum FileSource {
 | `file_write` 创建文件 | `CreatedByTool { tool: "file_write" }` |
 | `network_fetch` 保存到文件 | `Downloaded { from_url }` |
 | `shell` 执行后出现新文件 | `Unknown`（最高风险等级） |
-| Agent 启动时扫描工作区 | `PreExisting` |
+| Bot 启动时扫描工作区 | `PreExisting` |
 
 **关键规则**：当 shell 命令试图**执行**一个 `Downloaded` 或 `Unknown` 来源的文件时，触发高安全等级处理（见 §11.3）。
 
@@ -241,13 +241,13 @@ Runtime 使用 OS 提供的文件变更通知监控工作区内的异常变化�
 2. **子进程链追踪困难**：shell 启动的子进程再启动子进程，Runtime 无法追踪。OS 级沙箱（Phase 7）才能根本解决。Phase 3 的替代防线：Shell 工具默认不提供（manifest 显式声明才启用）+ Approval Gate。
 3. **符号链接攻击**：`ln -s /etc/passwd link && cat link` 可以绕过路径白名单读取外部文件。Phase 3 通过 FS 监控检测符号链接创建，Phase 7 通过 bwrap 彻底解决。
 
-## 12. 发布侧安全——Agent 仓库扫描
+## 12. 发布侧安全——Bot 仓库扫描
 
 ### 12.1 问题背景
 
-运行侧安全（§2~§11）建立的是"安装后"的纵深防御。但 Agent 的恶意行为可能很隐蔽——Prompt 中嵌入的间接指令、Skill 中描述的危险操作模式、WASM 工具中的恶意逻辑——这些在运行时可能绕过 Shell 风险分级和 FileProvenance 检测。
+运行侧安全（§2~§11）建立的是"安装后"的纵深防御。但 Bot 的恶意行为可能很隐蔽——Prompt 中嵌入的间接指令、Skill 中描述的危险操作模式、WASM 工具中的恶意逻辑——这些在运行时可能绕过 Shell 风险分级和 FileProvenance 检测。
 
-借鉴 Android 生态的 Google Play 扫描机制，ACowork 在 Agent 仓库（商店）上架阶段建立安全关卡，将安全问题**左移（Shift-Left）**到发布环节，形成"上架前扫描 + 安装时验签 + 运行时防护"的三层纵深：
+借鉴 Android 生态的 Google Play 扫描机制，ACowork 在 Bot 仓库（商店）上架阶段建立安全关卡，将安全问题**左移（Shift-Left）**到发布环节，形成"上架前扫描 + 安装时验签 + 运行时防护"的三层纵深：
 
 ```
 开发者提交 .agent 包
@@ -264,7 +264,7 @@ Runtime 使用 OS 提供的文件变更通知监控工作区内的异常变化�
 
 ### 12.2 扫描范围
 
-Agent 仓库对提交的 .agent 包执行以下维度的自动化安全扫描：
+Bot 仓库对提交的 .bot 包执行以下维度的自动化安全扫描：
 
 | 扫描维度 | 目标文件 | 检测内容 | 严重等级 |
 |---------|---------|---------|---------|
@@ -281,23 +281,23 @@ SQLite 记忆层 记忆扫描是 ACowork 特有的挑战，在传统应用安全
 
 **问题一：自学习 Skill 的"学坏"风险**
 
-Agent 在运行中通过 SQLite 记忆层 积累 SkillIteration 和 SkillExperience，这些自学习记忆随用户交互不断演化。一个良性 Agent 可能在特定用户交互模式下"学"到危险行为——例如用户反复手动确认高风险操作后，Agent 的 ProceduralNode 可能将"跳过确认"固化为通用行为模式。
+Bot 在运行中通过 SQLite 记忆层 积累 SkillIteration 和 SkillExperience，这些自学习记忆随用户交互不断演化。一个良性 Bot 可能在特定用户交互模式下"学"到危险行为——例如用户反复手动确认高风险操作后，Bot 的 ProceduralNode 可能将"跳过确认"固化为通用行为模式。
 
 **问题二：打包分享的信任边界**
 
-Agent 分享时，打包的 SQLite 记忆层 记忆包含 SkillIteration、ProceduralNode、AutobiographicalNode 等（Public 级别的保留，Personal/Sensitive 剥离，见 00-prd.md ADR-002）。接收方信任的是"Agent 能力"，但打包的记忆中可能包含：
+Bot 分享时，打包的 SQLite 记忆层 记忆包含 SkillIteration、ProceduralNode、AutobiographicalNode 等（Public 级别的保留，Personal/Sensitive 剥离，见 00-prd.md ADR-002）。接收方信任的是"Bot 能力"，但打包的记忆中可能包含：
 
 - 恶意 ProceduralNode：将危险操作固化为"习惯"
 - 污染的 SkillExperience：记录了绕过安全机制的"成功经验"
-- 注入的 Preference：改变 Agent 默认行为倾向
+- 注入的 Preference：改变 Bot 默认行为倾向
 
 **扫描策略**：
 
 | 场景 | 扫描时机 | 扫描对象 | 策略 |
 |------|---------|---------|------|
-| Agent 上架仓库 | 开发者提交时 | 打包时的 SQLite 记忆层 导出 | 全量扫描，高危节点拒绝上架 |
-| Agent 分享给他人 | 用户触发打包时 | 打包的 SQLite 记忆层 快照 | 本地扫描 + 警告，不阻止分享（但标记风险） |
-| Agent 运行中自学习 | Runtime 后台 | 运行中 SQLite 的增量变化 | 轻量级模式检测（Phase 3+），异常 Skill 经验触发用户通知 |
+| Bot 上架仓库 | 开发者提交时 | 打包时的 SQLite 记忆层 导出 | 全量扫描，高危节点拒绝上架 |
+| Bot 分享给他人 | 用户触发打包时 | 打包的 SQLite 记忆层 快照 | 本地扫描 + 警告，不阻止分享（但标记风险） |
+| Bot 运行中自学习 | Runtime 后台 | 运行中 SQLite 的增量变化 | 轻量级模式检测（Phase 3+），异常 Skill 经验触发用户通知 |
 
 ### 12.4 扫描引擎架构
 
@@ -340,7 +340,7 @@ Agent 分享时，打包的 SQLite 记忆层 记忆包含 SkillIteration、Proce
 | 判定 | 条件 | 后续动作 |
 |------|------|---------|
 | **Pass** | 无 Critical/High 发现，Medium 发现 ≤ 3 | 正常上架，附带扫描报告 |
-| **Warn** | 有 High 发现但可解释（如 shell 工具声明的 Agent 必然有高危 Skill 模式） | 上架但标记警告标签，用户安装时可见 |
+| **Warn** | 有 High 发现但可解释（如 shell 工具声明的 Bot 必然有高危 Skill 模式） | 上架但标记警告标签，用户安装时可见 |
 | **Reject** | 有 Critical 发现，或 High 发现 ≥ 3 且无合理解释 | 拒绝上架，返回扫描报告供开发者修复 |
 
 ### 12.5 SQLite 记忆层 记忆扫描的具体规则
@@ -406,8 +406,8 @@ enum MemoryFinding {
 
 发布侧扫描与包签名机制（§3）协同工作：
 
-- **Developer 自签名包**：开发者自行分发（侧载），**无仓库扫描保障**。用户自行承担风险，Gateway 安装时提示"未经验证的第三方 Agent"。
+- **Developer 自签名包**：开发者自行分发（侧载），**无仓库扫描保障**。用户自行承担风险，Gateway 安装时提示"未经验证的第三方 Bot"。
 - **仓库分发包**：通过仓库扫描后，仓库可用 **Distribution Key**（Phase 5+）重新签名，表示"此包已通过安全扫描"。Gateway 可配置为"仅安装 Distribution Key 签名的包"（企业策略）。
-- **Platform 签名包**：系统 Agent 免于仓库扫描（由平台自建信任链），但 Platform Key 签名本身是更严格的信任保障。
+- **Platform 签名包**：系统 Bot 免于仓库扫描（由平台自建信任链），但 Platform Key 签名本身是更严格的信任保障。
 
 这种分层信任模型与 Android 的侧载 vs Play Store 安装模型一致：用户可以选择自由安装（自签名），也可以选择只信任仓库分发的包（Distribution Key）。

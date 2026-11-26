@@ -14,23 +14,23 @@
 
 ## 1. 定位
 
-和 Agent **生成一张图片**相同：
+和 Bot **生成一张图片**相同：
 
-1. 在该 Agent 的 workspace 里创建一个文件；
+1. 在该 Bot 的 workspace 里创建一个文件；
 2. 基于这个文件修改、保存、预览、再修改；
-3. 做完可以留在工作区、上传 DOC、发给其他 Agent / 用户。
+3. 做完可以留在工作区、上传 DOC、发给其他 Bot / 用户。
 
 **总归从一个文件开始。** 不是从「这条聊天绑定的内存画布」开始。
 
-三种面允许缺省，不允许把用户正在编的 UI 当成 Agent 的那份文件：
+三种面允许缺省，不允许把用户正在编的 UI 当成 Bot 的那份文件：
 
 | 面 | 谁在用 | 权威状态 | 入口 |
 |---|---|---|---|
 | **用户画布** | 当前登录用户 | 用户在应用里打开的稿（用户自己的文件或未保存缓冲） | 左侧导航 → `AppFrame` → `/api/apps/{id}/ui/` |
-| **Agent 产物** | 某个 Agent | **该 Agent 工作区里的文件** | Runtime MCP → 应用 `open_file` / `save_file` / 编辑工具 |
-| **预览** | 用户看 Agent 画到哪了 | 只读打开那条工作区路径 | 聊天文件卡片 → 编辑器栏查看器（图片用 ImageViewer，`.figcraft` 用应用 iframe） |
+| **Bot 产物** | 某个 Bot | **该 Bot 工作区里的文件** | Runtime MCP → 应用 `open_file` / `save_file` / 编辑工具 |
+| **预览** | 用户看 Bot 画到哪了 | 只读打开那条工作区路径 | 聊天文件卡片 → 编辑器栏查看器（图片用 ImageViewer，`.figcraft` 用应用 iframe） |
 
-`library`（DOC / PM）的产物主键在应用自己的库（文档 id、任务 id），用户打开资源即看见——等价于「文件」，只是不住在 Agent workspace。`visual`（FigCraft、以及以后需要专用查看器的设计稿）的产物主键是 workspace 路径，预览必须走对应查看器。
+`library`（DOC / PM）的产物主键在应用自己的库（文档 id、任务 id），用户打开资源即看见——等价于「文件」，只是不住在 Bot workspace。`visual`（FigCraft、以及以后需要专用查看器的设计稿）的产物主键是 workspace 路径，预览必须走对应查看器。
 
 平台聊天**默认不是共编**。共编只发生在应用自己的 UI 里再放聊天的时候。
 
@@ -53,7 +53,7 @@ Desktop 聊天卡片 → 编辑器栏预览该 path
 左侧导航 AppFrame = 用户自己的稿，不接这条 MCP
 ```
 
-单应用进程可以同时打开多个工作区文件（按路径缓存）。隔离靠 **Agent workspace 目录**，不靠按用户再拉进程。
+单应用进程可以同时打开多个工作区文件（按路径缓存）。隔离靠 **Bot workspace 目录**，不靠按用户再拉进程。
 
 ---
 
@@ -78,11 +78,11 @@ extensions = ["figcraft"]
 
 `kind` 区分的是**预览通道**，不是「有没有文件」。图片是 `none`（已有 ImageViewer）；声明了扩展名的 `visual` 应用用自己的 iframe；DOC 文档是 `library`。
 
-`[mcp].auto_inject = true` 仍是进入 catalog 的开关。`visual` 应用要让 Agent 改文件，必须打开它。
+`[mcp].auto_inject = true` 仍是进入 catalog 的开关。`visual` 应用要让 Bot 改文件，必须打开它。
 
 ---
 
-## 4. Agent 产物 = 工作区文件
+## 4. Bot 产物 = 工作区文件
 
 ### 4.1 主键
 
@@ -98,7 +98,7 @@ file_id = (instance_id, workspace_id, relative_path)
 
 | 步骤 | 做什么 |
 |---|---|
-| 创建 | Agent 在 workspace 写下新文件（FigCraft：`save_file` / `file.save` 到工作区路径；或先 `export` 再 `file_write` 字节）。空文件也是文件 |
+| 创建 | Bot 在 workspace 写下新文件（FigCraft：`save_file` / `file.save` 到工作区路径；或先 `export` 再 `file_write` 字节）。空文件也是文件 |
 | 修改 | MCP 对该 path `open_file`（若尚未打开）→ 编辑工具 → `save_file`。磁盘是权威 |
 | 预览 | 用户点卡片 / 自动打开编辑器栏，查看器读工作区文件字节 |
 | 再修改 | 同一 path 继续 MCP；预览重新读文件或吃一次 snapshot |
@@ -133,7 +133,7 @@ DOC / PM 不要改成「先写 workspace 再上传」。它们的产物就是库
 ## 5. 用户画布
 
 - 入口、ticket、sandbox：文档 34。
-- 用户从工作区打开 Agent 的 `.figcraft` 进左侧 FigCraft = 用户行为，打开后是用户画布上的一份拷贝或同一文件（若用户工作区与 Agent 工作区碰巧相同——默认不是）。
+- 用户从工作区打开 Bot 的 `.figcraft` 进左侧 FigCraft = 用户行为，打开后是用户画布上的一份拷贝或同一文件（若用户工作区与 Bot 工作区碰巧相同——默认不是）。
 - **禁止**把用户 iframe 登记成 MCP Backend。
 
 ---
@@ -242,8 +242,8 @@ VectorCraft 没有 host 模式，改用它的 `window.vectorcraft` page API（�
 文件已在工作区，交接就是用这个路径：
 
 - 用户在工作区树打开 / 复制到自己的目录，再用左侧 FigCraft 打开；
-- Agent 调 DOC MCP 上传导出件；
-- 把路径发给其他 Agent。
+- Bot 调 DOC MCP 上传导出件；
+- 把路径发给其他 Bot。
 
 **共编**：应用 UI 内嵌聊天之后才 attach 用户画布。平台聊天路径不自动共编。
 
@@ -287,7 +287,7 @@ VectorCraft 没有 host 模式，改用它的 `window.vectorcraft` page API（�
 **本文**
 
 4. 选 `ui.canvas.kind`（预览通道，不是「有没有文件」）
-5. `visual`：产物落 Agent workspace；MCP path 限制在该根；声明扩展名与 `preview_path`
+5. `visual`：产物落 Bot workspace；MCP path 限制在该根；声明扩展名与 `preview_path`
 6. `library`：产物写应用库；不要为统一而改成先写 workspace
 7. MCP 不 attach 用户左侧 iframe
 8. 预览不进聊天气泡
@@ -297,7 +297,7 @@ VectorCraft 没有 host 模式，改用它的 `window.vectorcraft` page API（�
 **FigCraft**
 
 - 用户画布：左侧 `/ui/` WASM。
-- Agent：workspace `*.figcraft` + Headless/引擎打开该文件 + `auto_inject = true`。
+- Bot：workspace `*.figcraft` + Headless/引擎打开该文件 + `auto_inject = true`。
 - 预览：工作区文件卡片 + 编辑器栏 iframe。
 - 主题：注入监听。
 - 不改 `crates/mcp`、`crates/engine`、`apps/figcraft-web/index.html`。
@@ -314,10 +314,10 @@ VectorCraft 没有 host 模式，改用它的 `window.vectorcraft` page API（�
 
 ## 13. 验证（落地时）
 
-1. Agent 创建 `designs/a.figcraft` 后，工作区树能看见该文件；左侧用户 FigCraft **没有**自动出现这份稿。
+1. Bot 创建 `designs/a.figcraft` 后，工作区树能看见该文件；左侧用户 FigCraft **没有**自动出现这份稿。
 2. 关掉预览后再 MCP 编辑、`save_file`，磁盘文件更新；再打开预览是新内容。
 3. 路径逃出 workspace 被拒绝。
-4. 用户 B 的 Agent 写自己工作区，用户 A 的树里没有该文件。
+4. 用户 B 的 Bot 写自己工作区，用户 A 的树里没有该文件。
 5. 聊天滚动不卸载编辑器栏里的预览 iframe。
 6. ACowork 切换 light/dark，预览 iframe（若开着）跟壳走。
 7. Adapter 对上游 `index.html` 的源码 diff 为空。

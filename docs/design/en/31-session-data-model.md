@@ -89,7 +89,7 @@ Everything else is settled into the terminal layer.
 | `message` | durable entity | log row: `kind` / `body` / `from` / `to` / `mentions` / `refs` / payload | sending, uploading, retrying | the two chat-side writer classes (see §5.2) |
 | `round_ref` | durable entity | log row: `{agent_instance_id, agent_session_id, round_id}` + `opened_new` | whether that round is still running (answered by the execution side) | the Runtime (via relay) |
 | `turn` (one delivery) | **derived view, not an entity** | no carrier of its own: the terminal state is carried by the "answer row" (`round_ref` / `agent_message` / receipt `system_notice`, all naming the human row in `in_reply_to`) | pending / routed / liveness | the delivery layer (Gateway mailbox) holds the process and writes no transcript |
-| `question` (one solicitation) | **derived view, not an entity** | no carrier of its own: the question content is terminal on write to its log row; "answered" is answered by the `round_ref` pointing at the asked message | open questions | the asker (agent via relay) writes the question row; the answerer writes the answer row |
+| `question` (one solicitation) | **derived view, not an entity** | no carrier of its own: the question content is terminal on write to its log row; "answered" is answered by the `round_ref` pointing at the asked message | open questions | the asker (bot via relay) writes the question row; the answerer writes the answer row |
 
 Four hard consequences:
 
@@ -98,7 +98,7 @@ Four hard consequences:
 - **Every answer row must thread to the row it answers** (`in_reply_to` = that row's `message_id`). This is the precondition that makes derivation recomputable, and its absence is the direct cause of the current defects.
 - **Payload is terminal**: written once, persisted verbatim; unregistered keys must **fail loudly** at the write boundary, never be dropped silently.
 
-**On "delivery address"**: the address is not a field on the human row. The human row is written before delivery (storage precedes delivery, §5.1), while "which session it went to" is decided later by routing or re-delivery — so the terminal carrier of the address is `round_ref.agent_session_id` (with `opened_new` distinguishing a new session from a continued one). The existing `to` means "which agent" (the target instance in 1:1, empty in group chats where `mentions` carries it), and `meta.agent_session_id` never appears on a human row. **A new `address` field would be a second representation**, so it is rejected.
+**On "delivery address"**: the address is not a field on the human row. The human row is written before delivery (storage precedes delivery, §5.1), while "which session it went to" is decided later by routing or re-delivery — so the terminal carrier of the address is `round_ref.agent_session_id` (with `opened_new` distinguishing a new session from a continued one). The existing `to` means "which bot" (the target instance in 1:1, empty in group chats where `mentions` carries it), and `meta.agent_session_id` never appears on a human row. **A new `address` field would be a second representation**, so it is rejected.
 
 ## 5. Consistency rules
 

@@ -4,7 +4,7 @@
 
 ---
 
-ACowork Desktop App 是基于 Tauri 的桌面客户端，作为用户与 Agent 交互的主界面。Desktop App 与 Gateway 是**独立进程**，通过 Gateway Service API 通信。
+ACowork Desktop App 是基于 Tauri 的桌面客户端，作为用户与 Bot 交互的主界面。Desktop App 与 Gateway 是**独立进程**，通过 Gateway Service API 通信。
 
 ## 1. 定位与职责
 
@@ -12,17 +12,17 @@ Desktop App 是 ACowork 平台的**用户界面层**，不承载任何平台核�
 
 | 职责 | 说明 |
 |------|------|
-| Agent 交互 | 用户与 Agent 的对话界面，消息收发 |
-| Agent 管理 | 安装、卸载、克隆、创建、启停 Agent |
-| 调试面板 | 开发者模式下对 Agent Runtime 的步进调试、录制回放 |
+| Bot 交互 | 用户与 Bot 的对话界面，消息收发 |
+| Bot 管理 | 安装、卸载、克隆、创建、启停 Bot |
+| 调试面板 | 开发者模式下对 Bot Runtime 的步进调试、录制回放 |
 | 配置管理 | Gateway 配置、API Key 管理（Vault）、Provider 配置 |
 | 系统托盘 | Gateway 状态指示、快捷操作 |
 
 **Desktop App 不做的事：**
-- 不运行 Agent 逻辑（Agent Runtime 独立进程）
-- 不管理 Agent 生命周期（Gateway 负责）
+- 不运行 Bot 逻辑（Bot Runtime 独立进程）
+- 不管理 Bot 生命周期（Gateway 负责）
 - 不存储 API Key（Gateway Vault 负责）
-- 不代理 LLM 调用（Agent Runtime 直连）
+- 不代理 LLM 调用（Bot Runtime 直连）
 
 ## 2. 架构概览
 
@@ -77,18 +77,18 @@ Desktop App 通过 **Gateway HTTP API** 与 Gateway 交互：
 | 操作 | HTTP 方法 | 路径 | 说明 |
 |------|----------|------|------|
 | Gateway 状态 | GET | `/health` | 健康检查 |
-| Agent 列表 | GET | `/api/agents` | 已安装的 Agent 列表 |
-| Agent 安装 | POST | `/api/agents/install` | 安装 .agent 包（multipart：`.agent` 字节 + 必填 `node_id`，ADR-113） |
-| Agent 卸载 | DELETE | `/api/agents/:id` | 卸载 Agent |
-| Agent 克隆 | POST | `/api/agents/clone` | 克隆 Agent |
-| Agent 启停 | POST | `/api/agents/:id/start` | 启动 Agent |
-| Agent 启停 | POST | `/api/agents/:id/stop` | 停止 Agent |
-| 发送消息 | POST | `/api/agents/:id/message` | 向 Agent 发送用户消息 |
-| 流式响应 | WebSocket | `/api/agents/:id/stream` | 订阅 Agent 的流式输出 |
+| Bot 列表 | GET | `/api/agents` | 已安装的 Bot 列表 |
+| Bot 安装 | POST | `/api/agents/install` | 安装 .bot 包（multipart：`.agent` 字节 + 必填 `node_id`，ADR-113） |
+| Bot 卸载 | DELETE | `/api/agents/:id` | 卸载 Bot |
+| Bot 克隆 | POST | `/api/agents/clone` | 克隆 Bot |
+| Bot 启停 | POST | `/api/agents/:id/start` | 启动 Bot |
+| Bot 启停 | POST | `/api/agents/:id/stop` | 停止 Bot |
+| 发送消息 | POST | `/api/agents/:id/message` | 向 Bot 发送用户消息 |
+| 流式响应 | WebSocket | `/api/agents/:id/stream` | 订阅 Bot 的流式输出 |
 | Vault 操作 | GET/POST | `/api/vault/*` | API Key 管理 |
 | 配置操作 | GET/PUT | `/api/config/*` | Gateway 配置 |
 
-> 注：Gateway 原有的 Socket API（给 Agent Runtime 用的）保持不变。Desktop App 使用 HTTP API，Gateway 需要额外暴露一层 HTTP 接口供 Desktop App 调用。这是两个不同的消费端，协议分层：
+> 注：Gateway 原有的 Socket API（给 Bot Runtime 用的）保持不变。Desktop App 使用 HTTP API，Gateway 需要额外暴露一层 HTTP 接口供 Desktop App 调用。这是两个不同的消费端，协议分层：
 
 ```
 Gateway
@@ -96,9 +96,9 @@ Gateway
 └── HTTP API (端口 B)      ← Desktop App + CLI 使用（新增）
 ```
 
-### 2.2 Desktop App 与 Agent Runtime 的通信（DevMode）
+### 2.2 Desktop App 与 Bot Runtime 的通信（DevMode）
 
-开发者模式下，Desktop App 直接通过 **Debug Protocol**（WebSocket）连接到目标 Agent Runtime：
+开发者模式下，Desktop App 直接通过 **Debug Protocol**（WebSocket）连接到目标 Bot Runtime：
 
 ```
 Desktop App  ──WebSocket──>  Agent Runtime (DevMode, ws://127.0.0.1:19877)
@@ -142,23 +142,23 @@ Desktop App 采用**左中右四栏布局**，根据当前模式（用户模式 
 
 | 图标 | 功能 | 说明 |
 |------|------|------|
-| 💬 Chat | 聊天视图 | 默认视图，包含 Agent List + Chat + Results |
+| 💬 Chat | 聊天视图 | 默认视图，包含 Bot List + Chat + Results |
 | 🤖 Models | 模型管理 | Provider 列表、模型配置、API Key 状态 |
-| 📋 Skills | 技能列表 | 当前 Agent 的 Skills 列表、编辑入口 |
+| 📋 Skills | 技能列表 | 当前 Bot 的 Skills 列表、编辑入口 |
 | ⚙️ Settings | 设置 | Gateway 连接配置、全局偏好、关于 |
 
-#### 3.2.2 Agent 列表（第二栏，宽度 240px）
+#### 3.2.2 Bot 列表（第二栏，宽度 240px）
 
-- 显示所有已安装的 Agent（来自 Gateway `/api/agents`）
-- 每个 Agent 条目：图标/名称 + 运行状态指示器
-- 点击选择当前交互的 Agent
+- 显示所有已安装的 Bot（来自 Gateway `/api/agents`）
+- 每个 Bot 条目：图标/名称 + 运行状态指示器
+- 点击选择当前交互的 Bot
 - 右键菜单：启动/停止、查看详情、克隆、卸载、设置
-- 底部：`+ 创建 Agent` / `+ 从文件安装` 按钮
-- **开发者模式额外**：Agent 旁显示 `dev` 标签（开发态 Agent）
+- 底部：`+ 创建 Bot` / `+ 从文件安装` 按钮
+- **开发者模式额外**：Bot 旁显示 `dev` 标签（开发态 Bot）
 
 #### 3.2.3 聊天面板（第三栏，弹性宽度）
 
-当前选中 Agent 的对话界面：
+当前选中 Bot 的对话界面：
 
 - **消息流**：显示对话历史（system/user/assistant/tool 消息）
 - **输入区**：底部输入框，支持多行输入和快捷键发送
@@ -173,7 +173,7 @@ Desktop App 采用**左中右四栏布局**，根据当前模式（用户模式 
 **用户模式下**：
 - 工具调用摘要：工具名、参数、耗时、状态（成功/失败）
 - 当前会话 Token 用量统计（prompt/completion/total）
-- 当前 Agent 运行状态
+- 当前 Bot 运行状态
 
 **开发者模式下**（替代上述内容）：
 - 调试控制栏：Resume / Pause / Step / Stop
@@ -210,7 +210,7 @@ Desktop App 采用**左中右四栏布局**，根据当前模式（用户模式 
 | 关闭窗口 | 隐藏到系统托盘（不退出进程） |
 | 系统托盘图标 | 显示 Gateway 连接状态（已连接/未连接/错误） |
 | 左键托盘图标 | 显示/聚焦主窗口 |
-| 右键托盘菜单 | 显示 Dashboard / Agent Chat / 状态 / 退出 |
+| 右键托盘菜单 | 显示 Dashboard / Bot Chat / 状态 / 退出 |
 | 最小尺寸 | 1024 x 600 |
 | 默认尺寸 | 1200 x 800 |
 
@@ -247,22 +247,22 @@ Step 5: 安装第一个 Agent
 
 > Step 4 的数据流向：Desktop App → `POST /api/system/identity` → Gateway → UserProfile 模块 → 持久化存储。详见 [18-user-identity-simplified.md](./18-user-identity-simplified.md)。
 
-### 4.2 Agent 管理
+### 4.2 Bot 管理
 
 | 操作 | 入口 | 说明 |
 |------|------|------|
-| 安装 | Agent 列表底部 `+` / 拖放 .agent 文件 | 调用 Gateway 安装 API |
-| 卸载 | Agent 右键菜单 | 确认后调用 Gateway 卸载 API |
-| 启动/停止 | Agent 右键菜单 / 状态指示器 | 调用 Gateway Lifecycle API |
-| 查看详情 | Agent 右键菜单 | 显示 manifest 信息、运行状态、版本 |
-| 克隆 | Agent 右键菜单（开发者模式） | 见第 5.1 节 |
-| 从零创建 | Agent 列表底部（开发者模式） | 见第 5.2 节 |
+| 安装 | Bot 列表底部 `+` / 拖放 .bot 文件 | 调用 Gateway 安装 API |
+| 卸载 | Bot 右键菜单 | 确认后调用 Gateway 卸载 API |
+| 启动/停止 | Bot 右键菜单 / 状态指示器 | 调用 Gateway Lifecycle API |
+| 查看详情 | Bot 右键菜单 | 显示 manifest 信息、运行状态、版本 |
+| 克隆 | Bot 右键菜单（开发者模式） | 见第 5.1 节 |
+| 从零创建 | Bot 列表底部（开发者模式） | 见第 5.2 节 |
 
 ### 4.3 对话
 
-- 用户输入消息 → Desktop App 调用 Gateway `/api/agents/:id/message` → Gateway 通过 Intent Router 转发给 Agent Runtime
-- Agent 响应通过 WebSocket 流式推送回 Desktop App
-- 对话历史存储在 Agent 的私有 SQLite 中，Desktop App 不持久化对话数据
+- 用户输入消息 → Desktop App 调用 Gateway `/api/agents/:id/message` → Gateway 通过 Intent Router 转发给 Bot Runtime
+- Bot 响应通过 WebSocket 流式推送回 Desktop App
+- 对话历史存储在 Bot 的私有 SQLite 中，Desktop App 不持久化对话数据
 
 ### 4.4 设置页面
 
@@ -284,10 +284,10 @@ Step 5: 安装第一个 Agent
 - 选择新工作区后，调用 `PUT /api/agents/{agent_id}/workspaces/current` 持久化选择
 - 同时更新选择统计（`select_count`、`last_selected_at`），用于权重排序
 
-**Agent 切换联动**：
-- 当用户切换到不同 Agent 时，自动重新加载该 Agent 的工作区列表
-- 工作区列表是**一份带归属标记的全局数组**（`workspacesAgentId` 记录它描述的是哪个 instance）。启动另一个 Agent 会为那个 Agent 取列表并覆盖这一格，因此读方只在归属与当前选中 Agent 相符时才渲染、才允许点选；取列表失败时也要用空列表占下这一格——"这个 Agent 的列表未知"与"这是别的 Agent 的列表"不是一回事，后者能被点中并把不属于当前 Agent 的 workspace id 写进会话。归属不符时重新取一次，界面在一帧内自愈
-- 恢复该 Agent 上次的当前工作区选择
+**Bot 切换联动**：
+- 当用户切换到不同 Bot 时，自动重新加载该 Bot 的工作区列表
+- 工作区列表是**一份带归属标记的全局数组**（`workspacesAgentId` 记录它描述的是哪个 instance）。启动另一个 Bot 会为那个 Bot 取列表并覆盖这一格，因此读方只在归属与当前选中 Bot 相符时才渲染、才允许点选；取列表失败时也要用空列表占下这一格——"这个 Bot 的列表未知"与"这是别的 Bot 的列表"不是一回事，后者能被点中并把不属于当前 Bot 的 workspace id 写进会话。归属不符时重新取一次，界面在一帧内自愈
+- 恢复该 Bot 上次的当前工作区选择
 
 **状态管理**：
 - 使用独立的 `workspaceStore`（Zustand）管理工作区状态
@@ -297,9 +297,9 @@ Step 5: 安装第一个 Agent
 
 开发者模式在用户模式基础上叠加调试能力。所有调试协议的详细定义见 [10-debug-protocol.md](./10-debug-protocol.md)。
 
-### 5.1 Agent 克隆
+### 5.1 Bot 克隆
 
-Desktop App 的 Agent 列表右键菜单提供"克隆"选项（开发者模式可见）：
+Desktop App 的 Bot 列表右键菜单提供"克隆"选项（开发者模式可见）：
 
 ```
 用户右键 Agent A → 克隆
@@ -329,7 +329,7 @@ Agent 列表刷新，新 Agent 出现并标记为 dev: true
 
 ### 5.2 从零创建
 
-Agent 列表底部"创建 Agent"按钮在开发者模式下打开创建向导：
+Bot 列表底部"创建 Bot"按钮在开发者模式下打开创建向导：
 
 ```
 Step 1: 基本信息 — agent_id, name, description, author
@@ -372,7 +372,7 @@ Step 5: 生成 → 调用 Gateway API 创建工作区 → 新 Agent 标记 dev: 
 
 ### 5.4 发布向导
 
-开发者模式下，Agent 列表右键菜单的"发布"选项打开发布向导：
+开发者模式下，Bot 列表右键菜单的"发布"选项打开发布向导：
 
 ```
 Step 1: 检查 — manifest 完整性、SKILL.md 格式、prompts 存在性
@@ -392,8 +392,8 @@ Step 5: 分发 — 本地安装 / 导出到文件 / 上传仓库
 |------|---------|---------|
 | Gateway 已连接 | 正常图标 | `ACowork — Connected` |
 | Gateway 未连接 | 灰色图标 | `ACowork — Disconnected` |
-| Agent 正在运行 | 蓝色脉冲 | `ACowork — 2 Agents Running` |
-| Agent 执行中 | 绿色脉冲 | `ACowork — Working` |
+| Bot 正在运行 | 蓝色脉冲 | `ACowork — 2 Bots Running` |
+| Bot 执行中 | 绿色脉冲 | `ACowork — Working` |
 | 错误 | 红色图标 | `ACowork — Error` |
 
 ### 6.2 托盘右键菜单
@@ -448,8 +448,8 @@ Desktop App 后台定期（每 5s）调用 Gateway `/health` 端点：
 | `tauri-plugin-shell` | 调用外部命令（acowork-sign 等 CLI 工具） |
 | `tauri-plugin-store` | 持久化 Desktop App 自身配置（Gateway 地址、窗口状态等） |
 | `tauri-plugin-single-instance` | 防止多实例 |
-| `tauri-plugin-dialog` | 文件选择对话框（安装 .agent 包） |
-| `tauri-plugin-notification` | 系统通知（Agent 完成长任务时） |
+| `tauri-plugin-dialog` | 文件选择对话框（安装 .bot 包） |
+| `tauri-plugin-notification` | 系统通知（Bot 完成长任务时） |
 
 ### 7.3 前端目录结构
 
@@ -555,13 +555,13 @@ custom-protocol = ["tauri/custom-protocol"]
 
 ## 8. Gateway HTTP API（新增）
 
-Gateway 需要新增一层 HTTP API 供 Desktop App 和 CLI 使用。这与现有的 Socket API（Agent Runtime 用）是两个独立的消费端。
+Gateway 需要新增一层 HTTP API 供 Desktop App 和 CLI 使用。这与现有的 Socket API（Bot Runtime 用）是两个独立的消费端。
 
 ### 8.1 为什么需要 HTTP API
 
 | 维度 | Socket API（现有） | HTTP API（新增） |
 |------|-------------------|-----------------|
-| 消费者 | Agent Runtime | Desktop App / CLI |
+| 消费者 | Bot Runtime | Desktop App / CLI |
 | 传输层 | Unix Socket / Named Pipe | HTTP (localhost) |
 | 通信模式 | 长连接 + 双向推送 | 请求/响应 + WebSocket 流式 |
 | 用途 | 进程间实时通信 | 用户界面操作 |
@@ -633,7 +633,7 @@ HTTP 端口可配置，默认 `19876`。仅监听 `127.0.0.1`，不对外暴露�
 |------|------|------|
 | Desktop App 与 Gateway 独立 | 独立进程 | Gateway 可独立运行支持 CLI-only 用户；职责清晰 |
 | Gateway 新增 HTTP API | Axum HTTP | Socket API 不适合 WebView 直接调用；HTTP 是 Desktop App / CLI 的标准消费接口；与现有 Axum 选型一致 |
-| 布局方案 | 左中右四栏 | 导航 + Agent 列表 + 聊天 + 结果区，信息层次清晰；开发者模式复用同一布局叠加调试面板 |
+| 布局方案 | 左中右四栏 | 导航 + Bot 列表 + 聊天 + 结果区，信息层次清晰；开发者模式复用同一布局叠加调试面板 |
 | 前端框架 | React + TypeScript | 生态最成熟；Tauri + React 可行性已验证 |
 | UI 组件库 | shadcn/ui + Tailwind | 无运行时依赖、可定制、tree-shakable |
 | 系统托盘 | 关闭隐藏不退出 | 标准桌面应用行为；Gateway 常驻，Desktop App 作为其 GUI 前端也应常驻 |

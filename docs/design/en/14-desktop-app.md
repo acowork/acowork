@@ -4,7 +4,7 @@
 
 ---
 
-ACowork Desktop App is a Tauri-based desktop client serving as the primary user interface for interacting with Agents. Desktop App and Gateway are **independent processes**, communicating via the Gateway Service API.
+ACowork Desktop App is a Tauri-based desktop client serving as the primary user interface for interacting with Bots. Desktop App and Gateway are **independent processes**, communicating via the Gateway Service API.
 
 ## 1. Position and Responsibilities
 
@@ -12,17 +12,17 @@ Desktop App is the **user interface layer** of the ACowork platform; it carries 
 
 | Responsibility | Description |
 |----------------|-------------|
-| Agent interaction | User-Agent conversation UI, message send/receive |
-| Agent management | Install, uninstall, clone, create, start/stop Agents |
-| Debug panel | Developer-mode step debugging, record/replay on Agent Runtime |
+| Bot interaction | User-Agent conversation UI, message send/receive |
+| Bot management | Install, uninstall, clone, create, start/stop Bots |
+| Debug panel | Developer-mode step debugging, record/replay on Bot Runtime |
 | Configuration management | Gateway config, API Key management (Vault), Provider config |
 | System tray | Gateway status indicator, quick actions |
 
 **What Desktop App does NOT do:**
-- Does not run Agent logic (Agent Runtime is a separate process)
-- Does not manage Agent lifecycle (Gateway handles it)
+- Does not run Bot logic (Bot Runtime is a separate process)
+- Does not manage Bot lifecycle (Gateway handles it)
 - Does not store API Keys (Gateway Vault handles it)
-- Does not proxy LLM calls (Agent Runtime connects directly)
+- Does not proxy LLM calls (Bot Runtime connects directly)
 
 ## 2. Architecture Overview
 
@@ -77,18 +77,18 @@ Desktop App interacts with Gateway via the **Gateway HTTP API**:
 | Operation | HTTP Method | Path | Description |
 |-----------|-------------|------|-------------|
 | Gateway status | GET | `/health` | Health check |
-| Agent list | GET | `/api/agents` | Installed Agents list |
-| Agent install | POST | `/api/agents/install` | Install .agent package (multipart: `.agent` bytes + required `node_id`, ADR-113) |
-| Agent uninstall | DELETE | `/api/agents/:id` | Uninstall Agent |
-| Agent clone | POST | `/api/agents/clone` | Clone Agent |
-| Agent start/stop | POST | `/api/agents/:id/start` | Start Agent |
-| Agent start/stop | POST | `/api/agents/:id/stop` | Stop Agent |
-| Send message | POST | `/api/agents/:id/message` | Send user message to Agent |
-| Streaming | MQTT subscribe | `acowork/agents/{id}/sessions/{sid}/messages/#` | Subscribe to Agent stream output |
+| Bot list | GET | `/api/agents` | Installed Bots list |
+| Bot install | POST | `/api/agents/install` | Install .bot package (multipart: `.agent` bytes + required `node_id`, ADR-113) |
+| Bot uninstall | DELETE | `/api/agents/:id` | Uninstall Bot |
+| Bot clone | POST | `/api/agents/clone` | Clone Bot |
+| Bot start/stop | POST | `/api/agents/:id/start` | Start Bot |
+| Bot start/stop | POST | `/api/agents/:id/stop` | Stop Bot |
+| Send message | POST | `/api/agents/:id/message` | Send user message to Bot |
+| Streaming | MQTT subscribe | `acowork/agents/{id}/sessions/{sid}/messages/#` | Subscribe to Bot stream output |
 | Vault ops | GET/POST | `/api/vault/*` | API Key management |
 | Config ops | GET/PUT | `/api/config/*` | Gateway config |
 
-> Note: Gateway's original Socket API (for Agent Runtime) remains unchanged. Desktop App uses HTTP API; Gateway needs to expose an additional HTTP layer for Desktop App invocation. These are two distinct consumers with layered protocols:
+> Note: Gateway's original Socket API (for Bot Runtime) remains unchanged. Desktop App uses HTTP API; Gateway needs to expose an additional HTTP layer for Desktop App invocation. These are two distinct consumers with layered protocols:
 
 ```
 Gateway
@@ -96,9 +96,9 @@ Gateway
 └── HTTP API (Port B)      ← Desktop App + CLI use (newly added)
 ```
 
-### 2.2 Desktop App ↔ Agent Runtime Communication (DevMode)
+### 2.2 Desktop App ↔ Bot Runtime Communication (DevMode)
 
-In developer mode, Desktop App connects directly to the target Agent Runtime via the **Debug Protocol** (HTTP RPC + MQTT events):
+In developer mode, Desktop App connects directly to the target Bot Runtime via the **Debug Protocol** (HTTP RPC + MQTT events):
 
 ```
 Desktop App  ──debug_rpc──>  Agent Runtime (DevMode, HTTP localhost:19878)
@@ -143,23 +143,23 @@ Vertical icon navigation; click switches middle content area:
 
 | Icon | Function | Description |
 |------|----------|-------------|
-| 💬 Chat | Chat view | Default view: Agent List + Chat + Results |
+| 💬 Chat | Chat view | Default view: Bot List + Chat + Results |
 | 🤖 Models | Model management | Provider list, model config, API Key status |
-| 📋 Skills | Skill list | Current Agent's Skill list, edit entry |
+| 📋 Skills | Skill list | Current Bot's Skill list, edit entry |
 | ⚙️ Settings | Settings | Gateway connection config, global preferences, about |
 
-#### 3.2.2 Agent List (second column, 240px width)
+#### 3.2.2 Bot List (second column, 240px width)
 
-- Displays all installed Agents (from Gateway `/api/agents`)
-- Each Agent entry: icon/name + running status indicator
-- Click to select current interaction Agent
+- Displays all installed Bots (from Gateway `/api/agents`)
+- Each Bot entry: icon/name + running status indicator
+- Click to select current interaction Bot
 - Right-click menu: start/stop, view details, clone, uninstall, settings
-- Bottom: `+ Create Agent` / `+ Install from File` buttons
-- **Developer mode extra**: Agents display `dev` tag (development-state Agents)
+- Bottom: `+ Create Bot` / `+ Install from File` buttons
+- **Developer mode extra**: Bots display `dev` tag (development-state Bots)
 
 #### 3.2.3 Chat Panel (third column, flexible width)
 
-Current selected Agent's conversation UI:
+Current selected Bot's conversation UI:
 
 - **Message stream**: Conversation history (system/user/assistant/tool messages)
 - **Input area**: Bottom input box, multi-line input and shortcut send
@@ -174,7 +174,7 @@ Current selected Agent's conversation UI:
 **User Mode:**
 - Tool call summary: tool name, params, duration, status (success/failure)
 - Current session Token usage statistics (prompt/completion/total)
-- Current Agent runtime status
+- Current Bot runtime status
 
 **Developer Mode** (replaces the above content):
 - Debug controls: Resume / Pause / Step / Stop
@@ -211,7 +211,7 @@ The complete capability definition for developer mode is in [10-debug-protocol.m
 | Close window | Hide to system tray (do not exit process) |
 | System tray icon | Shows Gateway connection status (connected/disconnected/error) |
 | Left-click tray icon | Show/focus main window |
-| Right-click tray menu | Show Dashboard / Agent Chat / Status / Quit |
+| Right-click tray menu | Show Dashboard / Bot Chat / Status / Quit |
 | Minimum size | 1024 x 600 |
 | Default size | 1200 x 800 |
 
@@ -248,22 +248,22 @@ Step 5: Install first Agent
 
 > Step 4 data flow: Desktop App → `POST /api/users` → Gateway → UserProfile module → persistent storage. See [18-user-identity-simplified.md](./18-user-identity-simplified.md).
 
-### 4.2 Agent Management
+### 4.2 Bot Management
 
 | Operation | Entry | Description |
 |-----------|-------|-------------|
-| Install | Agent list bottom `+` / drag-drop .agent file | Call Gateway install API |
-| Uninstall | Agent right-click menu | After confirmation, call Gateway uninstall API |
-| Start/Stop | Agent right-click menu / status indicator | Call Gateway Lifecycle API |
-| View details | Agent right-click menu | Display manifest info, runtime status, version |
-| Clone | Agent right-click menu (developer mode) | See §5.1 |
-| Create from scratch | Agent list bottom (developer mode) | See §5.2 |
+| Install | Bot list bottom `+` / drag-drop .bot file | Call Gateway install API |
+| Uninstall | Bot right-click menu | After confirmation, call Gateway uninstall API |
+| Start/Stop | Bot right-click menu / status indicator | Call Gateway Lifecycle API |
+| View details | Bot right-click menu | Display manifest info, runtime status, version |
+| Clone | Bot right-click menu (developer mode) | See §5.1 |
+| Create from scratch | Bot list bottom (developer mode) | See §5.2 |
 
 ### 4.3 Conversation
 
-- User input message → Desktop App calls Gateway `/api/agents/:id/message` → Gateway forwards to Agent Runtime via Intent Router
-- Agent responses are pushed back to Desktop App via MQTT streaming subscription
-- Conversation history is stored in Agent's private SQLite; Desktop App does not persist conversation data
+- User input message → Desktop App calls Gateway `/api/agents/:id/message` → Gateway forwards to Bot Runtime via Intent Router
+- Bot responses are pushed back to Desktop App via MQTT streaming subscription
+- Conversation history is stored in Bot's private SQLite; Desktop App does not persist conversation data
 
 ### 4.4 Settings Page
 
@@ -285,10 +285,10 @@ Step 5: Install first Agent
 - After selecting a new workspace, call `PUT /api/agents/{agent_id}/workspaces/current` to persist the selection
 - Also update selection statistics (`select_count`, `last_selected_at`) for weight sorting
 
-**Agent switching linkage**:
-- When user switches to a different Agent, automatically reload that Agent's workspace list
-- The list is **one global array carrying the agent it describes** (`workspacesAgentId`). Starting another Agent fetches for that one and overwrites the slot, so consumers render and allow picking only when the tag matches the selected Agent, and a failed fetch still claims the slot with an empty list — "this Agent's list is unknown" is not the same thing as "here is another Agent's list", which can be clicked and write a workspace id the current Agent does not own. On a mismatch the list is re-fetched and the panel recovers within a frame
-- Restore that Agent's last current workspace selection
+**Bot switching linkage**:
+- When user switches to a different Bot, automatically reload that Bot's workspace list
+- The list is **one global array carrying the bot it describes** (`workspacesAgentId`). Starting another Bot fetches for that one and overwrites the slot, so consumers render and allow picking only when the tag matches the selected Bot, and a failed fetch still claims the slot with an empty list — "this Bot's list is unknown" is not the same thing as "here is another Bot's list", which can be clicked and write a workspace id the current Bot does not own. On a mismatch the list is re-fetched and the panel recovers within a frame
+- Restore that Bot's last current workspace selection
 
 **State management**:
 - Use dedicated `workspaceStore` (Zustand) to manage workspace state
@@ -298,9 +298,9 @@ Step 5: Install first Agent
 
 Developer mode layers debug capabilities on top of user mode. All debug protocol details are in [10-debug-protocol.md](./10-debug-protocol.md).
 
-### 5.1 Agent Clone
+### 5.1 Bot Clone
 
-Desktop App's Agent list right-click menu provides "Clone" option (visible in developer mode):
+Desktop App's Bot list right-click menu provides "Clone" option (visible in developer mode):
 
 ```
 User right-click Agent A → Clone
@@ -329,7 +329,7 @@ Agent list refreshes; the new agent appears marked dev: true
 
 ### 5.2 Create from Scratch
 
-Agent list bottom "Create Agent" button opens the creation wizard in developer mode:
+Bot list bottom "Create Bot" button opens the creation wizard in developer mode:
 
 ```
 Step 1: Basic info — agent_id, name, description, author
@@ -372,7 +372,7 @@ The "Skills" view in the navigation bar provides editing capabilities in develop
 
 ### 5.4 Publish Wizard
 
-In developer mode, the "Publish" option in Agent list right-click menu opens the publish wizard:
+In developer mode, the "Publish" option in Bot list right-click menu opens the publish wizard:
 
 ```
 Step 1: Check — manifest integrity, SKILL.md format, prompts presence
@@ -392,8 +392,8 @@ Detailed flow in [10-debug-protocol.md](./10-debug-protocol.md) §8.
 |--------|-----------|---------|
 | Gateway connected | Normal icon | `ACowork — Connected` |
 | Gateway disconnected | Gray icon | `ACowork — Disconnected` |
-| Agent running | Blue pulse | `ACowork — 2 Agents Running` |
-| Agent executing | Green pulse | `ACowork — Working` |
+| Bot running | Blue pulse | `ACowork — 2 Bots Running` |
+| Bot executing | Green pulse | `ACowork — Working` |
 | Error | Red icon | `ACowork — Error` |
 
 ### 6.2 Tray Right-Click Menu
@@ -448,8 +448,8 @@ Health check
 | `tauri-plugin-shell` | Call external commands (acowork-sign etc. CLI tools) |
 | `tauri-plugin-store` | Persist Desktop App's own configuration (Gateway address, window state etc.) |
 | `tauri-plugin-single-instance` | Prevent multi-instance |
-| `tauri-plugin-dialog` | File picker dialog (install .agent package) |
-| `tauri-plugin-notification` | System notifications (when Agent completes long task) |
+| `tauri-plugin-dialog` | File picker dialog (install .bot package) |
+| `tauri-plugin-notification` | System notifications (when Bot completes long task) |
 
 ### 7.3 Frontend Directory Structure
 
@@ -556,13 +556,13 @@ Three hard constraints follow from "the native layer is always above the HTML":
 
 ## 8. Gateway HTTP API (New)
 
-Gateway needs to add an HTTP API layer for Desktop App and CLI. This is an independent consumer from the existing Socket API (for Agent Runtime).
+Gateway needs to add an HTTP API layer for Desktop App and CLI. This is an independent consumer from the existing Socket API (for Bot Runtime).
 
 ### 8.1 Why HTTP API is Needed
 
 | Dimension | Socket API (existing) | HTTP API (new) |
 |-----------|----------------------|----------------|
-| Consumer | Agent Runtime | Desktop App / CLI |
+| Consumer | Bot Runtime | Desktop App / CLI |
 | Transport | Unix Socket / Named Pipe | HTTP (localhost) |
 | Communication | Long connection + bidirectional push | Request/response + WebSocket streaming |
 | Purpose | Inter-process real-time communication | User interface operations |
@@ -634,7 +634,7 @@ HTTP port is configurable, default `19876`. Listens only on `127.0.0.1`, not exp
 |----------|--------|--------|
 | Desktop App and Gateway independent | Separate processes | Gateway can run independently for CLI-only users; clear responsibilities |
 | Gateway adds HTTP API | Axum HTTP | Socket API not suitable for direct WebView calls; HTTP is Desktop App / CLI standard consumer interface; consistent with existing Axum choice |
-| Layout | Left-center-right four columns | Navigation + Agent list + Chat + Results area, clear information hierarchy; developer mode reuses same layout overlaying debug panel |
+| Layout | Left-center-right four columns | Navigation + Bot list + Chat + Results area, clear information hierarchy; developer mode reuses same layout overlaying debug panel |
 | Frontend Framework | React + TypeScript | Most mature ecosystem; Tauri + React feasibility verified |
 | UI Component Library | shadcn/ui + Tailwind | No runtime dependencies, customizable, tree-shakable |
 | System tray | Close hides without exit | Standard desktop app behavior; Gateway is persistent, Desktop App as GUI frontend should also be persistent |

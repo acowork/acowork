@@ -28,7 +28,7 @@ OpenAI 自 2025 年起将 **Responses API**（`POST /v1/responses`）定位为�
 
 - ❌ 服务端会话态 `previous_response_id` / `store` / `conversation`（ACowork 自管历史）
 - ❌ 服务端内置工具（web_search / file_search / code_interpreter / computer_use）的本地执行编排
-- ❌ 音频 / shell / apply_patch / MCP 等非 agent 核心的 Responses 事件子集
+- ❌ 音频 / shell / apply_patch / MCP 等非 bot 核心的 Responses 事件子集
 
 ---
 
@@ -82,9 +82,9 @@ flowchart LR
 对 ACowork 有利的三点：
 
 1. **工具循环仍是客户端驱动**——模型产出 `function_call` item → ACowork 本地执行 → 回传 `function_call_output` → 继续，
-   与现有 agent loop 完全同构，`StreamEvent::ToolCallStart / ToolCallChunk` 可直接映射。
+   与现有 bot loop 完全同构，`StreamEvent::ToolCallStart / ToolCallChunk` 可直接映射。
 2. **无状态多轮**——每次把完整历史作为 `input` 数组发送即可，`previous_response_id` 服务端态可选、不强制。
-3. **只实现 agent 需要的子集事件**（文本 / 推理 / 函数调用 / 完成 / 失败，约 8–10 种）即可。
+3. **只实现 bot 需要的子集事件**（文本 / 推理 / 函数调用 / 完成 / 失败，约 8–10 种）即可。
 
 ---
 
@@ -94,7 +94,7 @@ flowchart LR
 
 - 复用现有「协议枚举 → 网关派生 → protobuf → router → Provider impl」管线，与 Anthropic 同模式。
 - 独立 provider 文件，**不**把两套线格式塞进 `openai.rs`（避免 CompatCache 的 key/URL 混乱，符合单一职责）。
-- 协议无关层（Provider trait / ReliableProvider / agent loop）**零改动**。
+- 协议无关层（Provider trait / ReliableProvider / bot loop）**零改动**。
 
 ### 方案 B：不新增枚举，在 `OpenAIProvider` 上加 Responses 模式开关
 
@@ -143,7 +143,7 @@ Chat Completions。正确做法是**白名单**：`openai` / `azure` / `azure-co
 | `core/acowork-runtime/src/providers/router.rs` | `match` 增加 Responses 分支 |
 | `core/acowork-runtime/src/token/counter.rs` | `estimate_image_tokens` 增加 Responses 分支（公式同 OpenAI） |
 
-**明确不需要动**：`Provider` trait、`ReliableProvider`（重试 / 429 UX 协议无关）、agent loop
+**明确不需要动**：`Provider` trait、`ReliableProvider`（重试 / 429 UX 协议无关）、bot loop
 （`loop_llm.rs` 消费 StreamEvent）、记忆 / 工具注册 / 预算 / 限流、`session_core.rs` 的组装逻辑。
 
 > 注：**CompatCache（openai.rs 的渐进降级链）不适用于 Responses provider**——它写死在 `/chat/completions`。
@@ -180,7 +180,7 @@ Chat Completions。正确做法是**白名单**：`openai` / `azure` / `azure-co
 |---|---|---|
 | 第三方兼容服务不支持 | 大量 OpenAI 兼容供应商无 `/responses` | 按 provider opt-in：白名单派生 + 自定义显式选择 |
 | 行为回归 | 官方 openai 从 chat/completions 切到 responses，用量字段 / 缓存核算不同 | 灰度 + 前端缓存族映射；必要时官方默认保持 Chat Completions |
-| SSE 事件面大 | ~40 种事件 | 只实现 agent 所需子集，其余显式失败 |
+| SSE 事件面大 | ~40 种事件 | 只实现 bot 所需子集，其余显式失败 |
 | **开放问题** | 官方 `openai` provider 默认是否切到 Responses（影响 gpt-5 全系用户）？ | **建议：默认不切，仅白名单 / 显式选择启用**，作为可回滚特性 |
 
 ---

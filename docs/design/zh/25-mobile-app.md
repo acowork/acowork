@@ -11,21 +11,21 @@ ACowork Mobile App 是基于 Tauri v2 的移动端客户端，定位为 Desktop 
 
 ### 1.1 一句话
 
-**Mobile App = IM 形态的对话控制终端**：用主流通 IM 软件（企业微信 / 钉钉）的交互范式承载"与 Agent 和同事的会话"，首版只做基础对话控制，不承担平台管理职责。
+**Mobile App = IM 形态的对话控制终端**：用主流通 IM 软件（企业微信 / 钉钉）的交互范式承载"与 Bot 和同事的会话"，首版只做基础对话控制，不承担平台管理职责。
 
 ### 1.2 与 Desktop App 的关系
 
 | 维度 | Desktop App | Mobile App |
 |------|-------------|------------|
-| 定位 | 主工作台，创建/调试/发布 Agent | 便携终端，随时收发消息 |
+| 定位 | 主工作台，创建/调试/发布 Bot | 便携终端，随时收发消息 |
 | 形态 | 左中右多栏 | 底部 Tab + 全屏层级（IM 形态） |
 | 导航 | 单一导航栏 + 左侧列表 | 每 Tab 独立导航栈 + iOS push 语义 |
-| 会话 | 一个 Agent 可**并行打开多个 Session Tab** | 一个 Agent 多个会话，**串行切换**（见 §5） |
-| Agent 管理 | 创建/安装/克隆/发布 | ❌ 不做（v1） |
+| 会话 | 一个 Bot 可**并行打开多个 Session Tab** | 一个 Bot 多个会话，**串行切换**（见 §5） |
+| Bot 管理 | 创建/安装/克隆/发布 | ❌ 不做（v1） |
 | 调试 | DevMode 协议、Git 状态条 | ❌ 不做（v1） |
 | 本地 Gateway | 内嵌/管理 Gateway 进程 | ❌ **无本地 Gateway 进程**（见 §11.1） |
 
-**关键认知**：两个 App 共享同一份服务端状态（同一批 Agent、同一批 Session、同一套权限），但**客户端状态各自独立**。Desktop 上打开的会话，手机上能继续看；手机上新建的会话，Desktop 上能看到（受权限约束）。Mobile 永远不是 Desktop 的"远程显示器"，而是一个平级终端。
+**关键认知**：两个 App 共享同一份服务端状态（同一批 Bot、同一批 Session、同一套权限），但**客户端状态各自独立**。Desktop 上打开的会话，手机上能继续看；手机上新建的会话，Desktop 上能看到（受权限约束）。Mobile 永远不是 Desktop 的"远程显示器"，而是一个平级终端。
 
 ### 1.3 Mobile App 不做的事（v1）
 
@@ -33,7 +33,7 @@ ACowork Mobile App 是基于 Tauri v2 的移动端客户端，定位为 Desktop 
 |------|------|
 | DevMode 调试协议 | 需要本地文件系统与进程级控制，移动端不具备 |
 | Git 状态条 | 依赖 workspace fs 实时监听（ADR-078），移动端无本地 workspace |
-| Agent 创建/安装/克隆/发布 | 高频低频次的开发者操作，留在桌面端 |
+| Bot 创建/安装/克隆/发布 | 高频低频次的开发者操作，留在桌面端 |
 | Provider / API Key / MCP / Embedding 管理 | 属于 Harness 职责，且涉及密钥，移动端不应持有 |
 | 富文本编辑器 | 文档编辑需要大屏与物理键盘 |
 | Harness / Extensions 导航 | 开发者概念，普通用户不需要 |
@@ -117,16 +117,16 @@ Desktop 的 AgentList 与 UserList 是两个独立分组。移动端合并成**�
 每行展示：头像（带 working 状态点）、名称、在线状态、**最近会话摘要**、时间。
 
 头像角点只有一个语义：**working**（`AgentSummary.status === 'busy'` 时亮绿点，idle 时不显示任何点）。
-没有已读/未读角标——v1 无推送通道，本地未读计数在 agent 维度没有可靠语义，
+没有已读/未读角标——v1 无推送通道，本地未读计数在 bot 维度没有可靠语义，
 与其亮一个会骗人的点，不如只保留 working 这一个确定性信号（与 desktop 侧边栏一致）。
 
-**会话摘要取自"最近活动会话的最后一条消息"**，而非 Agent 维度的固定文案。这是 IM 语义的必然要求：用户关心的是"上次聊到哪了"。
+**会话摘要取自"最近活动会话的最后一条消息"**，而非 Bot 维度的固定文案。这是 IM 语义的必然要求：用户关心的是"上次聊到哪了"。
 
 ## 3. 手势与导航交互
 
 | 手势 | 作用域 | 行为 |
 |------|--------|------|
-| 左滑 → | 聊天详情页 | 打开 Agent 设置抽屉（Desktop RightPanel） |
+| 左滑 → | 聊天详情页 | 打开 Bot 设置抽屉（Desktop RightPanel） |
 | 右滑 ← | 二级页 | 返回上一级（逐级 pop） |
 | 右滑 ← | 一级页 | **无动作** |
 | 垂直滑动 | 任意 | 让位给页面滚动（不触发导航） |
@@ -166,19 +166,19 @@ Desktop 的 AgentList 与 UserList 是两个独立分组。移动端合并成**�
 └─────────────────────────────────┘
 ```
 
-### 4.2 Agent 设置抽屉（左滑唤出）
+### 4.2 Bot 设置抽屉（左滑唤出）
 
 对应 Desktop 的 RightPanel，六个分区：状态 / 工作区 / 记忆 / 工具 / 配置 / 会话。
 
 移动端改用**原生感组件**（inset 分组列表、Switch、Segmented、Stepper、select 下拉、Action Sheet），而不是缩放 Desktop 控件。
 
-**工作区分区只做 Add to Chat，不做文件预览**。移动端没有 Monaco，文件内容由 Agent 在对话中读取。这条边界同时满足 [ADR-009 §5](../../adr/zh/ADR-009-gateway-workspace-isolation.md) 的 Gateway 工作区隔离原则——移动端不直连文件系统，只走 Gateway 反代。
+**工作区分区只做 Add to Chat，不做文件预览**。移动端没有 Monaco，文件内容由 Bot 在对话中读取。这条边界同时满足 [ADR-009 §5](../../adr/zh/ADR-009-gateway-workspace-isolation.md) 的 Gateway 工作区隔离原则——移动端不直连文件系统，只走 Gateway 反代。
 
 ### 4.3 消息形态
 
 | 元素 | 移动端处理 |
 |------|-----------|
-| 用户 / Agent 消息气泡 | 保留，支持 Markdown 渲染 |
+| 用户 / Bot 消息气泡 | 保留，支持 Markdown 渲染 |
 | 工具调用 | 折叠卡片，默认收起（屏幕窄）；数据来自 `GET /messages` 重载，非事件流 |
 | 审批卡 | 保留允许/拒绝按钮（`POST .../approval`）；卡面详情按通道分级——WS 通道完整（工具/风险/理由），轮询通道通用卡（§8.6） |
 | AskQuestion 卡片 | relay/WS 通道渲染问答卡（`ask_question` 事件 + `POST …/answer`）；轮询通道不可得，降级提示"请在桌面端处理"（§8.6） |
@@ -189,11 +189,11 @@ Desktop 的 AgentList 与 UserList 是两个独立分组。移动端合并成**�
 
 ## 5. 多会话模型（核心设计）
 
-> 交互稿初版曾建议"一个 Agent 一个活动会话"，**已否决**。Agent 多会话是业务事实，Mobile 只是多个操作终端之一；不支持多会话会丧失可用性。
+> 交互稿初版曾建议"一个 Bot 一个活动会话"，**已否决**。Bot 多会话是业务事实，Mobile 只是多个操作终端之一；不支持多会话会丧失可用性。
 
 ### 5.1 为什么不能只保留一个会话
 
-一个 Agent 同时被多个话题驱动是常态：架构师一边在写 ADR、一边在 review 别人的 PR、一边在调试线上问题。Desktop 用**并行 Session Tab**承载。移动端屏幕只有 390pt 宽，放不下 N 个并排标签——但这**不构成"不需要多会话"的理由**，只构成"不能用标签条承载"的理由。
+一个 Bot 同时被多个话题驱动是常态：架构师一边在写 ADR、一边在 review 别人的 PR、一边在调试线上问题。Desktop 用**并行 Session Tab**承载。移动端屏幕只有 390pt 宽，放不下 N 个并排标签——但这**不构成"不需要多会话"的理由**，只构成"不能用标签条承载"的理由。
 
 ### 5.2 承载形式：导航栏标题 = 会话切换器
 
@@ -446,7 +446,7 @@ refresh_token         ── 仅用于 POST /api/auth/refresh ───┤
 | client_id | `user:{sub}:mobile:{device_uuid}`。`device_uuid` 首启生成并持久化（与 token 同一存储）；`{sub}` = access token 的 `sub` 声明（**user_id UUID**，非登录名）——broker 交叉验证，冒充他人身份直接断连（无 CONNACK 的 close）。**会话通道与 presence 通道是两条连接，client_id 必须不同**：MQTT 3.1.1 按 client_id 认会话，重复 CONNECT 会接管（踢掉）另一条；presence 在设备段加 `-presence` 后缀（`remote_client_shape` 禁止第四段冒号，故不能用 `:presence`） |
 | CONNECT 认证 | username=`{sub}`（信息性字段，broker 以 client_id+password 为准），password=**当前 access token**。MQTT 3.1.1 不在活连接内重认证：token 旋转（15min）后由重连携带新密码——对齐 Desktop `MqttCredentials::refresher` 语义：每次重连前向 authStore 取最新 token，过期则先触发单飞刷新 |
 | 订阅集（**只订当前前台会话**） | `acowork/agents/{id}/sessions/{sid}/state`（retained：status + message_count，等价轮询快照的推送版）<br>`…/messages/done`、`…/messages/error`、`…/messages/stopped`<br>`…/messages/tool_approval_needed`（retained QoS1，含工具详情）<br>`…/messages/ask_question`（retained QoS1，`question_json`） |
-| presence 订阅（**全局第二条连接**） | `acowork/agents/+/status`（QoS1）——一条通配过滤器覆盖整个 agent fleet。payload 是 `DataEnvelope{agent_status = 9}`（`AgentStatus`：online / instance_id / state / detail），映射与 HTTP 目录的 `alive`/`lifecycle` **同一词表**，两者不会读出两个互斥结论（`src/lib/presence.ts`）。该话题 Retained + 心跳 + LWT（`online=false`），因此刚订阅即回放每个 agent 的最近判定，断线期间的迁移不会丢。生命周期：登录（phase=ready）建、登出/过期关；**它没有降级轮询**（目录轮询本就带 presence），桥不可用时列表停在最后一次轮询结果 |
+| presence 订阅（**全局第二条连接**） | `acowork/agents/+/status`（QoS1）——一条通配过滤器覆盖整个 bot fleet。payload 是 `DataEnvelope{agent_status = 9}`（`AgentStatus`：online / instance_id / state / detail），映射与 HTTP 目录的 `alive`/`lifecycle` **同一词表**，两者不会读出两个互斥结论（`src/lib/presence.ts`）。该话题 Retained + 心跳 + LWT（`online=false`），因此刚订阅即回放每个 bot 的最近判定，断线期间的迁移不会丢。生命周期：登录（phase=ready）建、登出/过期关；**它没有降级轮询**（目录轮询本就带 presence），桥不可用时列表停在最后一次轮询结果 |
 | 用户聊天唤醒订阅（**同一条后台连接、同一个 SUBSCRIBE 包**） | `acowork/users/{me}/chat/changed`（QoS1，**空载荷**，non-retained）——`acowork-user` 在每次 send / read 落库后敲的门铃（[ADR-076 §决策 8](../../adr/zh/ADR-076-multi-user-account-system.md)）。门铃刻意不说明"哪条会话、和谁"，因为内嵌 broker 没有订阅级 ACL，载荷一旦写清就是把社交图谱发布出去。反应只有一条：回 HTTP 重读（§8.8）。两个过滤器共用**一个** SUBSCRIBE 包——packet id 空间按连接计，两次往返会留下"presence 订上了、门铃静默失联"且无人记录的状态。`chatTopic()` 每次 CONNECT 重新派生，账号换手不需要拆连接 |
 | 后台通道按**过滤器**分别授权 | SUBACK 返回码逐个对齐过滤器顺序，`0x80` 是 MQTT 3.1.1 唯一的失败码。"presence granted + chat `0x80`"是合法组合（未启用账号体系的 Gateway 只拒 mailbox）：presence 半边成功即连接算活着，chat 半边失败即上报 `onChatChannel(false)`，store 据此武装 5s 兜底轮询（§8.8），而不是让线程静默停在旧数据。状态**只在翻转时上报**——每次重连都重复上报会把兜底定时器反复停掉再武装 |
 | **不订** | `messages/chunk`、`tool_call`、`tool_result`、`reasoning_*` 等一切增量/过程事件——"只显最终结果"在订阅面就兑现，不是收到再丢 |
@@ -499,7 +499,7 @@ refresh_token         ── 仅用于 POST /api/auth/refresh ───┤
 ### 8.4 消息渲染：只显最终结果（两通道共同）
 
 - 任一通道发现 `meta.message_count` 变化（或收到 `done`）→ `GET /api/agents/{id}/sessions/{sid}/messages?tail=N` 重载尾部，整段渲染（Markdown、工具卡片折叠态、代码块横滚——§4.3 的静态形态全部保留）。
-- **不做增量拼接、不做打字机效果**。"Agent 正在工作"由状态指示承担（导航栏副标题 `工作中…` + 输入区上方进度行），内容到达即完整呈现。
+- **不做增量拼接、不做打字机效果**。"Bot 正在工作"由状态指示承担（导航栏副标题 `工作中…` + 输入区上方进度行），内容到达即完整呈现。
 - 分页语义沿用现有端点：`offset/limit/tail`，首屏 tail=50。
 
 ### 8.5 列表状态的新鲜度
@@ -507,16 +507,16 @@ refresh_token         ── 仅用于 POST /api/auth/refresh ───┤
 | 数据 | 刷新时机 |
 |------|---------|
 | 会话流列表（§2.3） | 启动后一次、下拉刷新、回前台、会话增删操作后 |
-| working 绿点 | 跟随 agent 目录刷新（启动一次 + 回前台 + 下拉刷新 + 会话增删后）。**不做**已读/未读计数：无推送时 agent 维度的"未读"无法可靠判定，v1 刻意砍掉 |
+| working 绿点 | 跟随 bot 目录刷新（启动一次 + 回前台 + 下拉刷新 + 会话增删后）。**不做**已读/未读计数：无推送时 bot 维度的"未读"无法可靠判定，v1 刻意砍掉 |
 | （已删除）已读/未读角标 | v1 曾按 `message_count` 本地计数做未读点，实测中红绿点反复跳变反而干扰判读，且与 desktop 语义不一致，故整体移除 |
-| Agent 在线状态 | presence 连接推送（§8.1）为主：秒级翻转在线/离线/异常；目录轮询（启动一次 + 回前台 + 下拉刷新）仍是底稿与竞态纠偏——一次晚到的 poll 可能把推送刚点亮的行改回离线，下一条心跳/判定即复位 |
+| Bot 在线状态 | presence 连接推送（§8.1）为主：秒级翻转在线/离线/异常；目录轮询（启动一次 + 回前台 + 下拉刷新）仍是底稿与竞态纠偏——一次晚到的 poll 可能把推送刚点亮的行改回离线，下一条心跳/判定即复位 |
 
 ### 8.6 通道差异矩阵（如实记录，防止"轮询版语义"固化成全局真相）
 
 | 能力 | WS 通道（relay 与 LAN） | 轮询通道（降级 / 无桥） |
 |------|-----------------|---------------------------|
 | 状态行 | `state` 推送 | 2s 快照 |
-| 审批卡 | 完整详情（工具名/风险/理由/超时） | 通用卡："Agent 请求执行工具，请在桌面端查看细节" |
+| 审批卡 | 完整详情（工具名/风险/理由/超时） | 通用卡："Bot 请求执行工具，请在桌面端查看细节" |
 | AskQuestion | 问答卡 + `POST …/answer` | 降级提示"请在桌面端处理" |
 | 决策/回答回流 | 均走 HTTP（两通道一致） | 同左 |
 | 延迟 | 亚秒 | ≤2s |
@@ -524,13 +524,13 @@ refresh_token         ── 仅用于 POST /api/auth/refresh ───┤
 ### 8.7 已知缺口（不阻塞 v1，上线外网前须评估）
 
 - **per-user 订阅授权**：远程 ACL 目前是 `sessions/+/messages/#` 通配（[ADR-076 §5.5](../../adr/zh/ADR-076-multi-user-account-system.md)），订到他人会话事件在协议上可行。mobile 的订阅纪律（只订前台可读会话）是客户端行为，不是授权。Desktop 同水同深，非 mobile 特有；补 topic-level 授权是后端事项，列入 v1.1 协同项。
-- **presence 通配同样无授权**：`agents/+/status` 在严格监听器上同样没有 topic ACL，因此任何一个有效用户 token 能看到该 Gateway 上全量 agent 的生命周期判定（在线/离线/失败 + 启动失败理由）。这与 Desktop 本地可见面平水；若要把 agent 存在性按所有权过滤，属同一项 topic-level 授权工作。
+- **presence 通配同样无授权**：`agents/+/status` 在严格监听器上同样没有 topic ACL，因此任何一个有效用户 token 能看到该 Gateway 上全量 bot 的生命周期判定（在线/离线/失败 + 启动失败理由）。这与 Desktop 本地可见面平水；若要把 bot 存在性按所有权过滤，属同一项 topic-level 授权工作。
 - **流量风暴防线**：宽订阅防线在"客户端只订前台会话"这一纪律上；中继侧连接级限流（24 §5.3）承担异常行为兜底。
 - **聊天门铃同样没有订阅级授权**：`acowork/users/{uid}/chat/changed` 按账号命名，但 broker 无 topic ACL，所以任何有效 token 都能订阅他人账号的门铃。载荷为空，内容不泄露，泄露的是"该账号正在活跃"这一存在性事实。客户端按 `user_id` 过滤是行为纪律，不是授权；补 topic-level 授权与上两条同批。
 
 ### 8.8 用户↔用户聊天：唤醒与不位移刷新（Desktop 同规则）
 
-用户聊天不是 agent 会话：没有"进行中的回合"可轮询，内容何时出现完全由对端决定，所以新鲜度只能靠唤醒 + 重读。
+用户聊天不是 bot 会话：没有"进行中的回合"可轮询，内容何时出现完全由对端决定，所以新鲜度只能靠唤醒 + 重读。
 规则两端共用（Desktop `src/stores/userChatStore.ts`、Mobile `src/stores/userChatStore.ts`）——**两端在同一份服务端数据上必须读出同一个窗口，任何一端单独改动都是缺陷**。
 
 | 规则 | 值 | 为什么 |
@@ -619,7 +619,7 @@ Desktop 内嵌/管理本地 Gateway 进程，因此设置里有"启动/停止/�
 |------|------|------|
 | 形态 | IM 风格，非 Desktop 三栏直译 | 移动端是"随时收发消息"，不是"管理一堆面板" |
 | 底部 Tab 数量 | 4（无 Harness/Extensions） | 开发者概念不进普通用户导航 |
-| 会话列表 | Agent + 联系人合并为单一会话流 | IM 的心智模型是"找人聊天"，不是"选 Agent" |
+| 会话列表 | Bot + 联系人合并为单一会话流 | IM 的心智模型是"找人聊天"，不是"选 Bot" |
 | 导航栈 | 每 Tab 独立栈 | 切 Tab 保留上下文，符合 IM 习惯 |
 | 二级页 TabBar | 隐藏 | 避免两级导航并存 |
 | 多会话承载 | 导航栏标题 + Action Sheet | 窄屏放不下并排标签条 |
@@ -628,7 +628,7 @@ Desktop 内嵌/管理本地 Gateway 进程，因此设置里有"启动/停止/�
 | 只读态 textarea | 不渲染 | placeholder 假装可输入是更差的体验 |
 | 只读态可见性图标 | 禁用而非隐藏 | 观众需要知道自己在看什么 |
 | 新建会话可见性 | 默认 Private | 对齐 ADR-076 创建路径 |
-| 工作区 | 只做 Add to Chat，无预览 | 无 Monaco；且文件读取由 Agent 完成更自然 |
+| 工作区 | 只做 Add to Chat，无预览 | 无 Monaco；且文件读取由 Bot 完成更自然 |
 | 看板 | 降级为 Chip 筛选 | 窄屏拖拽不可用 |
 | Gateway 进程管理 | v1 禁用 | 移动端无本地 Gateway 进程 |
 | 前端代码复用 | 仅复用协议层类型 | IA 与组件完全不同，共享会积累条件分支 |

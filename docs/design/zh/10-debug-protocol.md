@@ -4,7 +4,7 @@
 
 ---
 
-Agent Runtime 的 DevMode 通过 Debug Protocol 与 Desktop App 通信。Debug Protocol 在 ADR-048 之后与生产 IPC 通道完全对齐：RPC 走 HTTP REST、事件走 MQTT pub/sub（与 ADR-033 的生产通道复用同一组传输），不再使用 JSON-RPC over WebSocket。
+Bot Runtime 的 DevMode 通过 Debug Protocol 与 Desktop App 通信。Debug Protocol 在 ADR-048 之后与生产 IPC 通道完全对齐：RPC 走 HTTP REST、事件走 MQTT pub/sub（与 ADR-033 的生产通道复用同一组传输），不再使用 JSON-RPC over WebSocket。
 
 Desktop App 的开发者模式完全依赖本协议，UI 层设计见 [14-desktop-app.md](./14-desktop-app.md)。
 
@@ -34,26 +34,26 @@ Desktop App (Tauri)              Agent Runtime (DevMode)
        │  └─────────────────┘           │
 ```
 
-Desktop App 与 Agent Runtime 之间有两条独立通道：
+Desktop App 与 Bot Runtime 之间有两条独立通道：
 - **Debug Protocol**（HTTP RPC + MQTT events，与生产 IPC 同构）：开发模式专用，控制执行流、编辑状态、热加载。RPC 走 Gateway `/api/agents/{id}/debug/{*rest}` 反代到 Runtime `/api/debug/{path}`；事件走 MQTT topic `acowork/agents/{id}/debug/events/{type}`
-- **Gateway Service API**：生产通道，Agent 仍通过 Gateway 获取 Key、收发 Intent 等
+- **Gateway Service API**：生产通道，Bot 仍通过 Gateway 获取 Key、收发 Intent 等
 
 ### 1.1 DevMode 启动方式（v3.1 起新增运行时启用）
 
 DevMode 现在支持**两种**激活方式：
 
 1. **启动时激活**（`--dev-mode` 启动参数）
-   - Gateway 在 spawn Agent 时传入 `--dev-mode` 标志，Runtime 在 Phase C 通过共享 helper `enable_debug_mode_and_fill_slot` 完成 per-session controller + MQTT event publisher + Debug service slot 的填充。
+   - Gateway 在 spawn Bot 时传入 `--dev-mode` 标志，Runtime 在 Phase C 通过共享 helper `enable_debug_mode_and_fill_slot` 完成 per-session controller + MQTT event publisher + Debug service slot 的填充。
    - 启动后第一次 `/api/debug/*` 请求即有 service 响应。
    - 适用于：已知要调试的开发场景，签名/元数据 `dev_mode: true`、`debug_state: enabled`。
 
 2. **运行时激活**（`POST /api/agents/{id}/debug/enable`，v3.1 新增）
-   - 桌面侧：Desktop App 在 Debug 面板里检测到「Agent 不在调试模式」时显示 **「启用调试」按钮**（`ResultsPanel.tsx`，见 ADR-048 follow-up）。
+   - 桌面侧：Desktop App 在 Debug 面板里检测到「Bot 不在调试模式」时显示 **「启用调试」按钮**（`ResultsPanel.tsx`，见 ADR-048 follow-up）。
    - 调用链：`enable_agent_debug`（Tauri command）→ Gateway `POST /api/agents/{id}/debug/enable`（透传）→ Runtime `POST /api/debug/enable` → `enable_debug_mode_and_fill_slot`。
    - 调用是**幂等**的：DevMode 已开启时第二次调用返回 `already_enabled: true`。
    - Gateway `proxy_debug_rpc` 钩子在 2xx 响应时同步把 `running_agents[id].debug_state` 翻为 `Enabled`，下次 `GET /api/agents` 即返回 `debug_state: "enabled"`，Desktop 的 `agentStore` 触发 React 重渲染并自动连接到 debug tab。
-   - **不需要重启 Agent，不需要重启 Gateway**，不需要重启 Runtime HTTP server——同一进程的 SessionManager、HTTP server、MQTT client slot 全部沿用。
-   - 适用于：Agent 已启动后才意识到需要调试，或用户希望零停机开启调试。
+   - **不需要重启 Bot，不需要重启 Gateway**，不需要重启 Runtime HTTP server——同一进程的 SessionManager、HTTP server、MQTT client slot 全部沿用。
+   - 适用于：Bot 已启动后才意识到需要调试，或用户希望零停机开启调试。
 
 **已废弃**：`POST /api/agents/{id}/restart-debug`（完整进程重启进入调试模式）已被运行时启用替代。Gateway 端点仍保留可用以作操作逃生口，Desktop 端右键菜单「Restart in Debug」已移除（`AgentList.tsx`）。计划在下一个 minor 版本后完全下线——见 ADR-048 follow-up。
 
@@ -91,7 +91,7 @@ push_debug_mode_to_existing_sessions
 ```
 
 - `AgentCore::set_debug_pending_injection`：把通道同时转发给 observer slot（Dev 场景保留）**并**存入 AgentCore 字段（真正的持有者，对 `Production` 也有效）。
-- `AgentCore::take_pending_debug_handles()`：`try_lock` + `take`，不阻塞 agent loop；锁被 writer 持有时返回 `None` 待下一 iteration 重试。
+- `AgentCore::take_pending_debug_handles()`：`try_lock` + `take`，不阻塞 bot loop；锁被 writer 持有时返回 `None` 待下一 iteration 重试。
 - **disable 安全性**：`disable_debug_mode` 会把 `session_handle.pending_debug_handles` 清为 `None`（session_manager.rs）——由于 AgentCore 与该 handle 共享**同一个 Arc**，disable 后任何在途 handle 都无法被后续 iteration 应用，与 teardown 语义严格一致。
 - **clone 隔离**：`AgentCore::clone` 不携带 pending 通道（传 `None`）——它是 per-session 状态，由每个 `SessionTask::new` 重新绑定，模板/sibling session 不得继承。
 
@@ -105,7 +105,7 @@ push_debug_mode_to_existing_sessions
 | macOS | 同上 | 同上 | 同上 |
 | Windows | 同上 | 同上 | 同上 |
 
-HTTP RPC 与 MQTT 共享 Gateway 现有端口（HTTP `:19876`、MQTT `:19875`）——Debug Protocol **不再占用独立端口**。Agent Runtime 以 DevMode 启动时，在 localhost HTTP server 上注册 `/api/debug/*` 路由并 spawn MQTT 调试事件 publisher。Desktop App 通过 Gateway 反代访问时，自动获得 `localhost-only` 网关 + ACL 的多用户隔离（详见 ADR-040 / ADR-048）。
+HTTP RPC 与 MQTT 共享 Gateway 现有端口（HTTP `:19876`、MQTT `:19875`）——Debug Protocol **不再占用独立端口**。Bot Runtime 以 DevMode 启动时，在 localhost HTTP server 上注册 `/api/debug/*` 路由并 spawn MQTT 调试事件 publisher。Desktop App 通过 Gateway 反代访问时，自动获得 `localhost-only` 网关 + ACL 的多用户隔离（详见 ADR-040 / ADR-048）。
 
 ## 3. 协议定义
 
@@ -259,7 +259,7 @@ result: { "breakpoints": [...] }
 
 ### 3.4 上下文快照与检查（Context Snapshot & Inspection）
 
-DevMode 下，Agent Runtime 在每轮迭代的 `BuildContext` 阶段完成后，自动捕获**上下文构建结果**。调试面板按轮次将其树状展开。
+DevMode 下，Bot Runtime 在每轮迭代的 `BuildContext` 阶段完成后，自动捕获**上下文构建结果**。调试面板按轮次将其树状展开。
 
 > **ADR-054（2026-09）**：section 从硬编码 7 字段改为**内容寻址列表**（`Vec<NamedSection>`），并按 `ContextBuilder::build()` 的实际注入顺序产出。新增 3 个此前被合并/丢失的 section（`workspace_prompt_file` / `todo_context` / `ambiguous_confirmation_hint`）与 `messages`（对话消息，懒加载）。前端不再硬编码 section 集合——**渲染 snapshot 实际产出的 sections**，未启用的 section 自然不出现。
 
@@ -269,11 +269,11 @@ DevMode 下，Agent Runtime 在每轮迭代的 `BuildContext` 阶段完成后，
 | `identity_context` | 用户身份字段 | 检查身份注入 |
 | `workspace_context` | Workspace 自格式化上下文 | 验证 workspace 注入 |
 | `retrieved_memory` | SQLite 记忆层 检索的记忆节点 | 验证记忆检索质量 |
-| `ambiguous_confirmation_hint` | P3-4 冲突确认提示（≥3 个 pending ambiguous conflict 时注入） | 排查"Agent 为何突然问消歧问题" |
+| `ambiguous_confirmation_hint` | P3-4 冲突确认提示（≥3 个 pending ambiguous conflict 时注入） | 排查"Bot 为何突然问消歧问题" |
 | `skill_instructions` | 加载的 SKILL.md 内容 | 调试 Skill 行为 |
-| `todo_context` | Agent 内部 active task list | 排查"在错误 todo 上循环" |
+| `todo_context` | Bot 内部 active task list | 排查"在错误 todo 上循环" |
 | `environment` | 平台环境信息（override 或自动检测） | 检查环境注入 |
-| `workspace_prompt_file` | CLAUDE.md / AGENTS.md 内容（独立呈现） | 区分"agent 自带 prompt"与"workspace 配置" |
+| `workspace_prompt_file` | CLAUDE.md / AGENTS.md 内容（独立呈现） | 区分"bot 自带 prompt"与"workspace 配置" |
 | `tool_definitions` | 可用工具及参数 Schema | 验证工具注册、修复 Schema 错误 |
 | `messages` | 构建时点的完整对话历史（元数据在快照，**内容懒加载**） | 排查"LLM 实际看到了什么" |
 
@@ -430,7 +430,7 @@ params: {
 
 切换流程：
 1. Desktop App 发送 `debugger.switchProvider`
-2. Agent Runtime 更新 LLM Client 的当前 provider 配置
+2. Bot Runtime 更新 LLM Client 的当前 provider 配置
 3. 如果需要新 Key → 通过 Gateway KeyRelease 获取（如果 Vault 中有）
 4. 如果是本地 Provider (ollama) → 直连，无需 Key
 5. 下一次 LLM 调用使用新 provider
@@ -535,7 +535,7 @@ payload (DebugContextBuiltEvent):
 
 ## 4. 消息快照机制
 
-Agent Runtime 在 DevMode 下的每一轮迭代结束，自动创建一个轻量快照：
+Bot Runtime 在 DevMode 下的每一轮迭代结束，自动创建一个轻量快照：
 
 ```rust
 struct ConversationSnapshot {
@@ -576,7 +576,7 @@ messages: [msg0, msg1, msg2, msg3, msg4, msg5]
 {"type":"llm_response","content":"北京今天25度，晴天","usage":{"prompt_tokens":200,"completion_tokens":20},"iteration":1}
 ```
 
-录制文件保存在 Agent 工作区的 `recordings/` 目录下。
+录制文件保存在 Bot 工作区的 `recordings/` 目录下。
 
 ### 5.1 回放模式
 
@@ -607,7 +607,7 @@ messages: [msg0, msg1, msg2, msg3, msg4, msg5]
 
 ## 6. DevMode vs 生产模式
 
-Agent Runtime 的 DevMode 是生产模式的**超集**：
+Bot Runtime 的 DevMode 是生产模式的**超集**：
 
 | 维度 | DevMode | 生产模式 |
 |------|---------|---------|
@@ -622,7 +622,7 @@ Agent Runtime 的 DevMode 是生产模式的**超集**：
 | 消息编辑 | 支持（`debugger.editMessage`） | 不支持 |
 | 消息回滚 | 支持（`debugger.rollback`） | 不支持 |
 
-生产模式下 Agent Runtime 与 03-agent-runtime.md 设计完全一致。DevMode 的复杂度全部封装在 Agent Runtime 和 Desktop App 内部，Gateway 不需要任何修改。
+生产模式下 Bot Runtime 与 03-agent-runtime.md 设计完全一致。DevMode 的复杂度全部封装在 Bot Runtime 和 Desktop App 内部，Gateway 不需要任何修改。
 
 DevMode 启动方式（Gateway 侧，v3.1 起推荐运行时启用）：
 
@@ -631,11 +631,11 @@ DevMode 启动方式（Gateway 侧，v3.1 起推荐运行时启用）：
 agent-runtime /path/to/agent --endpoint pipe://agent-gateway --agent-id com.example.weather-dev --dev-mode
 ```
 
-或者在 Agent 已启动后由 Desktop App 通过 `POST /api/agents/{id}/debug/enable` 运行时启用——见 §1.1。**推荐**第二种方式，因为不需要重启 Agent、不打断 session 状态；第一种方式仅保留用于 CLI / CI 场景下的「以调试模式启动」测试。
+或者在 Bot 已启动后由 Desktop App 通过 `POST /api/agents/{id}/debug/enable` 运行时启用——见 §1.1。**推荐**第二种方式，因为不需要重启 Bot、不打断 session 状态；第一种方式仅保留用于 CLI / CI 场景下的「以调试模式启动」测试。
 
-## 7. Agent 克隆协议
+## 7. Bot 克隆协议
 
-Agent 克隆通过 Gateway HTTP API 执行（Desktop App 调用，Gateway 执行），不通过 Debug Protocol。定义如下：
+Bot 克隆通过 Gateway HTTP API 执行（Desktop App 调用，Gateway 执行），不通过 Debug Protocol。定义如下：
 
 ### 7.1 克隆请求
 
@@ -692,12 +692,12 @@ Gateway → Node 控制平面（克隆是 node-local 的，ADR-055 §6.6 L2-5）
 
 ### 7.4 克隆限制
 
-- 克隆体与源 Agent 独立，后续源 Agent 更新不会同步
+- 克隆体与源 Bot 独立，后续源 Bot 更新不会同步
 - 完整克隆的 SQLite 记忆层 快照是克隆时刻的副本，之后双方各自演化
 
 ## 8. 发布流程
 
-调试完成的 Agent 从开发态转为发布态，通过 Desktop App 的发布向导执行。
+调试完成的 Bot 从开发态转为发布态，通过 Desktop App 的发布向导执行。
 
 ### 8.1 发布步骤
 
@@ -767,6 +767,6 @@ body: { "package_path": "...", "export_to": "/user/choosen/path" }
 | DevMode 启动参数 | `--dev-mode` CLI flag | Gateway 通过启动参数控制，Runtime 侧零配置变更 |
 | DevMode 是超集 | 不改变生产逻辑 | 生产模式下代码路径完全不变；DevMode 仅在检测到 flag 后初始化调试组件 |
 | 端口默认值 | 19877（ADR-048 后不再占用） | 可配置，但默认值应避免与常见服务冲突；ADR-048 后 Debug RPC 走 Runtime localhost HTTP 随机端口 + Gateway 反代，MQTT 事件复用 `:19875`，不再监听独立 Debug 端口 |
-| Agent 克隆走 Gateway API | 不走 Debug Protocol | 克隆是 Gateway 侧的文件操作，与 Agent Runtime 无关 |
-| 调试中会话的 DevMode 入口 | Agent 克隆 + 克隆体 `--dev-mode` 启动 | 不采用运行时动态切换 DevMode；克隆体隔离数据，原 Agent 不受影响 |
+| Bot 克隆走 Gateway API | 不走 Debug Protocol | 克隆是 Gateway 侧的文件操作，与 Bot Runtime 无关 |
+| 调试中会话的 DevMode 入口 | Bot 克隆 + 克隆体 `--dev-mode` 启动 | 不采用运行时动态切换 DevMode；克隆体隔离数据，原 Bot 不受影响 |
 | 克隆体 conversations 目录 | full 模式复制当前 session JSONL | 支持"聊天到一半开启调试"场景，克隆体恢复对话状态 |

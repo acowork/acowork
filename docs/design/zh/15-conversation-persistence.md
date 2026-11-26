@@ -2,7 +2,7 @@
 
 > 版本：v3.13 | 更新日期：2026-05-28
 
-> 本文档定义 ACowork Agent 的对话持久化架构，采用"原始文件 + 提炼记忆"双层设计。原始对话以 JSONL 格式按 session 存储，用于界面渲染和历史回放；Episode 存储从对话提炼的情景记忆摘要，服务于检索和关联扩散。
+> 本文档定义 ACowork Bot 的对话持久化架构，采用"原始文件 + 提炼记忆"双层设计。原始对话以 JSONL 格式按 session 存储，用于界面渲染和历史回放；Episode 存储从对话提炼的情景记忆摘要，服务于检索和关联扩散。
 >
 > **存储位置更正（ADR-082 / ADR-101）**：v3.10 引入的 "SQLite 记忆层 `private.sqlite`" 已被后续 ADR 取代——`private.sqlite` 现在只承载 **会话元数据与对话索引**（[ADR-082](../../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)），记忆节点本身迁至独立的记忆服务 `memory.db`（[ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)）。本文 §0.2 架构图已按新布局更新；下文其余章节描述的是 v3.13 时期的设计，内存管理、检索与提炼管线的实现细节以 `05-memory.md` 与 ADR 为准。
 >
@@ -10,7 +10,7 @@
 
 **交叉引用**：
 - Session Actor 架构：本文档 §1.7
-- Agent 运行时主循环：`03-agent-runtime.md` §2
+- Bot 运行时主循环：`03-agent-runtime.md` §2
 - Session IPC 消息格式：`06-communication.md` §1.5
 - Episode 提炼触发点：`03-agent-runtime.md` §2（主循环图 §②.5 LLM 摘要时 和 §⑦ Session 结束时）
 - Token 预算管理策略：本文档 §1.8
@@ -24,9 +24,9 @@
 
 ### 0.1 问题背景
 
-当前 ACowork Agent 的对话存在以下问题：
+当前 ACowork Bot 的对话存在以下问题：
 
-1. **切换 Agent 后聊天记录丢失**：对话历史仅存在于 Runtime 进程内存（`Vec<Message>`），进程退出即消失
+1. **切换 Bot 后聊天记录丢失**：对话历史仅存在于 Runtime 进程内存（`Vec<Message>`），进程退出即消失
 2. **记忆链条断裂**：MemoryManager.record() 将 user_message 和 assistant_response 合并为一个 Episode，content 存储原始对话全文，导致 记忆层 SQLite 膨胀、检索噪声大
 3. **对话恢复不一致**：Gateway conversations/latest API 从 Episode 读取，但 Episode 经过压缩/提炼，用户看到的"历史消息"与实际对话内容不一致
 4. **缺乏 Session 管理**：Runtime 启动时无 session_id 生成逻辑，无法区分不同时间段的对话
@@ -65,10 +65,10 @@
 
 | 目标         | 衡量标准                                                                 |
 | ------------ | ------------------------------------------------------------------------ |
-| 对话不丢失   | 切换 Agent 后回来，聊天记录完整恢复                                      |
+| 对话不丢失   | 切换 Bot 后回来，聊天记录完整恢复                                      |
 | 所见即所存   | 历史消息与当时对话内容完全一致（含 tool_call、think）                    |
 | 记忆可检索   | 记忆检索返回语义相关的情景摘要，而非原始对话噪声                      |
-| 数据隔离安全 | Agent 打包分享时默认排除用户私有数据，用户可通过 checklist 自选包含      |
+| 数据隔离安全 | Bot 打包分享时默认排除用户私有数据，用户可通过 checklist 自选包含      |
 | 实现低成本   | Phase 1 使用 LLM 提取 Episode 摘要，自动选择 cost 最低的可用模型控制成本 |
 
 ---
@@ -149,10 +149,10 @@
 | ------ | ---------------------------------------------------------- |
 | 可排序 | timestamp 前缀保证按时间自然排序，文件名即按时间排序       |
 | 无冲突 | short_uuid 提供 42 亿种组合，同一天内创建多 session 不冲突 |
-| 简洁   | 无需 agent_id 前缀，因为每个 Agent 有物理隔离的独立工作区  |
+| 简洁   | 无需 agent_id 前缀，因为每个 Bot 有物理隔离的独立工作区  |
 | 跨平台 | 仅含字母、数字、下划线，兼容所有文件系统                   |
 
-**为什么不需要 agent_id 前缀：** 每个 Agent 拥有独立的 `conversations/` 目录（物理隔离），session_id 仅在 Agent 工作区内需要唯一，无需跨 Agent 标识。去掉前缀后文件名更短、更易读。
+**为什么不需要 agent_id 前缀：** 每个 Bot 拥有独立的 `conversations/` 目录（物理隔离），session_id 仅在 Bot 工作区内需要唯一，无需跨 Bot 标识。去掉前缀后文件名更短、更易读。
 
 **恢复 session 的 ID 规则：**
 
@@ -413,7 +413,7 @@ pub struct AgentLoop {
 
 ### 1.5 多 Session 管理
 
-同一 Agent 可以有多个历史 session，但**同一时刻只有一个是 Active**。
+同一 Bot 可以有多个历史 session，但**同一时刻只有一个是 Active**。
 
 ```
 conversations/ 目录下的文件：
@@ -479,7 +479,7 @@ Runtime 初始化 ConversationSession（立即）：
 
 ### 1.7 Session Actor 多会话并发模型
 
-**设计背景**：原设计中 `AgentLoop` 混合了 Agent 身份（共享状态）和 Session 状态（per-session 状态），导致同一时刻只能有一个 Session 活跃。其他 Agent 应用（ChatGPT、Claude 等）支持多 Session 同时运行——创建新 Session 不影响旧 Session 继续工作。
+**设计背景**：原设计中 `AgentLoop` 混合了 Bot 身份（共享状态）和 Session 状态（per-session 状态），导致同一时刻只能有一个 Session 活跃。其他 Bot 应用（ChatGPT、Claude 等）支持多 Session 同时运行——创建新 Session 不影响旧 Session 继续工作。
 
 **架构：AgentCore + SessionState 分离**
 
@@ -533,13 +533,13 @@ loop {
 
 | 配置项               | 作用域                                | 变更方式                         | 影响范围              |
 | -------------------- | ------------------------------------- | -------------------------------- | --------------------- |
-| 可用模型列表         | Agent                                 | 设置页添加/删除 Provider         | 所有 Session 立即可选 |
+| 可用模型列表         | Bot                                 | 设置页添加/删除 Provider         | 所有 Session 立即可选 |
 | 当前使用模型         | Session                               | 聊天面板模型选择器               | 仅 selectedSession    |
-| Provider API Key     | Agent                                 | 设置页                           | 所有 Session 共享     |
-| Workspace 目录       | Agent                                 | 不可运行时变更                   | 所有 Session 共享     |
+| Provider API Key     | Bot                                 | 设置页                           | 所有 Session 共享     |
+| Workspace 目录       | Bot                                 | 不可运行时变更                   | 所有 Session 共享     |
 | Workspace 上下文焦点 | Session（隐式）                       | 由对话历史和 记忆检索自然决定 | 每个 Session 不同     |
-| 工具权限             | Agent                                 | manifest 声明                    | 所有 Session 共享     |
-| Token 预算           | **两层：Agent 总预算 + Session 配额** | 设置页（Agent 级）               | 见下方详细策略        |
+| 工具权限             | Bot                                 | manifest 声明                    | 所有 Session 共享     |
+| Token 预算           | **两层：Bot 总预算 + Session 配额** | 设置页（Bot 级）               | 见下方详细策略        |
 | 对话历史             | Session                               | —                                | 独立                  |
 | Token 用量统计       | Session                               | —                                | 独立                  |
 | 迭代计数器           | Session                               | —                                | 独立                  |
@@ -706,7 +706,7 @@ pub struct ConversationLine {
 | role          | 含义         | content 内容                      | metadata 必需字段           | metadata 可选字段                                 |
 | ------------- | ------------ | --------------------------------- | --------------------------- | ------------------------------------------------- |
 | `user`        | 用户消息     | 用户输入的原始文本                | —                           | —                                                 |
-| `assistant`   | Agent 回复   | LLM 输出的完整文本（含 markdown） | —                           | `model`, `provider`, `token_count`, `duration_ms` |
+| `assistant`   | Bot 回复   | LLM 输出的完整文本（含 markdown） | —                           | `model`, `provider`, `token_count`, `duration_ms` |
 | `think`       | 推理过程     | LLM 返回的 ` inmedia` 标签内容    | —                           | `model`                                           |
 | `tool_call`   | 工具调用请求 | 工具参数 JSON 字符串              | `tool_name`, `tool_call_id` | `risk_level`                                      |
 | `tool_result` | 工具执行结果 | 工具返回的完整内容                | `tool_name`, `tool_call_id` | `success`, `duration_ms`                          |
@@ -985,7 +985,7 @@ pub fn read_jsonl(path: &Path) -> Vec<ConversationLine> {
 | ----------------------------------------------- | --------------------------------------------- | ----------------------------------------------- |
 | 存储原始对话全文                                | 记忆层 SQLite 膨胀，检索噪声大                   | 仅存提炼摘要（见 §3.2）                         |
 | 作为"对话历史恢复"的数据源                      | 压缩/提炼后的内容与用户看到的实际对话不一致   | 对话恢复由 JSONL 文件负责                       |
-| role 设为 "conversation"（混合 user+assistant） | 语义模糊，检索时无法区分用户意图和 Agent 响应 | role 保持 "user"/"assistant"，但 content 为摘要 |
+| role 设为 "conversation"（混合 user+assistant） | 语义模糊，检索时无法区分用户意图和 Bot 响应 | role 保持 "user"/"assistant"，但 content 为摘要 |
 | 包含完整 tool_call 参数和输出                   | 工具输出可能包含敏感信息或极长内容            | 仅存工具使用摘要                                |
 
 ### 3.2 Episode 要做什么（新职责定义）
@@ -997,7 +997,7 @@ Episode 是对一轮或多轮对话的**语义压缩摘要**，服务于记忆�
 | #   | 提炼项            | 说明                                 | 示例                                               |
 | --- | ----------------- | ------------------------------------ | -------------------------------------------------- |
 | 1   | **对话摘要**      | 这轮对话的核心主题和结论（1-3 句话） | "讨论了 Episode 存储策略，决定采用双层架构" |
-| 2   | **用户意图标注**  | 用户在这轮对话中的意图分类           | 意图 = 指令（让 Agent 做某事）                     |
+| 2   | **用户意图标注**  | 用户在这轮对话中的意图分类           | 意图 = 指令（让 Bot 做某事）                     |
 | 3   | **关键决策记录**  | 对话中产生的技术选型或架构决策       | 决策 = "JSONL 追加写入，而非 SQLite"               |
 | 4   | **情感/态度信号** | 用户满意度（Phase 3 可选）           | （Phase 3 实现）                                   |
 | 5   | **工具使用摘要**  | 调用了哪些工具、成功/失败、核心结果  | "file_read(成功), shell_exec(失败:超时)"           |
@@ -1163,7 +1163,7 @@ LIMIT 50;
 
 #### 触发时机三：离线巩固——做梦机制（Phase 3 实现）
 
-Agent 空闲时，长周期批量回顾多个 Episode，提炼为三类沉淀节点（KnowledgeNode / ProceduralNode / AutobiographicalNode）。
+Bot 空闲时，长周期批量回顾多个 Episode，提炼为三类沉淀节点（KnowledgeNode / ProceduralNode / AutobiographicalNode）。
 
 ```
 Agent 空闲（无活跃 session）
@@ -1194,7 +1194,7 @@ LLM 辅助提炼（Prompt 要求分类产出）：
 | ---------------------------------------------- | ------------------------------ |
 | “将事实性知识归类为 KnowledgeNode”             | 如用户偏好、技术知识、项目信息 |
 | “将流程性知识归类为 ProceduralNode”            | 如操作步骤、最佳实践、工作流   |
-| “将 Agent 自我认知归类为 AutobiographicalNode” | 如能力反思、成长记录、经验教训 |
+| “将 Bot 自我认知归类为 AutobiographicalNode” | 如能力反思、成长记录、经验教训 |
 
 **巩固产出的三类节点对比：**
 
@@ -1386,33 +1386,33 @@ Episode（会话级记忆）
 | Runtime → JSONL 写入   | Runtime → 本地文件系统                           | JSONL 行                                                  | 每条消息产生时                |
 | Runtime → Episode 写入 | Runtime → SQLite 记忆层                                 | Episode 节点                                              | 上下文压缩时 / Session 结束时 |
 | Runtime → WS 推送      | Runtime → Gateway → Desktop App                  | WS chunk/tool_call/done                                   | LLM streaming                 |
-| Desktop App → 加载历史 | Desktop App → Gateway IPC → Runtime → 读取 JSONL | JSONL 分页数据                                            | 切换 Agent / 重启             |
+| Desktop App → 加载历史 | Desktop App → Gateway IPC → Runtime → 读取 JSONL | JSONL 分页数据                                            | 切换 Bot / 重启             |
 | Desktop App → 记忆检索 | Desktop App → Gateway → SQLite 记忆层                   | Episode/KnowledgeNode/ProceduralNode/AutobiographicalNode | 记忆面板搜索                  |
-| Episode → 沉淀层节点   | 巩固管道（离线）                                 | 节点属性转换（分类产出三类节点）                          | Agent 空闲时（做梦机制）      |
+| Episode → 沉淀层节点   | 巩固管道（离线）                                 | 节点属性转换（分类产出三类节点）                          | Bot 空闲时（做梦机制）      |
 
 ---
 
-## 5. Agent 打包与对话数据隔离
+## 5. Bot 打包与对话数据隔离
 
 ### 5.1 设计约束
 
-ACowork 的核心设计理念是 Agent 可以打包为 `.agent` 文件进行分享。这带来两个关键问题：
+ACowork 的核心设计理念是 Bot 可以打包为 `.bot` 文件进行分享。这带来两个关键问题：
 
 1. **隐私问题**：JSONL 对话文件包含用户的完整聊天记录，默认排除打包，但用户可自行选择包含
-2. **体积问题**：长期使用的 Agent 对话文件和记忆数据库可能非常大，默认排除打包，用户可按需勾选
+2. **体积问题**：长期使用的 Bot 对话文件和记忆数据库可能非常大，默认排除打包，用户可按需勾选
 
 ### 5.2 数据分类：可分享 vs 私有
 
 | 分类                           | 目录/文件                | 说明                               | 打包策略                           |
 | ------------------------------ | ------------------------ | ---------------------------------- | ---------------------------------- |
-| **可分享（Agent 定义）**       | `manifest.toml`          | Agent 元信息和配置                 | ✅ 默认勾选                         |
+| **可分享（Bot 定义）**       | `manifest.toml`          | Bot 元信息和配置                 | ✅ 默认勾选                         |
 |                                | `prompts/`               | System prompt、constraints         | ✅ 默认勾选                         |
 |                                | `skills/`                | 技能定义（SKILL.md）               | ✅ 默认勾选                         |
 |                                | 工具声明                 | manifest.toml 中的 [tools]         | ✅ 默认勾选                         |
 |                                | 签名文件                 | 包签名元数据                       | ✅ 默认勾选                         |
-| **可分享（Agent 能力记忆）**   | KnowledgeNode（Public）  | Agent 通用知识                     | ✅ 默认勾选                         |
-|                                | ProceduralNode           | Agent 技能经验                     | ✅ 默认勾选                         |
-|                                | AutobiographicalNode     | Agent 自传体记忆（自身认知和成长） | ✅ 默认勾选                         |
+| **可分享（Bot 能力记忆）**   | KnowledgeNode（Public）  | Bot 通用知识                     | ✅ 默认勾选                         |
+|                                | ProceduralNode           | Bot 技能经验                     | ✅ 默认勾选                         |
+|                                | AutobiographicalNode     | Bot 自传体记忆（自身认知和成长） | ✅ 默认勾选                         |
 | **默认排除（用户可勾选包含）** | `conversations/`         | JSONL 对话文件                     | ❌ 默认不勾选 · ⚠️ 包含用户对话内容  |
 |                                | Episode                  | 对话情景记忆（含用户信息）         | ❌ 默认不勾选 · ⚠️ 包含用户对话摘要  |
 |                                | KnowledgeNode（Private） | 用户相关知识                       | ❌ 默认不勾选 · ⚠️ 包含用户私有知识  |
@@ -1424,7 +1424,7 @@ ACowork 的核心设计理念是 Agent 可以打包为 `.agent` 文件进行分�
 
 **始终排除清单（类似 .gitignore 机制，不可覆盖）：**
 
-PackageManager 在构建 `.agent` 包时，始终自动跳过以下路径：
+PackageManager 在构建 `.bot` 包时，始终自动跳过以下路径：
 
 ```
 # Agent 运行时数据排除清单（始终排除，不可覆盖）
@@ -1451,24 +1451,24 @@ SQLite `nodes` 表中的记忆节点按类型和隐私属性决定打包策略�
 
 | 记忆类型                     | 打包策略                       | 理由                                                                                                         |
 | ---------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| **KnowledgeNode（Public）**  | ✅ 默认勾选                     | Agent 通用知识，属于 Agent 能力本体，应随 Agent 分享                                                         |
+| **KnowledgeNode（Public）**  | ✅ 默认勾选                     | Bot 通用知识，属于 Bot 能力本体，应随 Bot 分享                                                         |
 | **KnowledgeNode（Private）** | ❌ 默认不勾选（用户可手动勾选） | 与特定用户/项目相关，默认属私有数据；用户可选择包含                                                          |
-| **ProceduralNode**           | ✅ 默认勾选                     | Agent 技能经验（如何做某事），属于 Agent 能力                                                                |
-| **AutobiographicalNode**     | ✅ 默认勾选                     | Agent 自传体记忆，记录自身认知和成长（如"我擅长 Rust"、"我学会了更严格地检查边界条件"），属于 Agent 能力本体 |
+| **ProceduralNode**           | ✅ 默认勾选                     | Bot 技能经验（如何做某事），属于 Bot 能力                                                                |
+| **AutobiographicalNode**     | ✅ 默认勾选                     | Bot 自传体记忆，记录自身认知和成长（如"我擅长 Rust"、"我学会了更严格地检查边界条件"），属于 Bot 能力本体 |
 | **Episode**                  | ❌ 默认不勾选（用户可手动勾选） | 情景记忆含用户对话摘要，默认排除；用户可选择包含                                                             |
 
 **为什么 AutobiographicalNode 需要打包：**
 
-AutobiographicalNode 是 Agent 对自身的认知记录，例如：
+AutobiographicalNode 是 Bot 对自身的认知记录，例如：
 - “我擅长 Rust 系统编程”
 - “我在代码审查中学会了关注边界条件”
 - “用户通常偏好简洁的回复风格”
 
-这些是 Agent 的能力本体，不是用户私有数据。分享 Agent 时，这些认知应随 Agent 一起迁移，让新用户获得一个已有“经验”的 Agent。
+这些是 Bot 的能力本体，不是用户私有数据。分享 Bot 时，这些认知应随 Bot 一起迁移，让新用户获得一个已有“经验”的 Bot。
 
 **隐私类型（Public/Private）主要用于 KnowledgeNode：**
 
-- Public：Agent 通用知识（如“ACowork 使用 JSONL 格式存储对话”）— 与特定用户无关
+- Public：Bot 通用知识（如“ACowork 使用 JSONL 格式存储对话”）— 与特定用户无关
 - Private：与特定用户/项目相关的知识（如“用户的项目使用 React 框架”）— 不可分享
 
 **PackageManager 打包 SQLite 记忆层 数据时的处理：**
@@ -1485,7 +1485,7 @@ AutobiographicalNode 是 Agent 对自身的认知记录，例如：
 
 ### 5.4 打包 UI 交互设计
 
-用户打包 Agent 时，Desktop App 展示 checklist 界面，让用户选择要包含的数据项：
+用户打包 Bot 时，Desktop App 展示 checklist 界面，让用户选择要包含的数据项：
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -1611,16 +1611,16 @@ fn should_exclude(path: &Path, base: &Path, options: &PackageOptions) -> bool {
 }
 ```
 
-### 5.6 Agent 卸载与对话数据处理
+### 5.6 Bot 卸载与对话数据处理
 
-当 Agent 被卸载重装时，对话记录的处理策略：
+当 Bot 被卸载重装时，对话记录的处理策略：
 
 | 场景                     | 策略                           | 理由                              |
 | ------------------------ | ------------------------------ | --------------------------------- |
 | 卸载（默认）             | 保留 conversations/ 和 memory/ | 用户数据不应因卸载而丢失          |
 | 卸载（用户选择清除数据） | 删除 conversations/ 和 memory/ | 用户显式选择，需二次确认          |
 | 升级                     | 保留所有运行时数据             | 升级不涉及数据清除                |
-| 克隆（skeleton 模式）    | 不复制运行时数据               | 克隆的是 Agent 定义，不是用户数据 |
+| 克隆（skeleton 模式）    | 不复制运行时数据               | 克隆的是 Bot 定义，不是用户数据 |
 | 克隆（full 模式）        | 复制运行时数据                 | 用户显式选择完整克隆              |
 
 **卸载时的交互设计：**
@@ -1640,7 +1640,7 @@ fn should_exclude(path: &Path, base: &Path, options: &PackageOptions) -> bool {
 
 ### 5.7 安装时的目录初始化
 
-安装 Agent 时，PackageManager 需确保 `conversations/` 目录存在：
+安装 Bot 时，PackageManager 需确保 `conversations/` 目录存在：
 
 ```rust
 /// Initialize runtime directories for a newly installed agent.
@@ -1677,10 +1677,10 @@ pub fn init_agent_directories(workspace: &Path) -> Result<()> {
 
 **为什么 Gateway 不能直接读 JSONL 文件：**
 
-1. **数据隔离**：JSONL 文件属于 Agent 私有数据，Runtime 是唯一访问者
+1. **数据隔离**：JSONL 文件属于 Bot 私有数据，Runtime 是唯一访问者
 2. **并发安全**：Runtime 的 Writer 线程独占文件句柄，Gateway 直接读取可能导致读写冲突
 3. **一致性**：Runtime 持有内存中的 message_count 和元数据状态，通过 IPC 返回的数据更准确
-4. **架构清晰**：遵循“Gateway 不触碰 Agent 私有数据”的原则
+4. **架构清晰**：遵循“Gateway 不触碰 Bot 私有数据”的原则
 
 **新的返回格式：**
 
@@ -1920,7 +1920,7 @@ Router::new()
 
 ### 6.4 Gateway 通过 IPC 访问对话数据
 
-**Gateway 不直接读取 Agent 的 JSONL 文件**，所有 conversation 相关 API 都通过 IPC 转发给 Runtime 处理。
+**Gateway 不直接读取 Bot 的 JSONL 文件**，所有 conversation 相关 API 都通过 IPC 转发给 Runtime 处理。
 
 **正确访问路径：**
 
@@ -1928,11 +1928,11 @@ Router::new()
 Desktop App → Gateway HTTP API → IPC → Runtime → 读取 JSONL → 返回分页数据
 ```
 
-**Runtime 是 Agent 私有数据的唯一访问者。** 理由：
+**Runtime 是 Bot 私有数据的唯一访问者。** 理由：
 
 1. Runtime 的 Writer 线程独占文件句柄，外部直接读取可能导致读写冲突
 2. Runtime 持有内存中的元数据状态（message_count 等），通过 IPC 返回的数据更准确
-3. 遵循“Gateway 不触碰 Agent 私有数据”的架构原则
+3. 遵循“Gateway 不触碰 Bot 私有数据”的架构原则
 
 **Gateway API handler 实现（IPC 转发模式）：**
 
@@ -2060,7 +2060,7 @@ if !trimmed_messages.is_empty() {
 | `chat.rs`         | 新增分页加载 API handler                  | P1     | cursor + limit + direction，通过 IPC 转发                    |
 | `routes.rs`       | 新增路由注册                              | P1     | 见 §6.3                                                      |
 | `gateway.rs`      | IPC 消息类型扩展                          | P0     | 新增 ConversationMessages / SessionList 等 IPC 请求/响应类型 |
-| 删除 `gateway.rs` | 删除 `get_agent_workspace()` 直接读取方法 | P0     | Gateway 不再直接访问 Agent workspace 文件                    |
+| 删除 `gateway.rs` | 删除 `get_agent_workspace()` 直接读取方法 | P0     | Gateway 不再直接访问 Bot workspace 文件                    |
 
 **chat.rs 变更示意（IPC 转发模式）：**
 
@@ -2189,7 +2189,7 @@ async function loadMore(cursor: string) {
 | S5   | Session 结束时 Episode 提炼                              | 单元测试：结束 session 后生成全局摘要 Episode                                                                  | acowork-runtime, acowork-memory  |
 | S6   | MemoryManager.record → record_distilled                  | 单元测试：Episode 不再包含原始对话全文                                                                         | acowork-memory, acowork-sqlite   |
 | S7   | Gateway conversation API 改为 IPC 转发                   | 集成测试：API 通过 IPC 返回完整原始对话，含分页                                                                | acowork-gateway, acowork-runtime |
-| S8   | Desktop App 适配新消息格式和分页加载                     | 手动测试：切换 Agent 后历史完整显示，向上滚动加载更多                                                          | acowork-desktop                   |
+| S8   | Desktop App 适配新消息格式和分页加载                     | 手动测试：切换 Bot 后历史完整显示，向上滚动加载更多                                                          | acowork-desktop                   |
 | S9   | PackageManager 打包 checklist UI + 记忆节点类型过滤   | 集成测试：默认排除 conversations/ 和 Episode/Private KnowledgeNode；勾选后包含；始终排除 memory/ 和 workspace/ | acowork-gateway                   |
 
 ### Phase 3 — Session 管理 & 离线巩固
@@ -2199,9 +2199,9 @@ async function loadMore(cursor: string) {
 | S10  | Session 列表 API + Desktop App 会话列表 UI | 用户可查看和切换历史会话                                                             |
 | S11  | 新建/恢复/删除会话 API                     | 用户可在 App 中管理多个会话                                                          |
 | S12  | Session 恢复（重启 App 后自动恢复）        | 重启 App 后自动加载最近活跃 session                                                  |
-| S13  | 离线巩固（做梦机制）                       | Agent 空闲时批量提炼 Episode → KnowledgeNode / ProceduralNode / AutobiographicalNode |
+| S13  | 离线巩固（做梦机制）                       | Bot 空闲时批量提炼 Episode → KnowledgeNode / ProceduralNode / AutobiographicalNode |
 | S14  | JSONL 文件轮转                             | 单 session 超过 100K 行或 50MB 后自动创建新 session                                  |
-| S15  | Agent 卸载时对话数据保留/清除选项          | 用户可选择是否保留对话记录                                                           |
+| S15  | Bot 卸载时对话数据保留/清除选项          | 用户可选择是否保留对话记录                                                           |
 
 ### Phase 5 — Desktop App 完善
 
@@ -2218,7 +2218,7 @@ async function loadMore(cursor: string) {
 | 决策                        | 选择                                                                                                                          | 理由                                                                                     |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | 对话文件格式                | JSONL（非 SQLite / JSON 数组）                                                                                                | 追加写入零开销；单行损坏不影响整体；无需额外依赖；与 LLM 行业实践一致                    |
-| Session ID 格式             | `{timestamp}_{short_uuid}`（无 agent_id 前缀）                                                                                | 每个 Agent 有物理隔离的独立工作区，无需跨 Agent 标识；文件名更短、更易读                 |
+| Session ID 格式             | `{timestamp}_{short_uuid}`（无 agent_id 前缀）                                                                                | 每个 Bot 有物理隔离的独立工作区，无需跨 Bot 标识；文件名更短、更易读                 |
 | Session 索引机制            | JSONL 首行元数据（非 sessions.json）                                                                                          | 无状态、无冲突；不存在索引文件和实际数据不一致的问题                                     |
 | Episode 提炼时机            | 事件触发（FIFO 裁剪 / Session 结束），非每轮                                                                                  | 避免低价值 Episode 膨胀；仅在语义信息可能丢失时提炼                                      |
 | Episode 提炼方式（Phase 1） | LLM 语义压缩提取                                                                                                              | 理解上下文语义，产出高质量摘要；自动选择 cost 最低模型控制成本；无可用模型时降级为不提炼 |
@@ -2226,7 +2226,7 @@ async function loadMore(cursor: string) {
 | 对话文件写入时机            | 每条消息产生时立即写入 + flush                                                                                                | 单条消息丢失不可接受；写入耗时 < 1ms                                                     |
 | 对话恢复策略                | App 重启时恢复最近的活跃 session                                                                                              | 用户期望对话连续性；异常退出不应丢失上下文                                               |
 | 数据隔离策略                | 默认排除 + 用户自选包含（打包 UI checklist）                                                                                  | 隐私安全优先默认排除，但允许用户主动选择包含特定数据；始终排除 memory/ 等运行时原始文件  |
-| Gateway 访问对话方式        | 通过 IPC 转发给 Runtime（非直接读文件）                                                                                       | Runtime 是 Agent 私有数据的唯一访问者；避免读写冲突；架构更清晰                          |
+| Gateway 访问对话方式        | 通过 IPC 转发给 Runtime（非直接读文件）                                                                                       | Runtime 是 Bot 私有数据的唯一访问者；避免读写冲突；架构更清晰                          |
 | 分页加载                    | cursor + limit + direction（非 offset）                                                                                       | 避免长对话 offset 性能问题；cursor 基于消息 ID，插入/删除不影响分页                      |
 | 文件轮转策略                | Session 边界轮转（非文件内分片）                                                                                              | 用户对“新对话”的感知是合理的；避免分片管理复杂度                                         |
 | 记忆打包策略                | 默认勾选 AutobiographicalNode/Public KnowledgeNode/ProceduralNode，默认不勾选 Episode/Private KnowledgeNode（用户可手动勾选） | 默认排除隐私数据保证安全；用户自选机制提供灵活性，让高级用户可按需包含                   |

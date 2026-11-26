@@ -10,11 +10,11 @@
 
 > **v4.0 变更**：记忆层切到 SQLite（单库 + WAL + FTS5 + 向量表；详见 [ADR-082](../../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)）。`acowork-grafeo` crate 已删除，记忆引擎代码（`EpisodicDistiller` / `RetrievalMetrics`）迁移至 `core/acowork-memory/`。
 
-> **v4.1 变更（已实施，2026-10-23）**：记忆模块已从 Runtime 剥离为 Gateway 托管的独立进程 `acowork-memory`；Agent 侧经 MCP 调用该服务的工具（注册名 `mcp_memory__memory_store` / `mcp_memory__memory_recall`，工具级 opt-in 走 `agent_mcp_tools.json`，ADR-069），面板经 Gateway 反代访问；auto-inject 移除、`memory:read` / `memory:write` 权限项删除，Runtime 达到零记忆业务代码——详见 [ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)。**本文档其余章节仍以剥离前的（内置）形态行文**；分层数据模型（瞬态 / 经历 / 沉淀）、蒸馏与遗忘流水线语义不变，变的只是进程归属与访问通道。
+> **v4.1 变更（已实施，2026-10-23）**：记忆模块已从 Runtime 剥离为 Gateway 托管的独立进程 `acowork-memory`；Bot 侧经 MCP 调用该服务的工具（注册名 `mcp_memory__memory_store` / `mcp_memory__memory_recall`，工具级 opt-in 走 `agent_mcp_tools.json`，ADR-069），面板经 Gateway 反代访问；auto-inject 移除、`memory:read` / `memory:write` 权限项删除，Runtime 达到零记忆业务代码——详见 [ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)。**本文档其余章节仍以剥离前的（内置）形态行文**；分层数据模型（瞬态 / 经历 / 沉淀）、蒸馏与遗忘流水线语义不变，变的只是进程归属与访问通道。
 
 ---
 
-Memory 采用**仿生分层**设计，以人类认知科学为参照。每个 Agent 拥有完全独立的私有 Memory（单文件 SQLite 数据库，由记忆服务 `acowork-memory` 持有，路径 `$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`；应用层隔离，详见 [ADR-009](../../adr/zh/ADR-009-gateway-workspace-isolation.md) 与 [ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)），不存在 Gateway 维护的公共数据库。跨 Agent 的数据共享通过 Intent 查询和系统 Agent 服务实现，而非共享存储。
+Memory 采用**仿生分层**设计，以人类认知科学为参照。每个 Bot 拥有完全独立的私有 Memory（单文件 SQLite 数据库，由记忆服务 `acowork-memory` 持有，路径 `$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`；应用层隔离，详见 [ADR-009](../../adr/zh/ADR-009-gateway-workspace-isolation.md) 与 [ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)），不存在 Gateway 维护的公共数据库。跨 Bot 的数据共享通过 Intent 查询和系统 Bot 服务实现，而非共享存储。
 
 **设计哲学**：记忆不是存储，是认知。一个没有遗忘的记忆系统是垃圾场，一个没有巩固的记忆系统是碎片堆，一个没有自我认知的记忆系统是数据库。Memory 模块要回答的不是"怎么存"，而是"怎么记、怎么忘、怎么想"。
 
@@ -76,7 +76,7 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照。每个 Ag
 | 沉淀层/经历层内流动 | 关联扩散 | **未实现**（ADR-082 D4 删除图遍历，无 `edges` 表；§6 保留为设计目标）                                   |
 | 沉淀层 → Dormant    | 遗忘衰减 | 后台定期计算 decay_score                                                                                     |
 
-**不可逆的单向门：** 经历层 → 沉淀层是信息精炼过程（原始片段 → 结构化知识），天然单向。但沉淀层 → 经历层可以通过"回忆"机制实现——用户或 Agent 主动触发时，从沉淀层提取关联知识，作为新的情景上下文注入瞬态层。
+**不可逆的单向门：** 经历层 → 沉淀层是信息精炼过程（原始片段 → 结构化知识），天然单向。但沉淀层 → 经历层可以通过"回忆"机制实现——用户或 Bot 主动触发时，从沉淀层提取关联知识，作为新的情景上下文注入瞬态层。
 
 **分层与 SQLite 存储的映射：**
 
@@ -87,7 +87,7 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照。每个 Ag
 | 沉淀层 | 语义/程序/自传体/Skill 经验 | `nodes`（`label` ∈ {Knowledge, Procedural, Autobiographical}）+ 各自 `vectors` / `fts_*` | 每类一个 FTS5 虚表，无 `edges` 表 |
 
 不存在"经历层节点存在沉淀层 `nodes` 中"的歧义——认知分层和 `nodes.label` 是一一映射的。存储格式为单文件 SQLite
-（ADR-082 D1，rusqlite bundled），每个 Agent 实例一份。
+（ADR-082 D1，rusqlite bundled），每个 Bot 实例一份。
 
 > **v4.1 变更**：本表原描述的 `episodes` / `episodes_vec` / `episodes_fts` 三表结构、sqlite-vss HNSW 索引与
 > `edges` 表均已不存在。ADR-082 D2 放弃 HNSW（改内存缓存 + 暴力扫，recall = 100%）、D3 文本检索改 FTS5、
@@ -107,7 +107,7 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照。每个 Ag
 
 ## 1. 瞬态层：工作记忆
 
-工作记忆是 Agent 当前正在"思考"的内容，直接映射到 LLM 的上下文窗口。
+工作记忆是 Bot 当前正在"思考"的内容，直接映射到 LLM 的上下文窗口。
 
 ```
 ┌─ System Prompt ──────────────────────────┐
@@ -173,7 +173,7 @@ Compaction 不再生成 `entities` / `triples` 块——LLM 在压缩场景下�
 
 ## 2. 经历层：情景记忆
 
-情景记忆存储 Agent 与用户的交互片段，是记忆的"原始素材"。
+情景记忆存储 Bot 与用户的交互片段，是记忆的"原始素材"。
 
 ```
 SQLite `episodes` 行
@@ -203,7 +203,7 @@ SQLite `episodes` 行
 - **语义检索**：`vector_search` — 向量按 label 懒加载进内存缓存后暴力扫（精确解，recall = 100%；ADR-082 D2 放弃 HNSW）
 - **关键词检索**：`text_search` — SQLite FTS5 全文索引，`trigram` 分词器（ADR-082 D3，支持中文子串匹配；<3 字符查询回退 LIKE）
 - **混合检索**：应用层 RRF 融合排序（vector + text 分数按 `1/(k+rank)` 加权求和，各源先各自把门、取并集）
-- **双源查询拆分（memory_recall，2026-10）**：`MemoryQuery.embedding_text` 承载当前轮用户完整消息驱动向量源（整句 embedding 质量远高于关键词袋），`query_text` 承载 LLM 提取的关键词驱动 BM25 词法源；`embedding_text` 缺省（或全空白）时回落为 `query_text` 单源（历史行为）。用户消息与 session ID 经 `ToolContext`（`execute_with_context`）在每次工具调用时由 loop 从 per-session 状态注入——**不得**存放在 agent 级共享的 `MemorySessionHandle` 或工具实例上（多会话并发下 last-writer-wins 竞态，2026-10 已修复）。
+- **双源查询拆分（memory_recall，2026-10）**：`MemoryQuery.embedding_text` 承载当前轮用户完整消息驱动向量源（整句 embedding 质量远高于关键词袋），`query_text` 承载 LLM 提取的关键词驱动 BM25 词法源；`embedding_text` 缺省（或全空白）时回落为 `query_text` 单源（历史行为）。用户消息与 session ID 经 `ToolContext`（`execute_with_context`）在每次工具调用时由 loop 从 per-session 状态注入——**不得**存放在 bot 级共享的 `MemorySessionHandle` 或工具实例上（多会话并发下 last-writer-wins 竞态，2026-10 已修复）。
 - **MMR 去重**：`MemoryStore::mmr_search` — Maximal Marginal Relevance，保证结果多样性，避免重复语义
 - **时间过滤**：按时间范围缩小检索空间
 - **跨层关联扩散**（§6）：**设计目标，当前未实现**。`MemoryQuery.expand_hops` 字段从未被 `MemoryManager::retrieve()` 消费，已作为死字段删除；后端已从 Grafeo LPG 图库迁移至 SQLite（ADR-082），不存在 `edges` 表多跳遍历。§6 保留为未来实现参考。
@@ -235,7 +235,7 @@ Embedding 由 Runtime 层通过 `EmbeddingProvider` trait 生成（而非 `Sqlit
 
 ## 3. 沉淀层：长期记忆
 
-沉淀层是 Agent 的"知识根基"，包含三种记忆类型，全部存储在 `nodes` 表（按 `kind` 列区分），图关系由 `edges` 表承载。
+沉淀层是 Bot 的"知识根基"，包含三种记忆类型，全部存储在 `nodes` 表（按 `kind` 列区分），图关系由 `edges` 表承载。
 
 ### 3.1 语义记忆（KnowledgeNode）
 
@@ -356,7 +356,7 @@ struct ProceduralNode {
 
 ### 3.3 自传体记忆（AutobiographicalNode）
 
-存储 Agent 对自身的认知——"我是谁、我能做什么、我的边界在哪"。这是人格连续性的基础。
+存储 Bot 对自身的认知——"我是谁、我能做什么、我的边界在哪"。这是人格连续性的基础。
 
 ```rust
 struct AutobiographicalNode {
@@ -392,14 +392,14 @@ enum AutobiographicalAspect {
 2. **离线蒸馏识别**（`EpisodicDistiller`）:服务端 LLM 从 `knowledge_subtype` 标注的 episode 识别 autobiographical 候选(布尔分类 + 4 值 aspect),经 Step 4 LLM Judge 仲裁后晋升为 AutobiographicalNode(含 `promotion_metadata` 证据链/审计)
 
 **已下线（2026-09 revision,ADR-068 M5/M6/M8）:**
-- ~~memory_store 的 `autobiographical` category 与 `aspect`/`key`/`source` 参数~~——schema 收窄为 4 类(§4.1),与 agent 相关的内容写 `category: fact/preference` 即可
+- ~~memory_store 的 `autobiographical` category 与 `aspect`/`key`/`source` 参数~~——schema 收窄为 4 类(§4.1),与 bot 相关的内容写 `category: fact/preference` 即可
 - ~~自我评估自动生成 Limitation~~——`success_count` 从未被递增,统计驱动路径已整体删除(见 §9 Phase 2 移除原因)
 - ~~Relationship 自动生成~~——30 天合作规则的直写路径已删除,Relationship 由蒸馏器从 `knowledge_subtype=Relation` episode 晋升
 - ~~autobiographical 幂等 upsert / History append-only 直写~~——沉淀层节点统一由蒸馏器管理生命周期
 
 **自传体记忆的注入：**
 
-自传体记忆摘要始终注入 System Prompt 的最前面（在 Agent 身份定义之后），作为 Agent 的"自我认知背景"：
+自传体记忆摘要始终注入 System Prompt 的最前面（在 Bot 身份定义之后），作为 Bot 的"自我认知背景"：
 
 ```
 ## 关于你自己
@@ -424,7 +424,7 @@ AutobiographicalNode 不参与遗忘，但需要容量控制防止无限膨胀�
 
 ### 4.1 即时提取（Phase 1）
 
-即时提取通过 **Tool Call 机制**实现——`memory_store` 作为 Agent 的内置工具之一，LLM 在生成回复时自主判断是否调用。无需额外的 LLM 调用、异步管道或预过滤规则。
+即时提取通过 **Tool Call 机制**实现——`memory_store` 作为 Bot 的内置工具之一，LLM 在生成回复时自主判断是否调用。无需额外的 LLM 调用、异步管道或预过滤规则。
 
 **即时提取产出定义（ADR-068 2026-09 revision）**：
 
@@ -498,7 +498,7 @@ Episode：
 - 旧设计要求 LLM 拆分三元组 `{subject, predicate, object}`，负担重且不可靠（同一事实可能拆出不同 predicate）——ADR-068 进一步移除所有结构化字段（subject/predicate/object/trigger_condition/action_pattern/key/aspect/source），LLM 只给自然语言 + 4 类 subtype
 - keywords 由 LLM 提供、Runtime 过 sanitize 门禁，不依赖 memory_hint
 - 沉淀层三元组结构化与类型判定全部收敛到离线 `EpisodicDistiller`（服务端 LLM 提取 + LLM Judge，见 §4.2）——不存在第二条 LLM 直写沉淀层的通道
-- `autobiographical` 类目与 `aspect`/`key` 参数已下线：与 agent 自身相关的内容写 `category: fact/preference/relation` 即可，是否晋升 AutobiographicalNode 由蒸馏器判断（ADR-068 §3.4 Step 4 Judge）
+- `autobiographical` 类目与 `aspect`/`key` 参数已下线：与 bot 自身相关的内容写 `category: fact/preference/relation` 即可，是否晋升 AutobiographicalNode 由蒸馏器判断（ADR-068 §3.4 Step 4 Judge）
 
 **即时阶段 Prompt 职责（ADR-068 修订）**：
 
@@ -567,7 +567,7 @@ LLM 生成回复（含 tool call 判断）
 - **不强制提取**：LLM 有权不在每轮调用 memory_store。简单问候、天气查询等不存储，这比预过滤规则更智能
 - **LLM 入口只写经历层**：memory_store 永不直写 Knowledge/Procedural/Autobiographical 节点——沉淀层晋升是 EpisodicDistiller 的唯一职责（ADR-068）
 - **对话始终记录**：每轮对话内容写入 JSONL 文件（瞬态层），经历层仅通过 Compaction 摘要 / Session 关闭蒸馏写入（ADR-011）
-- **工具调用可见**：memory_store 的调用记录在对话历史中，用户知道 Agent 记住了什么
+- **工具调用可见**：memory_store 的调用记录在对话历史中，用户知道 Bot 记住了什么
 - **防重复晋升**（distiller 侧）：蒸馏器晋升前对候选 episode 做 embedding 聚簇——同类证据达到 `min_evidence` 阈值才晋升；对已晋升主题的重复 episode 由 Step 4 LLM Judge 判定合并或拒绝，`promotion_metadata` 保留完整证据链可审计回滚
 
 ### 4.2 离线蒸馏（ADR-068，EpisodicDistiller）
@@ -613,7 +613,7 @@ LLM 生成回复（含 tool call 判断）
 - **手动触发**：`POST /memory/distill` 立即跑一次（绕过周期，与后台共用同一实现；仍守 opt-in，关闭时返回 409）；`consolidation/status` 返回蒸馏配置与上次运行结果。记忆面板底部"合并节点"按钮已退役，替换为"立即蒸馏"（legacy consolidate action 删除，episodic cleanup 随周期 consolidation 自动执行）
 - **蒸馏模型**：独立字段 `distiller_model`（provider_id/model_id），UI 复用摘要模型下拉逻辑（vault keys + provider 名，与 Harness compact-model 卡片同源）；解析链 agent_config → manifest → `default_compact_model` → provider 第一模型（现状保底）
 - **prompt per-agent**：`distiller-merge.md` 进 ADR-063 覆盖白名单（原 `distiller-extraction.md` / `distiller-judge.md` 两槽随提取段、Judge 段下线合并为一槽），Debug 界面 PromptList 可见可编辑，reload 生效；`DistillerConfig.extraction_prompt_override`/`judge_prompt_override` 在 `distiller_scheduler_config()` 组装时注入；`acowork-memory` 内置常量保留为默认
-- **配置热更新**：`ConsolidationTimer` 持有 `RwLock<SchedulerConfig>`，PUT agent config 后 `update_config()` 换值、后台 loop 每 tick 重读（≤60s 生效），不重建后台任务
+- **配置热更新**：`ConsolidationTimer` 持有 `RwLock<SchedulerConfig>`，PUT bot config 后 `update_config()` 换值、后台 loop 每 tick 重读（≤60s 生效），不重建后台任务
 - 失败/证据不足的 episode 原样保留，下轮重试；不存在降级到规则路径的 fallback
 
 **与即时提取的区别：**
@@ -819,7 +819,7 @@ Level 3（内存模式）
    → Agent 回答："上海明天小雨，15-20°C。需要带伞——上次你上海出差淋过雨。"
 ```
 
-没有关联扩散，Agent 只知道用户"住北京"或"去上海出差"，但不知道这两者之间的关联，也不知道用户出差时关心天气、上次淋过雨。跨层关联扩散让检索从"关键词匹配"升级到"语义推理"。
+没有关联扩散，Bot 只知道用户"住北京"或"去上海出差"，但不知道这两者之间的关联，也不知道用户出差时关心天气、上次淋过雨。跨层关联扩散让检索从"关键词匹配"升级到"语义推理"。
 
 ### 6.3 性能保障
 
@@ -862,7 +862,7 @@ Level 3（内存模式）
 
 ### 6.5 Abstention（拒答）机制（v3.7 新增）
 
-**设计动机**：当检索结果的置信度不足时，Agent 应选择拒答而非生成可能不准确的回答。这是检索系统的最终质量门控——比检索降级策略（Level 0-3）更后置，是在检索结果已返回后的语义级别保障。
+**设计动机**：当检索结果的置信度不足时，Bot 应选择拒答而非生成可能不准确的回答。这是检索系统的最终质量门控——比检索降级策略（Level 0-3）更后置，是在检索结果已返回后的语义级别保障。
 
 **门控阈值机制（v3.13 修正，见 [ADR-082](../../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)）**：
 
@@ -913,7 +913,7 @@ Agent 回复（有依据 / 明确拒答）
 
 **LongMemEval Abs 维度目标**：
 
-LongMemEval 的 Abs（Abstention）维度评估 Agent 在信息不足时是否选择拒答而非幻觉：
+LongMemEval 的 Abs（Abstention）维度评估 Bot 在信息不足时是否选择拒答而非幻觉：
 
 | 阶段    | Abs 目标 | 当前预期 | 说明                                         |
 | ------- | -------- | -------- | -------------------------------------------- |
@@ -922,7 +922,7 @@ LongMemEval 的 Abs（Abstention）维度评估 Agent 在信息不足时是否�
 
 **可配置性**：
 
-`min_cosine` 通过 `MemoryQuery` 参数传入（§10.3 `MemoryQuery.min_cosine` 字段），支持不同 Agent 不同阈值：
+`min_cosine` 通过 `MemoryQuery` 参数传入（§10.3 `MemoryQuery.min_cosine` 字段），支持不同 Bot 不同阈值：
 
 ```rust
 pub struct MemoryQuery {
@@ -939,8 +939,8 @@ pub struct MemoryQuery {
 }
 ```
 
-- 工具型 Agent（如天气助手）：min_cosine = 0.2（容忍较低匹配，宁可多答）
-- 学习型 Agent（如知识库助手）：min_cosine = 0.5（严格匹配，宁缺毋滥）
+- 工具型 Bot（如天气助手）：min_cosine = 0.2（容忍较低匹配，宁可多答）
+- 学习型 Bot（如知识库助手）：min_cosine = 0.5（严格匹配，宁缺毋滥）
 - 默认值从 manifest.toml `[memory.quality]` 节读取（真实 embedding 各向异性强，绝对阈值实际力度有限，见 ADR-082 C1）
 
 ### 6.6 检索权重（v3.10 简化）
@@ -958,13 +958,13 @@ pub struct MemoryQuery {
 
 HintType 枚举和相关权重查找函数（`get_hint_weights`, `config_from_hint`）保留在代码中，供将来需要时使用。
 
-## 7. 跨 Agent 知识共享
+## 7. 跨 Bot 知识共享
 
-不同 Agent 之间不共享数据库，知识共享通过三种机制实现：
+不同 Bot 之间不共享数据库，知识共享通过三种机制实现：
 
 **路径 1：Intent 查询（推荐，主路径）**
 
-Agent A 需要某项知识，直接向拥有该知识的 Agent B 发送 Intent 查询：
+Bot A 需要某项知识，直接向拥有该知识的 Bot B 发送 Intent 查询：
 
 ```json
 {
@@ -976,32 +976,32 @@ Agent A 需要某项知识，直接向拥有该知识的 Agent B 发送 Intent �
 }
 ```
 
-天气 Agent 从自己的私有 SQLite `memory/private.sqlite` 查到结果并返回。这是最小权限方式——日历 Agent 只拿到了需要的那个事实。
+天气 Bot 从自己的私有 SQLite `memory/private.sqlite` 查到结果并返回。这是最小权限方式——日历 Bot 只拿到了需要的那个事实。
 
 **路径 2：Gateway UserProfile（身份与偏好）**
 
-用户身份和偏好等系统级信息由 Gateway 的 UserProfile 模块统一管理，在 Agent 握手时注入，变更时热推送。详见 [18-user-identity-simplified.md](./18-user-identity-simplified.md)。
+用户身份和偏好等系统级信息由 Gateway 的 UserProfile 模块统一管理，在 Bot 握手时注入，变更时热推送。详见 [18-user-identity-simplified.md](./18-user-identity-simplified.md)。
 
 **身份查询的容错：**
 
-- **本地缓存**：每个 Agent 缓存最近一次 identity 查询结果，TTL 5 分钟。缓存未过期时不发起查询（减少 Gateway 负载）
-- **Gateway 不可用**：如果 Gateway 未响应（超时 2 秒），Agent 降级使用本地缓存（即使过期），或使用 manifest.toml 中的 identity_deps 默认值
+- **本地缓存**：每个 Bot 缓存最近一次 identity 查询结果，TTL 5 分钟。缓存未过期时不发起查询（减少 Gateway 负载）
+- **Gateway 不可用**：如果 Gateway 未响应（超时 2 秒），Bot 降级使用本地缓存（即使过期），或使用 manifest.toml 中的 identity_deps 默认值
 - **Gateway 恢复**：Runtime 定期重连 Gateway，重连成功后重新获取完整 UserProfile
-- **冷启动预加载**：新 Agent 首次启动时，Gateway 在握手阶段（AgentHello）将 UserProfile 注入启动参数（详见 [18-user-identity-simplified.md](./18-user-identity-simplified.md) §3），不依赖运行时缓存
+- **冷启动预加载**：新 Bot 首次启动时，Gateway 在握手阶段（AgentHello）将 UserProfile 注入启动参数（详见 [18-user-identity-simplified.md](./18-user-identity-simplified.md) §3），不依赖运行时缓存
 
 **路径 3：云端 Memory Sync 同步**
 
-云端作为知识同步层，Agent 写入的知识可按规则广播给订阅了该信息的其他 Agent，各 Agent 的本地 SQLite 各自更新。
+云端作为知识同步层，Bot 写入的知识可按规则广播给订阅了该信息的其他 Bot，各 Bot 的本地 SQLite 各自更新。
 
 ### 7.1 隐私与同步
 
 记忆节点增加 PrivacyLevel 标记（Public / Personal / Sensitive），LLM 在即时提取时自动判断：
 
-- **Public**：可跨 Agent 共享——"用户名叫张三"、"用户说中文"
-- **Personal**：Agent 私有——"用户偏好简洁回复"
-- **Sensitive**：Agent 私有，打包分享时剥离——"用户提到健康问题"
+- **Public**：可跨 Bot 共享——"用户名叫张三"、"用户说中文"
+- **Personal**：Bot 私有——"用户偏好简洁回复"
+- **Sensitive**：Bot 私有，打包分享时剥离——"用户提到健康问题"
 
-**PrivacyLevel 的实际作用域是打包边界控制**：当用户将 Agent 分享给他人时，Personal/Sensitive 节点被自动剥离，只保留 Agent 自身的能力（SkillIteration、ProceduralNode、AutobiographicalNode 中关于 Agent 自身的部分）。PrivacyLevel 不用于网络同步过滤或跨 Agent 隔离——LLM 上下文中的数据无技术访问控制手段，靠 prompt 约定约束。
+**PrivacyLevel 的实际作用域是打包边界控制**：当用户将 Bot 分享给他人时，Personal/Sensitive 节点被自动剥离，只保留 Bot 自身的能力（SkillIteration、ProceduralNode、AutobiographicalNode 中关于 Bot 自身的部分）。PrivacyLevel 不用于网络同步过滤或跨 Bot 隔离——LLM 上下文中的数据无技术访问控制手段，靠 prompt 约定约束。
 
 云端同步按节点类型（Episodic / Knowledge / Procedural / Autobiographical）同步。全部数据明文同步，平台托管（与主流互联网平台一致，详见 00-prd.md ADR-002）。
 
@@ -1093,13 +1093,13 @@ Zone 用于区分记忆的**业务场景分区**，与 NodeType 正交：
 
 ### Phase 1：记忆基础（对应 Roadmap Phase 2）
 
-**目标：** 让 Agent 能记住用户，能检索，能遗忘，但不做深度抽象和跨时段的巩固。
+**目标：** 让 Bot 能记住用户，能检索，能遗忘，但不做深度抽象和跨时段的巩固。
 
 **交付内容：**
 
 三层架构落地（瞬态层 / 经历层 / 沉淀层），SQLite `nodes` 表通过 `label` 列支持 Episodic + Knowledge + Procedural + Autobiographical 四类节点，向量存 `vectors` 表、词法走各 label 的 FTS5 trigram 虚表。存储为单文件 SQLite（ADR-082 D1，含 WAL/SHM），由记忆服务 `acowork-memory` 持有，路径 `$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`。经历层存储对话原始记录（episode），沉淀层存储精炼知识（KnowledgeNode / AutobiographicalNode）。
 
-即时提取通过 Tool Call 机制实现：`memory_store` 工具加入 Agent 内置工具列表，System Prompt 加入提取指引，LLM 在生成回复时自主判断是否调用。即时阶段仅做 embedding 相似度粗筛（相似度 > 0.85 → 标记候选冲突），不做三元组提取。三元组提取和精确去重发生在**离线巩固阶段**（Phase 3），详见 §4.1 和 §6.4。
+即时提取通过 Tool Call 机制实现：`memory_store` 工具加入 Bot 内置工具列表，System Prompt 加入提取指引，LLM 在生成回复时自主判断是否调用。即时阶段仅做 embedding 相似度粗筛（相似度 > 0.85 → 标记候选冲突），不做三元组提取。三元组提取和精确去重发生在**离线巩固阶段**（Phase 3），详见 §4.1 和 §6.4。
 
 基础遗忘机制落地：乘法衰减模型 decay_score = importance × activity_signal，activity_signal = clamp(recency_boost + access_boost, 0.05, 1.0)。Dormant 态区分：Fact/Relation 永不清除，Preference/ProceduralNode Dormant 超过 90 天可 Purge。dormant_since 字段计时，reactivate_node 时归零。
 
@@ -1115,7 +1115,7 @@ Episode 内容分类压缩落地：信息性内容原样存储，工件性内容
 
 ### Phase 2：程序记忆与自我认知（对应 Roadmap Phase 3）
 
-**目标：** 让 Agent 从自身经验中学习行为模式，并能认知自己的能力边界。
+**目标：** 让 Bot 从自身经验中学习行为模式，并能认知自己的能力边界。
 
 **核心组件一：ProceduralNode 完整生命周期**
 
@@ -1129,7 +1129,7 @@ ProceduralNode 的来源（ADR-068 2026-09 revision 收敛为单一语义生产�
 
 路径 C — 离线蒸馏提炼（唯一生产者）：`EpisodicDistiller::promote_procedures` 扫描 Episode(knowledge_subtype=Procedure) → Step 2a 服务端 LLM 提取 `(trigger_condition, action_pattern)` → Step 4 LLM Judge 仲裁 → 晋升 ProceduralNode（含 promotion_metadata 证据链）。
 
-ProceduralNode 的激活时机：每次 Agent 生成回复前，检索 relevant ProceduralNode（按 trigger_condition 匹配当前上下文），activation_count += 1，更新 last_accessed。被激活的 ProceduralNode 注入 System Prompt 行为准则区，格式："当 [trigger_condition] 时，优先 [action_pattern]"。
+ProceduralNode 的激活时机：每次 Bot 生成回复前，检索 relevant ProceduralNode（按 trigger_condition 匹配当前上下文），activation_count += 1，更新 last_accessed。被激活的 ProceduralNode 注入 System Prompt 行为准则区，格式："当 [trigger_condition] 时，优先 [action_pattern]"。
 
 **核心组件二：Skill ↔ ProceduralNode 双向联动**
 
@@ -1137,31 +1137,31 @@ ProceduralNode 的激活时机：每次 Agent 生成回复前，检索 relevant 
 
 Skill → ProceduralNode：当 SkillExperience 的 failure_cases 积累超过 3 条同类失败（如都是"输出太长"），触发联动提取。LLM 阅读 failure_cases 摘要，生成跨 Skill 的通用 ProceduralNode。例如：weekly-report Skill 输出太长被纠正 5 次 + code-review Skill 输出太长被纠正 3 次 → 提炼出通用 ProceduralNode："此用户对输出长度敏感，所有 Skill 应先给结论再展开细节"。
 
-ProceduralNode → Skill：ProceduralNode 的 activation_count 低于阈值（如 < 3）时，向对应 Skill 发送降级建议。例如某个 ProceduralNode 的 action_pattern 是"用表格"，但 activation_count 持续很低，Agent 应该反思：这个行为模式是否还适用？
+ProceduralNode → Skill：ProceduralNode 的 activation_count 低于阈值（如 < 3）时，向对应 Skill 发送降级建议。例如某个 ProceduralNode 的 action_pattern 是"用表格"，但 activation_count 持续很低，Bot 应该反思：这个行为模式是否还适用？
 
 **⚠️ 困境三的补设计 — 主动假设验证机制**
 
 Phase 2 需要补上"困境三"（记忆泛化与抽象）的设计缺口。ProceduralNode 的提炼不能只是被动的"积累够了就合并"——需要有主动的假设验证：
 
-当同一 trigger_condition 下有 >= 3 个 action_pattern 变体时（如"用户要求简洁"的表达方式有"太长了"、"少说废话"、"简短点"三种），Agent 应主动提出假设："这三种表达是否指向同一个偏好？" 并在后续交互中验证。验证通过后合并为单一 ProceduralNode，验证失败则保留多个变体。
+当同一 trigger_condition 下有 >= 3 个 action_pattern 变体时（如"用户要求简洁"的表达方式有"太长了"、"少说废话"、"简短点"三种），Bot 应主动提出假设："这三种表达是否指向同一个偏好？" 并在后续交互中验证。验证通过后合并为单一 ProceduralNode，验证失败则保留多个变体。
 
 具体实现：在 `acowork-memory` 的 `consolidation/distiller.rs` 内实现 `detect_merge_candidates()`，扫描同类 trigger_condition 下的多个 action_pattern，由 LLM 判断是否应合并。
 
 **~~核心组件三：自我评估驱动的 AutobiographicalNode 更新~~** **（已移除，v3.12）**
 
-原设计目标是让 Agent 认知自身的能力边界，主要通过 Limitation 节点的自动更新实现：
+原设计目标是让 Bot 认知自身的能力边界，主要通过 Limitation 节点的自动更新实现：
 
 - 触发时机：每次 SkillExecution 完成后，根据 success/failure 和模型信息更新 `SkillExperience.model_compatibility`；某模型某类任务成功率低于 60% 时生成/更新 Limitation 节点。
 - 注入时机：Limitation 节点在每次对话的 System Prompt 注入时必须包含（与 Identity / Capability 同级）。
 
 > **移除原因**：该自动路径（含 runtime `MemoryManager::run_self_evaluation` 与 `acowork-memory` consolidation 内的重复实现）已删除——`success_count` 从未在任何代码路径被递增，据此派生的"成功率"必然把 ≥5 次失败的 Skill 误判为 0% 成功率，产生 false-positive Limitation 节点。ADR-068 2026-09 revision 进一步收敛：自传体记忆来源为 §3.3 的两条生产者（Manifest 权威导入 + EpisodicDistiller 离线识别晋升），Limitation 节点的产生依赖蒸馏器从用户/LLM 显式陈述中识别，不再自动生成。
 
-同时原设计新增 Relationship 节点的自动维护（用户与 Agent 合作超过 30 天自动生成）——该自动触发逻辑（manager.rs `run_relationship_generation`）已整体删除（2026-09 revision,回归测试 `post_compaction_tasks_do_not_write_relationship_nodes` 锁定）；当前 Relationship 节点由 `EpisodicDistiller` 从 `knowledge_subtype=Relation` 的 episode 晋升，无第二生产者。
+同时原设计新增 Relationship 节点的自动维护（用户与 Bot 合作超过 30 天自动生成）——该自动触发逻辑（manager.rs `run_relationship_generation`）已整体删除（2026-09 revision,回归测试 `post_compaction_tasks_do_not_write_relationship_nodes` 锁定）；当前 Relationship 节点由 `EpisodicDistiller` 从 `knowledge_subtype=Relation` 的 episode 晋升，无第二生产者。
 
 **Phase 2 验收标准：**
 
 - ProceduralNode 有三条明确的来源路径，且 Skill ↔ ProceduralNode 联动可工作
-- 同一 trigger_condition 出现 >= 3 个变体时，Agent 能提出合并假设（而非仅被动合并）
+- 同一 trigger_condition 出现 >= 3 个变体时，Bot 能提出合并假设（而非仅被动合并）
 - AutobiographicalNode Limitation 节点能根据执行统计自动生成/更新
 - 所有 Phase 1 功能在 Phase 2 改动后仍然正常运行
 
@@ -1169,13 +1169,13 @@ Phase 2 需要补上"困境三"（记忆泛化与抽象）的设计缺口。Proc
 
 ### Phase 3：离线巩固与持久化（对应 Roadmap Phase 6）
 
-**目标：** 让 Agent 在空闲时主动整合经验、发现隐式关联，并具备跨设备持久化能力。
+**目标：** 让 Bot 在空闲时主动整合经验、发现隐式关联，并具备跨设备持久化能力。
 
 **核心组件一：离线巩固（"睡眠"模式）**
 
 离线巩固是 Phase 1 即时提取的补充——即时提取处理"显式信息的即时存储"，离线巩固处理"隐式关联的发现与整合"。
 
-触发条件（OR 关系，任一满足即触发）：Agent 空闲超过 30 分钟（可配置）、未巩固 episode 积攒超过 50 条、用户手动触发。多 Agent 场景下增加全局协调限制：同一时刻只有一个 Agent 执行离线巩固，避免 CPU/内存竞争。
+触发条件（OR 关系，任一满足即触发）：Bot 空闲超过 30 分钟（可配置）、未巩固 episode 积攒超过 50 条、用户手动触发。多 Bot 场景下增加全局协调限制：同一时刻只有一个 Bot 执行离线巩固，避免 CPU/内存竞争。
 
 离线巩固的 LLM prompt 设计（关键）：
 
@@ -1211,7 +1211,7 @@ Phase 1 的内容分类压缩用模板字符串和正则分离生成了确定性
 
 增强规则：
 - 只增强 content_type = Artifact 的 episode（信息性内容不需要增强）
-- 增强时 LLM 可以看到 episode 的自然语言上下文（用户说了什么、Agent 回复了什么），以及相邻 episode 的内容
+- 增强时 LLM 可以看到 episode 的自然语言上下文（用户说了什么、Bot 回复了什么），以及相邻 episode 的内容
 - 增强后的摘要替换 content 字段，artifact_refs 保留不动
 - 增强是有损的：如果 LLM 判断"此代码交互不值得增强"（如只是读取了一个配置文件），保持原摘要不变
 
@@ -1228,7 +1228,7 @@ Phase 3 增强后：
 
 **核心组件二：分页换出（MemGPT 风格）**
 
-分页换出的目标不是"无限扩展上下文"，而是"让 Agent 主动管理记忆的活跃度"。以下情况触发换出：
+分页换出的目标不是"无限扩展上下文"，而是"让 Bot 主动管理记忆的活跃度"。以下情况触发换出：
 
 - Token 使用率 > 90% 且关键信息无法通过截断解决
 - 某个 episode 超过 30 天未被任何检索命中
@@ -1242,7 +1242,7 @@ Phase 3 增强后：
 
 云端同步按节点类型同步。全部数据明文同步，平台托管（与主流互联网平台一致，详见 00-prd.md ADR-002）：
 
-冲突解决策略：Phase 6 阶段先实现单向同步（云端 → Agent），Agent 本地变更记录在本地不上报，避免双向写入导致的冲突。后续 Phase 7+ 若需双向同步，采用"最后写入者胜 + 用户确认"机制。
+冲突解决策略：Phase 6 阶段先实现单向同步（云端 → Bot），Bot 本地变更记录在本地不上报，避免双向写入导致的冲突。后续 Phase 7+ 若需双向同步，采用"最后写入者胜 + 用户确认"机制。
 
 **Phase 3 验收标准：**
 
@@ -1270,7 +1270,7 @@ Phase 3 增强后：
 
 ### 10.1 设计动机
 
-记忆系统是 ACowork Agent 的核心差异化能力——推理能力依赖 LLM，操作能力依赖 Tools，只有记忆系统是 ACowork 自主掌控的。随着平台演进，记忆系统必然经历大量迭代（新检索策略、新遗忘模型、新巩固方式、新存储引擎……）。如果记忆触发点硬编码在 Runtime 主循环里，每次记忆迭代都要改 Runtime 源码，这违反了"Runtime 是稳定执行引擎"的定位。
+记忆系统是 ACowork Bot 的核心差异化能力——推理能力依赖 LLM，操作能力依赖 Tools，只有记忆系统是 ACowork 自主掌控的。随着平台演进，记忆系统必然经历大量迭代（新检索策略、新遗忘模型、新巩固方式、新存储引擎……）。如果记忆触发点硬编码在 Runtime 主循环里，每次记忆迭代都要改 Runtime 源码，这违反了"Runtime 是稳定执行引擎"的定位。
 
 因此引入**记忆生命周期（Memory Lifecycle）**作为 Runtime 和 Memory 系统之间的标准化接口。Runtime 只负责在固定位置触发生命周期阶段，Memory 系统通过注册 handler 和中间件响应，两者解耦。
 
@@ -1434,7 +1434,7 @@ pub struct DecayConfig {
 
 - `MemoryQuery` 替代裸 `&str`：未来扩展只需加字段（如 `temperature` 控制检索创造性、`recency_boost` 控制时间偏好），不破坏已有实现
 - `MemoryContext` 带 `priority` 和 `estimated_tokens`：Inject 阶段可以直接按优先级和 token 预算裁剪，无需 Runtime 了解记忆内部结构
-- `DecayConfig` 参数化：不同 Agent 可以有不同的遗忘策略（"学习型 Agent"遗忘慢，"工具型 Agent"遗忘快），通过 manifest 配置注入
+- `DecayConfig` 参数化：不同 Bot 可以有不同的遗忘策略（"学习型 Bot"遗忘慢，"工具型 Bot"遗忘快），通过 manifest 配置注入
 - `health_check` + `stats`：为 Desktop App 的记忆管理面板和运维监控提供标准数据接口
 - trait 中不包含任何 SQLite 或其他存储后端的类型，实现完全隔离
 
@@ -1589,10 +1589,10 @@ custom_filter = { type = "wasm", path = "filters/content_filter.wasm", priority 
 | ------------------------------ | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 存储抽象方式                   | trait + impl                   | Rust 生态标准做法，零成本抽象（monomorphization），编译期检查                                                                                                                |
 | 中间件模型                     | 洋葱模型（Tower 风格）         | 业界验证过的模式，支持前/后处理，错误传播自然                                                                                                                                |
-| 配置注入                       | manifest.toml + 系统默认       | manifest 声明 Agent 级定制，系统默认兜底                                                                                                                                     |
+| 配置注入                       | manifest.toml + 系统默认       | manifest 声明 Bot 级定制，系统默认兜底                                                                                                                                     |
 | 事件通知                       | Event Bus（发布/订阅）         | Desktop App 和日志系统可订阅 MemoryEvent，不影响核心管线性能                                                                                                                 |
 | Retrieve/Inject 拆分为两个阶段 | 是                             | Retrieve 关注"查什么"，Inject 关注"怎么放"，职责分离有利于未来 Inject 策略的独立演化（如 RAG 结果和本地记忆的混合排序）                                                      |
-| RAG 双通道检索                 | 配置驱动 Opt-In                | RAG 通道仅当 manifest 声明 `type=rag` 时使能；MemoryManager 通过 `rag_client: Option<Arc<RagClient>>` 条件分支控制；无 RAG 声明的 Agent 行为零侵入（详见 00-prd.md §1.13.1） |
+| RAG 双通道检索                 | 配置驱动 Opt-In                | RAG 通道仅当 manifest 声明 `type=rag` 时使能；MemoryManager 通过 `rag_client: Option<Arc<RagClient>>` 条件分支控制；无 RAG 声明的 Bot 行为零侵入（详见 00-prd.md §1.13.1） |
 | 存储后端                       | rusqlite (SQLite 3 + FTS5 + sqlite-vss) | 嵌入式关系数据库，应用层 `nodes`/`edges`/`vectors` 表 + FTS5 虚表 + 应用层 RRF 融合 |
 | 数据模型                       | LPG（Label + Property + Edge） | 替代关系型表结构，认知分层与 LPG Label 一一映射                                                                                                                              |
 | 存储格式                       | `memory/private.sqlite`         | 单文件数据库，内含 WAL + 向量表 + FTS5 虚表                                                                                                                                    |
@@ -1642,15 +1642,15 @@ LLM Judge 流程（Phase 3+）：
 
 **用户隐式反馈**：
 
-- Agent 后续输出是否引用了检索结果（引用率 = 引用了检索结果的回复数 / 触发了检索的回复数）
+- Bot 后续输出是否引用了检索结果（引用率 = 引用了检索结果的回复数 / 触发了检索的回复数）
 - 用户是否在同一话题追问（暗示检索结果不够完整）
-- 用户是否直接否定 Agent 回复（暗示检索结果不准确）
+- 用户是否直接否定 Bot 回复（暗示检索结果不准确）
 
 ### 11.2 离线基准（Benchmark 阶段）
 
 **LongMemEval 5 维集成**：
 
-LongMemEval 是当前 Agent 记忆系统最权威的评测基准，覆盖 5 个核心维度：
+LongMemEval 是当前 Bot 记忆系统最权威的评测基准，覆盖 5 个核心维度：
 
 | 维度       | 代码 | 评估内容             | 与 ACowork 模块的对应    |
 | ---------- | ---- | -------------------- | ---------------------------- |
@@ -1722,7 +1722,7 @@ Phase 2 交付前必须通过以下验证：
 - 使用 LongMemEval-S 标准子集（约 115K tokens 上下文长度）运行完整 5 维评测
 - 综合分数 >= 65%，各维度不低于 50%
 - Abs 维度 >= 60%（拒答是最关键的差异化能力）
-- 测试环境：单 Agent，SqliteStore 存储后端，embedding 模型 Ollama/Remote API（取决于 provider 配置）
+- 测试环境：单 Bot，SqliteStore 存储后端，embedding 模型 Ollama/Remote API（取决于 provider 配置）
 
 **功能验证清单**：
 

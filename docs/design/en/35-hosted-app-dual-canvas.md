@@ -13,23 +13,23 @@
 
 ## 1. Positioning
 
-Same as an agent **generating an image**:
+Same as a bot **generating an image**:
 
-1. Create a file in that agent's workspace;
+1. Create a file in that bot's workspace;
 2. Edit, save, preview, edit again on that file;
-3. When done, leave it in the workspace, upload to DOC, or send it to another agent / the user.
+3. When done, leave it in the workspace, upload to DOC, or send it to another bot / the user.
 
 **Always start from a file.** Not from "the in-memory canvas bound to this chat".
 
-Three surfaces may be absent; they MUST NOT treat the UI the user is editing as the agent's file:
+Three surfaces may be absent; they MUST NOT treat the UI the user is editing as the bot's file:
 
 | Surface | Who uses it | Source of truth | Entry |
 |---|---|---|---|
 | **User canvas** | the signed-in user | the document the user opened in the app | left nav → `AppFrame` → `/api/apps/{id}/ui/` |
-| **Agent artifact** | an agent | **a file in that agent's workspace** | Runtime MCP → app `open_file` / `save_file` / edit tools |
-| **Preview** | the user watching the agent | read-only open of that workspace path | chat file card → editor-pane viewer (images: `ImageViewer`; `.figcraft`: app iframe) |
+| **Bot artifact** | a bot | **a file in that bot's workspace** | Runtime MCP → app `open_file` / `save_file` / edit tools |
+| **Preview** | the user watching the bot | read-only open of that workspace path | chat file card → editor-pane viewer (images: `ImageViewer`; `.figcraft`: app iframe) |
 
-`library` (DOC / PM): the artifact key lives in the app's own store; opening the resource shows it — a "file" that does not sit in the agent workspace. `visual` (FigCraft and design files that need a dedicated viewer): the artifact key is a workspace path.
+`library` (DOC / PM): the artifact key lives in the app's own store; opening the resource shows it — a "file" that does not sit in the bot workspace. `visual` (FigCraft and design files that need a dedicated viewer): the artifact key is a workspace path.
 
 Platform chat is **not co-edit by default**.
 
@@ -52,7 +52,7 @@ Desktop chat card → editor pane previews that path
 Left-nav AppFrame = the user's own document; MCP does not attach
 ```
 
-One app process MAY have several workspace files open (cached by path). Isolation is the **agent workspace directory**.
+One app process MAY have several workspace files open (cached by path). Isolation is the **bot workspace directory**.
 
 ---
 
@@ -79,7 +79,7 @@ extensions = ["figcraft"]
 
 ---
 
-## 4. Agent artifact = workspace file
+## 4. Bot artifact = workspace file
 
 ### 4.1 Primary key
 
@@ -93,7 +93,7 @@ Chat, preview and MCP `path` all cite it. `conversation_id` MUST NOT be the prim
 
 | Step | What happens |
 |---|---|
-| Create | Agent writes a new file in the workspace (FigCraft: `save_file` / `file.save` to a workspace path; or `export` then `file_write` bytes). An empty file still counts |
+| Create | Bot writes a new file in the workspace (FigCraft: `save_file` / `file.save` to a workspace path; or `export` then `file_write` bytes). An empty file still counts |
 | Edit | MCP `open_file` that path (if not open) → edit tools → `save_file`. Disk is authority |
 | Preview | User opens the card; the viewer reads workspace file bytes |
 | Edit again | MCP on the same path; preview re-reads or takes a snapshot |
@@ -126,7 +126,7 @@ DOC / PM MUST NOT be rewritten as "write workspace then upload". Their artifacts
 ## 5. User canvas
 
 - Entry, ticket, sandbox: doc 34.
-- The user opening the agent's `.figcraft` from the workspace tree into left-nav FigCraft is user behaviour.
+- The user opening the bot's `.figcraft` from the workspace tree into left-nav FigCraft is user behaviour.
 - MUST NOT register the user iframe as an MCP Backend.
 
 ---
@@ -233,7 +233,7 @@ VectorCraft has no host mode; its `window.vectorcraft` page API is used instead 
 
 ## 8. Handoff and co-edit
 
-The file is already in the workspace. Handoff is that path: user copy / left-nav open / DOC import / send to another agent.
+The file is already in the workspace. Handoff is that path: user copy / left-nav open / DOC import / send to another bot.
 
 Co-edit: only after the app UI embeds chat. Platform chat never co-edits automatically.
 
@@ -268,14 +268,14 @@ Co-edit: only after the app UI embeds chat. Platform chat never co-edits automat
 Doc 34 hosting rules, plus:
 
 1. Choose `ui.canvas.kind` (preview channel, not "has a file")
-2. `visual`: artifact in the agent workspace; MCP paths confined to that root; declare `extensions` + `preview_path`
+2. `visual`: artifact in the bot workspace; MCP paths confined to that root; declare `extensions` + `preview_path`
 3. `library`: write the app store; do not "unify" onto workspace files
 4. MCP does not attach to the left-nav iframe
 5. Preview is not a chat bubble
 6. Glue stays in the adapter
 7. Out-of-root paths error; no fall-through to "whatever is open"
 
-FigCraft: left-nav WASM for the user; workspace `*.figcraft` + engine for the agent; editor-pane iframe to preview the file; do not change `crates/mcp`, `crates/engine`, or `apps/figcraft-web/index.html`.
+FigCraft: left-nav WASM for the user; workspace `*.figcraft` + engine for the bot; editor-pane iframe to preview the file; do not change `crates/mcp`, `crates/engine`, or `apps/figcraft-web/index.html`.
 
 ---
 
@@ -289,10 +289,10 @@ FigCraft: left-nav WASM for the user; workspace `*.figcraft` + engine for the ag
 
 ## 13. Verification (when implementing)
 
-1. After the agent creates `designs/a.figcraft`, the workspace tree shows it; left-nav FigCraft does **not** spontaneously show that document.
+1. After the bot creates `designs/a.figcraft`, the workspace tree shows it; left-nav FigCraft does **not** spontaneously show that document.
 2. Close preview, MCP edit + `save_file`, disk updates; reopen preview shows the new content.
 3. Paths outside the workspace are refused.
-4. User B's agent writes its own workspace; user A's tree does not contain that file.
+4. User B's bot writes its own workspace; user A's tree does not contain that file.
 5. Scrolling chat does not unmount the editor-pane preview iframe.
 6. ACowork light/dark: an open preview follows the shell.
 7. Adapter diff against upstream `index.html` is empty.

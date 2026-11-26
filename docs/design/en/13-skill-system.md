@@ -4,7 +4,7 @@
 
 ---
 
-Skill is the mechanism for extending Agent behavior patterns. Through Skill Instructions, LLM acquires domain-specific knowledge and operation procedures, gaining specialized behaviors beyond its base capabilities.
+Skill is the mechanism for extending Bot behavior patterns. Through Skill Instructions, LLM acquires domain-specific knowledge and operation procedures, gaining specialized behaviors beyond its base capabilities.
 
 The Skill system uses a **two-layer model**: SKILL.md as the static definition layer (publishing state), SQLite memory layer as the dynamic experience layer (runtime state). Skills in debugging phase iterate within SQLite; once mature, they are committed to SKILL.md.
 
@@ -32,14 +32,14 @@ Skill System
 
 | Layer | Storage Location | Lifecycle | Distributable | Auditable | Version-controllable |
 |-------|-----------------|-----------|---------------|-----------|----------------------|
-| Definition Layer | SKILL.md | Versioned with .agent package | Yes | Yes (open and read) | Yes |
-| Experience Layer | SQLite memory layer | Persisted in Agent workspace | No (private data) | No (graph DB) | No |
+| Definition Layer | SKILL.md | Versioned with .bot package | Yes | Yes (open and read) | Yes |
+| Experience Layer | SQLite memory layer | Persisted in Bot workspace | No (private data) | No (graph DB) | No |
 
 Analogy: SKILL.md is the **textbook** (public, standard, shareable), SQLite memory layer experience layer is the **personal notes** (private, practice-based, individual). Only their combination forms complete Skill behavior.
 
 ## 2. SKILL.md Format (Static Definition Layer)
 
-SKILL.md uses YAML frontmatter + Markdown body, compatible with the Agent Skills open standard (agentskills.io).
+SKILL.md uses YAML frontmatter + Markdown body, compatible with the Bot Skills open standard (agentskills.io).
 
 ### 2.1 File Location
 
@@ -121,11 +121,11 @@ Use Markdown format; one section per project; keep within 500 words.
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | Yes | Skill name, unique within Agent |
+| `name` | Yes | Skill name, unique within Bot |
 | `description` | Yes | Feature description, used for Skill search and display |
 | `version` | No | Skill version number (semver) |
-| `author` | No | Creator: `agent` (Agent self-learned) or `developer` (developer-written) |
-| `source_draft` | No | Draft ID when Agent self-created, for tracing debugging history |
+| `author` | No | Creator: `bot` (Bot self-learned) or `developer` (developer-written) |
+| `source_draft` | No | Draft ID when Bot self-created, for tracing debugging history |
 | `triggers` | Yes | Trigger word list, LLM matches based on user input |
 | `tool_deps` | No | Built-in / WASM tools depended on; Runtime uses for permission checks |
 | `platforms` | No | Platform support declaration, see §2.4 |
@@ -153,7 +153,7 @@ platforms:
 
 ## 3. SQLite memory layer Experience Layer (Dynamic Runtime State)
 
-The experience data the Agent accumulates while using Skills is stored in SQLite memory layer as an enhancement layer over the SKILL.md static definition.
+The experience data the Bot accumulates while using Skills is stored in SQLite memory layer as an enhancement layer over the SKILL.md static definition.
 
 ### 3.1 Node Type Overview
 
@@ -168,7 +168,7 @@ SQLite Memory Layer (`nodes` table)
 
 ### 3.2 SkillDraft (Draft Skill)
 
-During debugging, Skills self-created by Agent or guided by user are stored as SkillDraft nodes.
+During debugging, Skills self-created by Bot or guided by user are stored as SkillDraft nodes.
 
 ```rust
 struct SkillDraft {
@@ -384,7 +384,7 @@ User: learn how to help me summarize weekly reports
 | Capability | Description |
 |------------|-------------|
 | Trial run | Execute Skill in Debug mode; results not written to production memory |
-| Iterative modification | Agent automatically modifies draft instructions based on execution results |
+| Iterative modification | Bot automatically modifies draft instructions based on execution results |
 | History tracing | View any iteration version and its execution records at that time |
 | User feedback | User can give feedback on each execution result |
 | Draft persistence | Save on interruption, continue next time; draft state fully preserved |
@@ -642,7 +642,7 @@ When Token budget is insufficient, Skill content trimming order (see `03-agent-r
 | Debug in SQLite memory layer | Don't directly modify SKILL.md | Debugging is an exploratory process needing iteration history, rollback, A/B testing; graph database naturally supports this |
 | One-way commit | SQLite memory → SKILL.md | Like git workflow: iterate in workspace → commit to repo |
 | Model compatibility recording | SkillExecution + SkillExperience | Skill effectiveness is strongly related to LLM; different models need different adaptations; must record |
-| SKILL.md format | YAML frontmatter + Markdown | Compatible with Agent Skills open standard (agentskills.io), the de facto standard across six major platforms |
+| SKILL.md format | YAML frontmatter + Markdown | Compatible with Bot Skills open standard (agentskills.io), the de facto standard across six major platforms |
 | Experience injection not replacement | Merge at runtime, don't modify SKILL.md | Ensure SKILL.md as stable baseline; experience as dynamic enhancement layer overlay |
 | Context trimming | Experience layer trimmed first | Base instructions are Skill's core logic; experience is icing on the cake |
 | Drafts not in package | SkillDraft only in SQLite memory layer | Unpublished drafts should not be distributed as part of package |

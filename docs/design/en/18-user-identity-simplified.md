@@ -6,7 +6,7 @@
 
 ## 1. Design Background
 
-The original design (`07-system-agent.md`, deleted) delegated user identity management to the system Agent (`com.acowork.system`), implementing identity management through the full chain `identity_deps` → `identity_delivery` → `identity_store`/`identity_query` tools. That approach introduced excessive complexity: the system Agent had to run, required a ContentProvider mechanism, needed dedicated built-in tools, and required cross-Agent Intent communication channels.
+The original design (`07-system-agent.md`, deleted) delegated user identity management to the system Bot (`com.acowork.system`), implementing identity management through the full chain `identity_deps` → `identity_delivery` → `identity_store`/`identity_query` tools. That approach introduced excessive complexity: the system Bot had to run, required a ContentProvider mechanism, needed dedicated built-in tools, and required cross-Agent Intent communication channels.
 
 This design follows the **public resource management model** (used for model/MCP/search: version-driven diff sync + AgentHelloResult injection), treating user identity as a public resource managed by Gateway. Gateway centralizes management and persistence, pushes to Runtime at handshake, and hot-pushes on changes.
 
@@ -99,7 +99,7 @@ pub struct UserProfileListFile {
 
 | Field | Source | Required | Description |
 |-------|--------|----------|-------------|
-| `display_name` | Onboarding / Settings | Yes | Address name; Agent learns via system prompt |
+| `display_name` | Onboarding / Settings | Yes | Address name; Bot learns via system prompt |
 | `language` | Onboarding / Settings | Yes | Language preference, affects LLM system prompt language |
 | `timezone` | Onboarding / Settings | Yes | Timezone, affects time-related replies |
 | `city` | Onboarding / Settings | No | City |
@@ -240,7 +240,7 @@ UserProfileUpdate.version: 8
 | `GatewayResponse::IdentityDelivery` | `protocol.rs` — no longer used |
 | `identity_deps` (manifest) | `manifest.rs` — keep field but mark deprecated, no longer consumed |
 | `identity_entries` (RunningAgentInfo) | `gateway/state.rs` — remove |
-| System Agent `identity:query`/`identity:observe` capabilities | Remove from system Agent manifest |
+| System Bot `identity:query`/`identity:observe` capabilities | Remove from system Bot manifest |
 
 ---
 
@@ -373,7 +373,7 @@ When `user_identity` is `None` (user has not completed Onboarding or no user is 
 
 - `identity_context` is `None`
 - `user_display_name` is `None`
-- Stop message falls back to `"Agent stopped by user"`
+- Stop message falls back to `"Bot stopped by user"`
 - LLM receives no user identity information and works normally
 
 ---

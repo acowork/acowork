@@ -6,9 +6,9 @@
 
 ## 1. 设计背景
 
-原有设计（07-system-agent.md，已删除）将用户身份管理委托给系统 Agent（`com.acowork.system`），通过 `identity_deps` → `identity_delivery` → `identity_store`/`identity_query` 工具的全链路实现身份管理。该方案引入了过多复杂性：系统 Agent 需要运行、需要 ContentProvider 机制、需要专用的内置工具、需要跨 Agent Intent 通信链路。
+原有设计（07-system-agent.md，已删除）将用户身份管理委托给系统 Bot（`com.acowork.system`），通过 `identity_deps` → `identity_delivery` → `identity_store`/`identity_query` 工具的全链路实现身份管理。该方案引入了过多复杂性：系统 Bot 需要运行、需要 ContentProvider 机制、需要专用的内置工具、需要跨 Bot Intent 通信链路。
 
-本方案参照 **model/MCP/search 等公共资源的管理模式**（version-driven diff sync + AgentHelloResult 注入），将用户身份也视为 Gateway 管理的公共资源，由 Gateway 集中管理、持久化，在 Agent 握手时推送给 Runtime，并在变更时热推送。
+本方案参照 **model/MCP/search 等公共资源的管理模式**（version-driven diff sync + AgentHelloResult 注入），将用户身份也视为 Gateway 管理的公共资源，由 Gateway 集中管理、持久化，在 Bot 握手时推送给 Runtime，并在变更时热推送。
 
 ### 设计原则
 
@@ -99,7 +99,7 @@ pub struct UserProfileListFile {
 
 | 字段 | 来源 | 必填 | 说明 |
 |------|------|------|------|
-| `display_name` | Onboarding / Settings | 是 | 称谓，Agent 通过 system prompt 获知 |
+| `display_name` | Onboarding / Settings | 是 | 称谓，Bot 通过 system prompt 获知 |
 | `language` | Onboarding / Settings | 是 | 语言偏好，影响 LLM system prompt 语言 |
 | `timezone` | Onboarding / Settings | 是 | 时区，影响时间相关回复 |
 | `city` | Onboarding / Settings | 否 | 城市 |
@@ -240,7 +240,7 @@ UserProfileUpdate.version: 8
 | `GatewayResponse::IdentityDelivery` | protocol.rs — 不再使用 |
 | `identity_deps` (manifest) | manifest.rs — 保留字段但标记 deprecated，不再消费 |
 | `identity_entries` (RunningAgentInfo) | gateway/state.rs — 移除 |
-| System Agent `identity:query`/`identity:observe` capabilities | 系统 Agent manifest 中移除 |
+| System Bot `identity:query`/`identity:observe` capabilities | 系统 Bot manifest 中移除 |
 
 ---
 
@@ -373,7 +373,7 @@ Desktop App 更新用户资料
 
 - `identity_context` 为 `None`
 - `user_display_name` 为 `None`
-- stop 消息回退为 `"Agent stopped by user"`
+- stop 消息回退为 `"Bot stopped by user"`
 - LLM 不获取任何用户身份信息，正常工作
 
 ---

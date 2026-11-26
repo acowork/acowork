@@ -4,13 +4,13 @@
 
 ---
 
-This document defines how Agent Runtime persists conversation state, manages multi-session lifecycle, and implements Session Actor architecture. Conversation persistence is the foundation of "agent has memory across conversations" — without reliable persistence, the system cannot deliver coherent multi-turn dialogue.
+This document defines how Bot Runtime persists conversation state, manages multi-session lifecycle, and implements Session Actor architecture. Conversation persistence is the foundation of "bot has memory across conversations" — without reliable persistence, the system cannot deliver coherent multi-turn dialogue.
 
 ## 1. Session Actor Architecture
 
 ### 1.1 Why Session Actor
 
-Agent Runtime may simultaneously serve multiple sessions (e.g. user opens multiple chat windows, or multiple users share one Agent). Each session has independent:
+Bot Runtime may simultaneously serve multiple sessions (e.g. user opens multiple chat windows, or multiple users share one Bot). Each session has independent:
 - Conversation history
 - Loop detection state
 - Token usage
@@ -146,14 +146,14 @@ Properties:
 - No semantic info (doesn't contain user_id, agent_id)
 - Persistent (saved in Conversation JSONL file name)
 
-### 1.7 Session State vs Agent State
+### 1.7 Session State vs Bot State
 
-| Dimension | Session State (per session) | Agent State (cross-session) |
+| Dimension | Session State (per session) | Bot State (cross-session) |
 |-----------|----------------------------|------------------------------|
 | Conversation history | ✓ | ✗ |
 | Loop detection counter | ✓ | ✗ |
 | Model override | ✓ | ✗ |
-| Token usage | ✓ | Aggregated to Agent |
+| Token usage | ✓ | Aggregated to Bot |
 | Compaction state | ✓ | ✗ |
 | Tool definitions | ✗ | ✓ |
 | Provider config | ✗ | ✓ |
@@ -161,11 +161,11 @@ Properties:
 | Budget Guard | ✗ | ✓ |
 | UserProfile | ✗ | ✓ |
 
-**Boundary principle**: Session state is "private conversation context", Agent state is "Agent capability configuration". Two are strictly separated, avoiding cross-session state leakage.
+**Boundary principle**: Session state is "private conversation context", Bot state is "Bot capability configuration". Two are strictly separated, avoiding cross-session state leakage.
 
 ### 1.8 Budget Allocation
 
-Each session has independent token budget, but total Agent budget is constrained:
+Each session has independent token budget, but total Bot budget is constrained:
 
 ```rust
 pub struct BudgetGuard {
@@ -253,7 +253,7 @@ impl ConversationWriter {
 }
 ```
 
-**Flush strategy**: Each event immediately flushes to disk (fsync), avoiding Agent crash losing recent conversation. Trade-off is performance, but conversation persistence is correctness-critical.
+**Flush strategy**: Each event immediately flushes to disk (fsync), avoiding Bot crash losing recent conversation. Trade-off is performance, but conversation persistence is correctness-critical.
 
 **File rotation**: When single file exceeds 100 MB, auto-rotate to `{session_id}.{n}.jsonl`. Old files compressed and archived.
 
@@ -331,7 +331,7 @@ struct Episode {
 }
 ```
 
-Distilled Episode is the "experiential memory" of Agent, used for:
+Distilled Episode is the "experiential memory" of Bot, used for:
 - Future retrieval (when user asks related questions)
 - Cross-session memory continuity
 - Long-term memory basis
@@ -391,7 +391,7 @@ This avoids "Compaction call + Distillation call" duplicate LLM invocation, halv
 
 ## 5. State Recovery
 
-When Agent Runtime restarts (e.g. user explicitly restarts, configuration update triggers restart), Session state is recovered from disk:
+When Bot Runtime restarts (e.g. user explicitly restarts, configuration update triggers restart), Session state is recovered from disk:
 
 ```
 Agent Runtime startup

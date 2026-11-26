@@ -1,10 +1,10 @@
-﻿# Agent Runtime (Unified Execution Engine)
+﻿# Bot Runtime (Unified Execution Engine)
 
 > Version: v3.6 | Last Updated: 2026-05-06
 
 ---
 
-Agent Runtime is the only binary executable provided by the platform, similar to Android's ART virtual machine. Gateway starts one Agent Runtime process for each Agent, passing the .agent package path and Gateway endpoint as startup parameters.
+Bot Runtime is the only binary executable provided by the platform, similar to Android's ART virtual machine. Gateway starts one Bot Runtime process for each Bot, passing the .bot package path and Gateway endpoint as startup parameters.
 
 > **v3.7 Change (2026-05-28)**: Context compression strategy greatly simplified — see [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md). Core change: abandon programmatic folding strategies (Tool Result folding, content folding Phase 1); context compression returns to LLM summary as the sole normal path means. Daily compression flow simplified to: 70% alert → 80% LLM summary (complete context, no folding) → 95% emergency_trim safety net.
 
@@ -21,7 +21,7 @@ Agent Runtime is the only binary executable provided by the platform, similar to
 
 ## 1. Startup Method
 
-**Design constraint**: Agent Runtime idle memory footprint target controlled at ~5-10 MB. This goal constrains Runtime's module design — lazy initialization (SQLite, Wasmtime Engine and other heavyweight modules loaded on demand), minimized default cache, zero background polling threads.
+**Design constraint**: Bot Runtime idle memory footprint target controlled at ~5-10 MB. This goal constrains Runtime's module design — lazy initialization (SQLite, Wasmtime Engine and other heavyweight modules loaded on demand), minimized default cache, zero background polling threads.
 
 > **Verification method**: Phase 3 will report memory usage in real-time via `MemoryMetrics` struct in Debug mode, and provide `/metrics` endpoint for Desktop App display. Phase 2 validates via Rust standard library `alloc::alloc::GlobalStats` (nightly) or external `jemalloc` stats during development. Verification of target constraints is not within Phase 2 functional scope.
 
@@ -37,9 +37,9 @@ acowork-runtime \
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `--agent-id` | Yes | Agent identifier, consistent with manifest |
-| `--package-path` | Yes | .agent package path (extracted directory or ZIP file) |
-| `--work-dir` | Yes | Agent working directory (containing data/, config/, memory/) |
+| `--agent-id` | Yes | Bot identifier, consistent with manifest |
+| `--package-path` | Yes | .bot package path (extracted directory or ZIP file) |
+| `--work-dir` | Yes | Bot working directory (containing data/, config/, memory/) |
 | `--mqtt-port` | No | Gateway embedded MQTT broker port (communicates with Gateway; see ADR-033) |
 | `--http-port` | No | Runtime localhost HTTP port (Desktop reverse proxy discovery; see ADR-033) |
 | `--config-dir` | No | User config directory (defaults to work-dir/config/) |
@@ -108,7 +108,7 @@ Agent Runtime binary
 
 ## 3. Main Loop
 
-The core of Agent Runtime is the LLM interaction loop:
+The core of Bot Runtime is the LLM interaction loop:
 
 ```
 User message / Intent / Scheduled trigger / Interrupt message injection
@@ -222,19 +222,19 @@ Prompt Builder splices context in the following order, higher priority is more f
 
 | Order | Part | Source | Description |
 |-------|------|--------|-------------|
-| 1 | System Prompt | `prompts/system.md` + `prompts/rules.md` | Agent identity (role attributes) + business-scenario rules (system of record, tool boundaries, deliverable areas, approval gates, workflow). Section order is fixed by the Runtime as `system.md` → `rules.md` → the rest by filename; see [ADR-120](../../adr/en/ADR-120-system-and-rules-prompt-split.md). Cannot be overridden later |
-| 2 | Identity Context | Gateway injection | User identity info (name, city etc.), Agent "knows" user |
-| 2.5 | Autobiographical | SQLite memory layer AutobiographicalNode | Agent self-cognition (Identity/Capability/Limitation), injection cap 200 tokens. History Manager detects History node count when building context; exceeds 10 triggers rule engine merge (concatenate events by timeline, deduplicate, truncate to 200 tokens, zero LLM calls); merge executed by Runtime background task, no user intervention needed. Phase 3 can upgrade to LLM semantic summary |
+| 1 | System Prompt | `prompts/system.md` + `prompts/rules.md` | Bot identity (role attributes) + business-scenario rules (system of record, tool boundaries, deliverable areas, approval gates, workflow). Section order is fixed by the Runtime as `system.md` → `rules.md` → the rest by filename; see [ADR-120](../../adr/en/ADR-120-system-and-rules-prompt-split.md). Cannot be overridden later |
+| 2 | Identity Context | Gateway injection | User identity info (name, city etc.), Bot "knows" user |
+| 2.5 | Autobiographical | SQLite memory layer AutobiographicalNode | Bot self-cognition (Identity/Capability/Limitation), injection cap 200 tokens. History Manager detects History node count when building context; exceeds 10 triggers rule engine merge (concatenate events by timeline, deduplicate, truncate to 200 tokens, zero LLM calls); merge executed by Runtime background task, no user intervention needed. Phase 3 can upgrade to LLM semantic summary |
 | 2.8 | Workspace Context | Gateway push | Workspace environment info (current selection + high-weight Top2, max 3) |
 | 3 | Tool Definitions | `manifest.toml [tools]` | Convert to JSON Schema format tool descriptions for LLM to call |
-| 4 | Capability Overview | Gateway push | Installed Agents and their capability summary, so LLM knows who to collaborate with |
-| 5 | Skill Instructions | `skills/*/SKILL.md` + SQLite memory layer experience layer | Optional skill instructions, extending Agent behavior patterns. See [13-skill-system.md](./13-skill-system.md) |
+| 4 | Capability Overview | Gateway push | Installed Bots and their capability summary, so LLM knows who to collaborate with |
+| 5 | Skill Instructions | `skills/*/SKILL.md` + SQLite memory layer experience layer | Optional skill instructions, extending Bot behavior patterns. See [13-skill-system.md](./13-skill-system.md) |
 | 6 | Memory Context | `MemoryManager.retrieve()` + `MemoryManager.inject()` | Memory retrieval and injection. Retrieve via MemoryStore trait's `hybrid_search` + app-layer multi-hop expansion on SQLite memory channel; if manifest declares RAG (`rag_client: Option<Arc<RagClient>>`), parallel query RAG channel (user message as query, top_k=3, 5s timeout degradation); results labeled `[Memory]` / `[RAG:<name>]` by source, trimmed by token budget for injection. See [05-memory.md](./05-memory.md) §10, [00-prd.md](./00-prd.md) §1.13.1 |
 | 7 | Conversation History | History Manager | Complete message sequence of current conversation |
 
 #### 2.8 Workspace Context
 
-Gateway pushes workspace environment information to Runtime via IPC. This context includes the Agent's primary workspace path and user-authorized project directory list.
+Gateway pushes workspace environment information to Runtime via IPC. This context includes the Bot's primary workspace path and user-authorized project directory list.
 
 **Filtering strategy**: To avoid the workspace list being too long causing context bloat, use dynamic filtering:
 - Currently selected workspace (`is_current = true`) is always included
@@ -261,7 +261,7 @@ All listed directories are authorized for access at the indicated permission lev
 ```
 
 **Trigger timing**:
-- Gateway actively pushes once when Agent starts
+- Gateway actively pushes once when Bot starts
 - When user switches current workspace via Desktop App, push update in real time
 
 **Token budget allocation and trimming strategy**: When total context length approaches model limit, use three-stage strategy:
@@ -321,15 +321,15 @@ enabled = true  # No Progress requires computing result hash, slightly more expe
 
 ### 3.3 InboundQueue (Message Injection Queue)
 
-AgentLoop maintains a `mpsc::channel` as inbound message queue, allowing external to inject messages into Agent during loop runtime. Before each iteration begins (step ⓪), drain queue, merge pending messages into conversation history.
+AgentLoop maintains a `mpsc::channel` as inbound message queue, allowing external to inject messages into Bot during loop runtime. Before each iteration begins (step ⓪), drain queue, merge pending messages into conversation history.
 
 **Message types:**
 
 | Type | Source | Processing |
 |------|--------|------------|
-| `UserMessage` | Desktop App / CLI (user appends content while Agent is running) | Append as new `user` message to History |
+| `UserMessage` | Desktop App / CLI (user appends content while Bot is running) | Append as new `user` message to History |
 | `SystemNotification` | Gateway push (identity_update / capability_update) | Append as `system` message, LLM sees in next round |
-| `IntentMessage` | Other Agents (routed via Gateway) | Append as `user` message (with Intent metadata) |
+| `IntentMessage` | Other Bots (routed via Gateway) | Append as `user` message (with Intent metadata) |
 
 **Design notes:**
 

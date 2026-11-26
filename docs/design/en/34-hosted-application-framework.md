@@ -42,7 +42,7 @@ Agent Runtime ── {mcp.gateway_path} ──►│  *_proxy (aliases)   │
 |---|---|---|
 | top level | `id` / `version` / `name` / `description` / `icon` / `builtin` | `id` must match `[a-z][a-z0-9_-]{0,63}`; used as a URL segment, directory name and cookie path |
 | `[process]` | `binary` / `port_hint` / `runtime` / `legacy_slot` / `port_file` / `health_path` / `extra_args` / `env` | `binary` allows an executable file name only (no `/`, no `..`); `runtime = legacy \| generic`; template placeholders `{gateway_url}` / `{data_dir}` / `{internal_service_token}` / `{publisher_token}` / `{app_id}` |
-| `[mcp]` | `path` / `protocol` / `auto_inject` / `gateway_path` | `gateway_path` is the Gateway-side URL used by Agents, e.g. `/api/pm/mcp` |
+| `[mcp]` | `path` / `protocol` / `auto_inject` / `gateway_path` | `gateway_path` is the Gateway-side URL used by Bots, e.g. `/api/pm/mcp` |
 | `[ui]` | `path` / `mode` / `[ui.nav]` | `mode = webview \| native`; nav provides one slot with `label` / `icon` / `order` |
 | `[activation]` | `events` | `onStartup` / `onNavigate` / `onMcpCall` (currently hints only; built-ins start with the Gateway) |
 | `[permissions]` | `platform[]` | Default deny; allowed values: `identity.read` / `context.read` / `agents.read` / `notify` |
@@ -79,7 +79,7 @@ Built-in declarations are compiled into `core/acowork-core/src/app.rs` (`PM_APP_
 |---|---|---|
 | GET `/api/platform/identity` | `identity.read` | `user_id` / `role` / `app_id` |
 | GET `/api/platform/context` | `context.read` | instance, advertise_host, http/mqtt ports, boot time |
-| GET `/api/platform/agents` | `agents.read` | id/name list of installed agents |
+| GET `/api/platform/agents` | `agents.read` | id/name list of installed bots |
 | POST `/api/platform/notify` | `notify` | `{ accepted: true }` (structured log only, no side effects) |
 
 Caller = the app backend; credential = the supervisor-injected internal service token + `X-App-Id`. The Gateway default-denies against the registry's declared permissions (403 `capability_not_declared`). The webview never calls these endpoints directly.
@@ -229,7 +229,7 @@ Signing identities stay the two kinds used by `.agent` (Developer self-signed / 
 | Unsigned | Rejected by default; accepted with a `warn` only when `apps.allow_unsigned = true` | `unsigned_package` |
 | Built-in apps | No package, no signature; shipped with the Gateway build | — |
 
-> Unlike `.agent` Phase 1 ("unsigned is allowed"), `.app` **rejects unsigned packages by default**: installing an app means allowing a local process to run for the lifetime of the machine, a much larger surface than an agent package. `allow_unsigned` exists for development and should be off in production.
+> Unlike `.agent` Phase 1 ("unsigned is allowed"), `.app` **rejects unsigned packages by default**: installing an app means allowing a local process to run for the lifetime of the machine, a much larger surface than a bot package. `allow_unsigned` exists for development and should be off in production.
 
 ### 6.7 Install flow
 
@@ -309,7 +309,7 @@ Three things must change, or the app "installs but never works":
 
 1. **`AppRegistry::reload()`**: `load()` currently runs once from `GatewayState::new()` and never re-reads the disk. Add `reload()` (read + replace the registry contents) and call it after install / uninstall / rollback.
 2. **Dynamic supervisor**: generic app supervisors are started only at Gateway boot today. Add `start_app(id)` / `stop_app(id)` for post-install start, pre-uninstall stop, and post-rollback restart. Failure must not panic; it lands as `status=error`.
-3. **Catalog hot push**: reuse the `mqtt_publisher_trigger.trigger()` already used by `enable/disable`, fired once after a successful install, so Agents see the app without restarting.
+3. **Catalog hot push**: reuse the `mqtt_publisher_trigger.trigger()` already used by `enable/disable`, fired once after a successful install, so Bots see the app without restarting.
 
 ### 6.11 Desktop entry points
 
@@ -347,7 +347,7 @@ acowork-verify ./build/pm-1.0.1.app
 | **P3.2** | `build_app_package` + `build-app.sh` + local upload install + uninstall | P3.1 |
 | **P3.3** | Mandatory signing + fingerprint pinning + `install-url` + version list / rollback + Desktop entry | P3.2 |
 
-P3.1 is independently verifiable: package PM, install it under a different id (e.g. `pm-local`) into `apps/pm-local/` alongside the built-in `pm`; it must appear in `/api/apps`, start, and expose its MCP server to Agents. That step needs neither signing nor a resolver, yet it pins the two contracts most likely to be reworked later (binary resolution and data-directory separation).
+P3.1 is independently verifiable: package PM, install it under a different id (e.g. `pm-local`) into `apps/pm-local/` alongside the built-in `pm`; it must appear in `/api/apps`, start, and expose its MCP server to Bots. That step needs neither signing nor a resolver, yet it pins the two contracts most likely to be reworked later (binary resolution and data-directory separation).
 
 ### 6.14 Verification checklist
 
@@ -360,7 +360,7 @@ P3.1 is independently verifiable: package PM, install it under a different id (e
 7. Uninstall → gone from the catalog, `apps/{id}` in `.trash`, `app-data/{id}` still present.
 8. `platforms` excludes the current platform → `400 platform_unsupported`.
 9. A package containing `../evil` → `400 package_malformed`, and `.staging` is left clean.
-10. After installing, **without any restart**, the Agent side's `acowork/global/mcps` already contains that app's MCP server.
+10. After installing, **without any restart**, the Bot side's `acowork/global/mcps` already contains that app's MCP server.
 
 ### 6.15 Explicitly out of scope
 
@@ -443,4 +443,4 @@ Expected: `/api/apps` returns two AppDtos (pm/doc); `ui` returns each app's own 
 - **legacy slot**: PM/DOC map to the existing `pm_process` / `doc_process` state fields via `legacy_slot`, avoiding changes to the existing identity-injection tests. This is an intentional migration bridge, not the long-term structure.
 - **`navigation_guard.rs`**: the Desktop iframe targets a Gateway reverse-proxy path (`http(s)` + deep path); deployment must confirm the navigation firewall allows this prefix. The existing `UrlPreviewView` iframe exception uses the same mechanism.
 - `ExtensionsView` still has no `extensions` i18n namespace (pre-existing TODO).
-- **User canvas vs agent working state** (ADR-116 does not say which copy of state an agent mutates): see [ADR-121](../../adr/en/ADR-121-hosted-app-dual-canvas.md) and [design doc 35](./35-hosted-app-dual-canvas.md). Left nav is the user canvas; MCP does not attach by default; a `visual` app's chat preview is a durable-pane iframe, not a transcript row.
+- **User canvas vs bot working state** (ADR-116 does not say which copy of state a bot mutates): see [ADR-121](../../adr/en/ADR-121-hosted-app-dual-canvas.md) and [design doc 35](./35-hosted-app-dual-canvas.md). Left nav is the user canvas; MCP does not attach by default; a `visual` app's chat preview is a durable-pane iframe, not a transcript row.

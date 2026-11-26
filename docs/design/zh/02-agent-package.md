@@ -1,4 +1,4 @@
-# Agent 打包格式（.agent）
+# Bot 打包格式（.agent）
 
 > 版本：v3.4 | 更新日期：2026-11-23
 
@@ -8,7 +8,7 @@
 
 ## 1. 包结构
 
-`.agent` 文件本质是一个 ZIP 压缩包。Agent 包**不含可执行文件**，只包含配置、Prompt 和数据。由 Agent Runtime 二进制加载执行。
+`.bot` 文件本质是一个 ZIP 压缩包。Bot 包**不含可执行文件**，只包含配置、Prompt 和数据。由 Bot Runtime 二进制加载执行。
 
 ```
 <agent_id>.agent
@@ -48,7 +48,7 @@
 
 ## 2. 包签名机制
 
-.agent 包必须经过签名才能被 Gateway 安装和执行，类似 Android APK 签名。签名机制保障三个核心安全属性：**完整性**（包未被篡改）、**来源认证**（确认开发者身份）、**更新防护**（防止恶意包覆盖已安装 Agent）。
+.bot 包必须经过签名才能被 Gateway 安装和执行，类似 Android APK 签名。签名机制保障三个核心安全属性：**完整性**（包未被篡改）、**来源认证**（确认开发者身份）、**更新防护**（防止恶意包覆盖已安装 Bot）。
 
 ### 2.1 签名结构——Signing Block
 
@@ -102,12 +102,12 @@ Phase 1 实现两类签名身份。未来扩展阶段将引入 Distribution Key�
 
 | 身份类型 | 适用场景 | 说明 | 类比 Android |
 |---------|---------|------|-------------|
-| Developer | 普通 Agent | 开发者自签名证书，最常见 | 普通应用的 debug/release 签名 |
-| Platform | 系统 Agent | ACowork 平台签发的证书，Gateway 内置平台根公钥 | Platform 签名（系统应用） |
+| Developer | 普通 Bot | 开发者自签名证书，最常见 | 普通应用的 debug/release 签名 |
+| Platform | 系统 Bot | ACowork 平台签发的证书，Gateway 内置平台根公钥 | Platform 签名（系统应用） |
 
 ### 2.4 签名验证流程
 
-> **Phase 1 说明**：当前阶段签名验证为可选——未签名的 .agent 包允许安装但记录警告日志。严格的签名强制验证将在 Phase 2 实施。
+> **Phase 1 说明**：当前阶段签名验证为可选——未签名的 .bot 包允许安装但记录警告日志。严格的签名强制验证将在 Phase 2 实施。
 
 ```
 用户安装 .agent 包
@@ -159,7 +159,7 @@ Developer 自签名的安全保障靠**指纹锁定**：首次安装时记录证
 
 ### 2.5 签名与权限的关联
 
-Gateway 配置中可定义基于签名者的信任规则，特定签名的 Agent 可自动获得额外权限：
+Gateway 配置中可定义基于签名者的信任规则，特定签名的 Bot 可自动获得额外权限：
 
 ```toml
 # ~/.config/agent-gateway/config.toml
@@ -237,9 +237,9 @@ Gateway 安装 debug 包时的行为：
 allow_debug_packages = true   # 生产环境设为 false
 ```
 
-### 2.8 系统 Agent 本地调试
+### 2.8 系统 Bot 本地调试
 
-`platform.system = true` 的 Agent 必须由 Platform Key 签名，但开发者本地没有 Platform Key。Phase 1 采用**本地信任配置**解决——开发者在 Gateway 配置中显式信任特定指纹的包以 system 权限运行：
+`platform.system = true` 的 Bot 必须由 Platform Key 签名，但开发者本地没有 Platform Key。Phase 1 采用**本地信任配置**解决——开发者在 Gateway 配置中显式信任特定指纹的包以 system 权限运行：
 
 ```toml
 # ~/.config/agent-gateway/config.toml
@@ -390,16 +390,16 @@ progressive = false
 
 **关键字段说明：**
 
-- `runtime_version`：声明兼容的 Agent Runtime 版本。当前为 `"0.1.0"`。
+- `runtime_version`：声明兼容的 Bot Runtime 版本。当前为 `"0.1.0"`。
 - `dev`：是否为开发者模式。用于本地开发测试。
-- `name` / `role`：`name` 是**包名**，也是新实例物化时的初值（实例名之后由用户在 Agent 设置面板改写，落在实例自己的 `workspace/config/agent_config.json` 的 `name`，见 [ADR-111](../../adr/zh/ADR-111-one-agent-one-name-one-file.md)）；`role` 是角色标题。
-- **manifest 不声明实例名。** 曾经存在的 `display_name` 已删除（ADR-111）：一个实例只有一个名字，由实例持有；包声明它必然导致"人看到的名字"和"Agent 自述的名字"分叉。
+- `name` / `role`：`name` 是**包名**，也是新实例物化时的初值（实例名之后由用户在 Bot 设置面板改写，落在实例自己的 `workspace/config/agent_config.json` 的 `name`，见 [ADR-111](../../adr/zh/ADR-111-one-agent-one-name-one-file.md)）；`role` 是角色标题。
+- **manifest 不声明实例名。** 曾经存在的 `display_name` 已删除（ADR-111）：一个实例只有一个名字，由实例持有；包声明它必然导致"人看到的名字"和"Bot 自述的名字"分叉。
 - `avatar`：可选，包内头像图片路径（如 `"assets/avatar.png"`）。优先级最高。
 - `builtin_avatar`：可选，内置头像索引（如 `"icon-05"` 或裸数字 `"5"`），用于在没有 `avatar` 时给首次安装的客户端一个确定的默认图标。客户端按字母数字顺序归一化为 `"icon-XX"`，并对照自身捆绑的图标集校验；无法识别时回退到随机。
 
 #### 头像解析优先级（客户端契约）
 
-Agent 客户端在渲染 Agent 头像时必须遵循以下优先级（与 [Avatar resolution priority policy](../development_practice/agent-avatar-priority.md) 一致）：
+Bot 客户端在渲染 Bot 头像时必须遵循以下优先级（与 [Avatar resolution priority policy](../development_practice/agent-avatar-priority.md) 一致）：
 
 1. **`manifest.avatar` 包内头像**（最高优先级）。Desktop App 通过 Gateway 的 `GET /api/agents/:id/avatar` 端点获取，URL 拼接 `?v=<manifest.version>` 作为 HTTP 缓存击穿键。当包重新安装（`agent_id` 不变但 `version` 变化）时，URL 自动变化，浏览器/WebView 重新下载。
 2. **Profile store 里的 `avatarIconId`**（本地持久化）。覆盖两类来源：`AgentSetupTab` 中用户手动挑选的图标；以及首次安装时 `ensureBuiltinAvatars` 后台分配的默认图标。Profile store 会在每次 `fetchAgents` 后自愈：若 manifest 新加了 `avatar`，则清除残留的 `avatarIconId`（让包内头像生效）。
@@ -414,18 +414,18 @@ Agent 客户端在渲染 Agent 头像时必须遵循以下优先级（与 [Avata
 - `memory`：记忆系统配置。`enabled` 是否启用，`retention_days` 保留天数。
 - `identity_deps`：声明启动时需要的用户身份字段（如 `display_name`、`language`、`timezone`），Gateway 在握手时通过 UserProfile 注入。
 - `tools`：工具声明数组。支持 `builtin`（默认）和 `rag` 两种类型。RAG 工具需在 `[tools.xxx.rag]` 中配置端点、认证方式等。
-- `capabilities`：声明本 Agent 可被其他 Agent 通过 Intent 调用的能力。使用映射语法（action name → 描述 + schema）。
+- `capabilities`：声明本 Bot 可被其他 Bot 通过 Intent 调用的能力。使用映射语法（action name → 描述 + schema）。
 - `skills`：技能系统配置。`progressive` 为 `true` 时启用渐进式技能注入（system prompt 中仅注入摘要，完整指令按需加载）。
 
 ### 3.1 identity_deps 注入细节
 
-`identity_deps` 是一个字符串数组，声明 Agent 启动时需要的用户身份字段。Gateway 在握手阶段（AgentHello → AgentHelloResult）将 UserProfile 注入 Runtime，不再经过系统 Agent。详见 [18-user-identity-simplified.md](./18-user-identity-simplified.md)。
+`identity_deps` 是一个字符串数组，声明 Bot 启动时需要的用户身份字段。Gateway 在握手阶段（AgentHello → AgentHelloResult）将 UserProfile 注入 Runtime，不再经过系统 Bot。详见 [18-user-identity-simplified.md](./18-user-identity-simplified.md)。
 
 **字段名约定**：
 
 | 字段名 | 语义 | 来源 | Phase 1 默认值（Gateway 无数据时） |
 |--------|------|------|--------------------------------------|
-| `display_name` | 用户希望被怎么称呼 | Onboarding 必填 | `""`（空字符串，Agent 应在 prompt 中优雅降级） |
+| `display_name` | 用户希望被怎么称呼 | Onboarding 必填 | `""`（空字符串，Bot 应在 prompt 中优雅降级） |
 | `language` | 用户语言偏好（BCP 47） | Onboarding 必填 | `"en-US"`（安全回退到英语） |
 | `timezone` | 用户时区（IANA） | Onboarding 必填 | `"UTC"`（安全回退到 UTC） |
 | `city` | 所在城市 | Onboarding 选填 | `null`（未知，不猜测） |
@@ -435,11 +435,11 @@ Agent 客户端在渲染 Agent 头像时必须遵循以下优先级（与 [Avata
 
 **required vs optional 语义**：
 
-identity_deps 数组中的字段**全部视为 optional**——即使 Agent 声明了 `identity_deps = ["display_name", "city"]`，如果 Gateway 没有这些字段的数据（用户未提供），Runtime 仍然正常启动，只是注入的 UserProfile 中该字段值为 null。
+identity_deps 数组中的字段**全部视为 optional**——即使 Bot 声明了 `identity_deps = ["display_name", "city"]`，如果 Gateway 没有这些字段的数据（用户未提供），Runtime 仍然正常启动，只是注入的 UserProfile 中该字段值为 null。
 
 这种设计基于以下考量：
-- Agent 不应因为用户缺少某个身份信息就拒绝工作（如天气 Agent 不知道用户城市，可以主动询问）
-- 必填 vs 选填的控制权在 Onboarding 侧（哪些字段强制采集），而非 Agent 声明侧
+- Bot 不应因为用户缺少某个身份信息就拒绝工作（如天气 Bot 不知道用户城市，可以主动询问）
+- 必填 vs 选填的控制权在 Onboarding 侧（哪些字段强制采集），而非 Bot 声明侧
 - 如果未来确实需要 required 语义，可在字段名后加 `!` 后缀（如 `"city!"`），但 Phase 1 不实现
 
 **identity_delivery 中字段缺失的处理**：
@@ -487,7 +487,7 @@ permissions 数组中的每条权限字符串遵循统一的模式语法，Gatew
 | `network:*` | 整个 network 域 | 任意 HTTPS URL | — |
 | `filesystem:read:*` | 整个 filesystem:read 域 | `~/Documents`, `/tmp` | — |
 | `filesystem:*:*` | 整个 filesystem 域 | read/write 任意路径 | — |
-| `intent:send:*` | 可向任何 Agent 发 Intent | `com.example.calendar`, `com.acowork.system` | — |
+| `intent:send:*` | 可向任何 Bot 发 Intent | `com.example.calendar`, `com.acowork.system` | — |
 
 > 旧版此处还有一行 `memory:read`；ADR-101 之后 memory 不再是权限域，通配规则也不再涉及它。
 
@@ -518,7 +518,7 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 
 **权限检查流程**：
 
-1. Agent 发起工具调用（如 `http_request({"method":"GET","url":"https://api.weather.com/..."})`)
+1. Bot 发起工具调用（如 `http_request({"method":"GET","url":"https://api.weather.com/..."})`)
 2. Runtime 构造请求权限字符串（如 `network:https://api.weather.com`）
 3. 遍历 manifest.permissions，调用 `matches_permission`
 4. 任一声明权限匹配 → 允许执行
@@ -533,7 +533,7 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 | filesystem | `filesystem:read:/tmp` | file_read |
 | intent | `intent:send:com.example.calendar` | intent_send |
 | shell | （shell 工具无需声明 permission，由 Approval Gate 控制） | shell |
-| identity | （identity_store 仅系统 Agent 可用，通过 platform.system 声明授权） | identity_store |
+| identity | （identity_store 仅系统 Bot 可用，通过 platform.system 声明授权） | identity_store |
 
 ### 3.3 能力声明面（ADR-104）
 
@@ -541,14 +541,14 @@ manifest 是**能力声明面**，四类声明各有明确语义与落地路径�
 
 | 声明 | 语义 | 落地 |
 |---|---|---|
-| `[[tools]]` | 内置工具 | 该 Agent 的内置工具开关（`builtin_tools`） |
+| `[[tools]]` | 内置工具 | 该 Bot 的内置工具开关（`builtin_tools`） |
 | `[[mcp_servers]]` | **推荐** 的 MCP 服务器 | `agent_mcp.json.recommended`，由用户确认安装/启用 |
 | `[capabilities.<action>].skills` | 该能力由哪些技能实现 | intent 寻址 + 声明图校验 |
 | `[config]` | `agent_config.json` 的行为默认值 | 只回填 `None` 字段，永不覆盖用户值 |
 
-**推荐 ≠ 安装。** `[[mcp_servers]]` 只写 `recommended` / `dismissed`，从不写 `catalog` / `local` / `active_names`。用户确认后，服务器进入**本机共享的 MCP 目录**（带 `origin`：`preset:<id>` / `agent-package:<agent_id>#<key>` / `user`），其他 Agent 看得到但不会自动激活。
+**推荐 ≠ 安装。** `[[mcp_servers]]` 只写 `recommended` / `dismissed`，从不写 `catalog` / `local` / `active_names`。用户确认后，服务器进入**本机共享的 MCP 目录**（带 `origin`：`preset:<id>` / `agent-package:<agent_id>#<key>` / `user`），其他 Bot 看得到但不会自动激活。
 
-**能力 ≠ 技能。** 技能是内部流程，不对外暴露；能力是对外契约，其他 Agent 通过 intent 寻址。一个能力可由多个技能实现，一个技能可服务多个能力。
+**能力 ≠ 技能。** 技能是内部流程，不对外暴露；能力是对外契约，其他 Bot 通过 intent 寻址。一个能力可由多个技能实现，一个技能可服务多个能力。
 
 **声明图校验**（`AgentManifest::validate_graph`）：
 
@@ -593,5 +593,5 @@ manifest 是**能力声明面**，四类声明各有明确语义与落地路径�
 
 ### 5.5 Debug Platform Key（在线申请）
 
-开发者通过平台账号认证申请 Debug Platform Key（有效期 30 天，可远程吊销），用于在本地调试 system=true 的 Agent。替代当前 Phase 1 的本地信任配置方案。
+开发者通过平台账号认证申请 Debug Platform Key（有效期 30 天，可远程吊销），用于在本地调试 system=true 的 Bot。替代当前 Phase 1 的本地信任配置方案。
 

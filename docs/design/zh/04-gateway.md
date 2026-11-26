@@ -5,7 +5,7 @@
 
 ---
 
-Gateway 是一个常驻的系统级进程，使用 Rust 实现。Gateway **不代理 Agent 的业务逻辑**（不代理 LLM 调用、不代理工具执行），只负责必须集中化的协调工作。
+Gateway 是一个常驻的系统级进程，使用 Rust 实现。Gateway **不代理 Bot 的业务逻辑**（不代理 LLM 调用、不代理工具执行），只负责必须集中化的协调工作。
 
 Gateway 同时为两类消费者提供服务：
 
@@ -30,7 +30,7 @@ Gateway 同时为两类消费者提供服务：
 └────────────────────────────────────────────────┘
 ```
 
-- **MQTT + HTTP 反向代理**：给 Agent Runtime 用的 IPC 通道 —— MQTT 承载实时事件推送（chat chunk、tool_call、done、设备状态 Will+Retained），HTTP 反向代理承载大数据查询（历史消息、会话查询），Runtime 自身不暴露对外端口
+- **MQTT + HTTP 反向代理**：给 Bot Runtime 用的 IPC 通道 —— MQTT 承载实时事件推送（chat chunk、tool_call、done、设备状态 Will+Retained），HTTP 反向代理承载大数据查询（历史消息、会话查询），Runtime 自身不暴露对外端口
 - **HTTP API**：给 Desktop App / CLI 用的 REST 接口（Axum，localhost only）
 
 两者共享 Gateway 内部状态，只是接入层不同。
@@ -40,44 +40,44 @@ Gateway 同时为两类消费者提供服务：
 - **安装**：解压 `.agent` 到 `~/.local/share/agent-gateway/agents/<agent_id>/`，校验 manifest 完整性，记录版本。安装前必须验证包签名（详见 [02-agent-package.md](./02-agent-package.md)），签名无效或与已安装版本签名不一致则拒绝安装。
 - **卸载**：删除对应目录，可选备份用户数据（含私有 SQLite 记忆层）。
 - **升级**：保留 `data/` 和用户修改的 `config/`，替换其他文件。若 runtime_version 不兼容则提示用户。升级时校验新包签名证书指纹必须与已安装版本一致。
-- **仓库支持**：可配置多个 HTTP 仓库源（类似 apt），定期检查更新。仓库提供的 .agent 包必须经过签名。
+- **仓库支持**：可配置多个 HTTP 仓库源（类似 apt），定期检查更新。仓库提供的 .bot 包必须经过签名。
 
 ## 2. 生命周期管理器
 
 **启动策略：**
 - 按需启动：当收到匹配 trigger 的消息或用户显式调用时启动。
-- 常驻：用户可标记某 Agent 开机自启。
+- 常驻：用户可标记某 Bot 开机自启。
 - 定时启动：由 cron 表达式触发。（**Phase 3 实现**，Phase 2 仅支持按需启动和常驻模式）
 
 **进程管理：**
 - 使用 `std::process::Command` 创建子进程，设置独立工作目录、环境变量。
-- 启动参数注入：Agent 包路径、Gateway MQTT broker 地址（`127.0.0.1:19875`）、Agent ID、工作区路径。
-- **API Key 分发**：Agent Runtime 通过 MQTT 握手（`AgentHello` 消息，见 [ADR-034](../../adr/zh/ADR-034-mqtt-http-boundary.md)）从 Gateway 拉取 Key（不在环境变量中传递，避免 ps 泄露）。
-- 健康检查：如果 Agent 进程退出，根据退出代码决定是否自动重启（可配置）。
+- 启动参数注入：Bot 包路径、Gateway MQTT broker 地址（`127.0.0.1:19875`）、Bot ID、工作区路径。
+- **API Key 分发**：Bot Runtime 通过 MQTT 握手（`AgentHello` 消息，见 [ADR-034](../../adr/zh/ADR-034-mqtt-http-boundary.md)）从 Gateway 拉取 Key（不在环境变量中传递，避免 ps 泄露）。
+- 健康检查：如果 Bot 进程退出，根据退出代码决定是否自动重启（可配置）。
 
 **休眠与唤醒：**
-- 采用杀死重启策略：空闲超时后直接杀死 Agent Runtime 进程，下次需要时重新 spawn。
-- Agent 的状态通过私有 SQLite 持久化，启动时从 Memory 恢复上下文。
+- 采用杀死重启策略：空闲超时后直接杀死 Bot Runtime 进程，下次需要时重新 spawn。
+- Bot 的状态通过私有 SQLite 持久化，启动时从 Memory 恢复上下文。
 - 不使用 SIGSTOP/SIGCONT（Windows 不支持、进程仍占内存、状态序列化困难）。
-- Agent 可在 manifest 中声明 `startup_timeout_ms`，Gateway 据此判断是否需要预热（提前拉起）。
+- Bot 可在 manifest 中声明 `startup_timeout_ms`，Gateway 据此判断是否需要预热（提前拉起）。
 
 ## 3. Intent Router
 
 **输入源：**
 - 用户界面（CLI/GUI）发出的请求。
 - 定时任务触发器。
-- 其他 Agent 通过 Gateway 转发的 Intent 消息（见 [06-communication.md](./06-communication.md)）。
+- 其他 Bot 通过 Gateway 转发的 Intent 消息（见 [06-communication.md](./06-communication.md)）。
 
 **路由规则：**
-- 根据消息中的 `target` 字段直接路由到目标 Agent。
-- 若目标 Agent 未运行，则按需启动。
-- 若未指定 target，则匹配已安装 Agent 的 manifest 中 `triggers.message.pattern`。
+- 根据消息中的 `target` 字段直接路由到目标 Bot。
+- 若目标 Bot 未运行，则按需启动。
+- 若未指定 target，则匹配已安装 Bot 的 manifest 中 `triggers.message.pattern`。
 
 ## 4. 沙箱配置器
 
-> **2026-04-25 决策（ADR-007）**：进程级沙箱（bubblewrap / AppContainer / Seatbelt）延后至 Phase 7。Phase 3~6 期间，Gateway 启动 Agent Runtime 时使用**策略级隔离**（权限校验 + 路径白名单），不做 OS 级强制隔离。下表保留完整设计供 Phase 7 参考。
+> **2026-04-25 决策（ADR-007）**：进程级沙箱（bubblewrap / AppContainer / Seatbelt）延后至 Phase 7。Phase 3~6 期间，Gateway 启动 Bot Runtime 时使用**策略级隔离**（权限校验 + 路径白名单），不做 OS 级强制隔离。下表保留完整设计供 Phase 7 参考。
 
-Gateway 在启动 Agent Runtime 时根据 manifest 配置沙箱参数，之后由 OS 层面执行隔离。各平台实现方式不同，但隔离目标一致。
+Gateway 在启动 Bot Runtime 时根据 manifest 配置沙箱参数，之后由 OS 层面执行隔离。各平台实现方式不同，但隔离目标一致。
 
 **跨平台隔离策略对照：**
 
@@ -93,7 +93,7 @@ Gateway 在启动 Agent Runtime 时根据 manifest 配置沙箱参数，之后�
 > WASM 引擎选型详情见 [12-tool-system.md](./12-tool-system.md) 第 3.1 节。
 | **数据目录** | XDG (`~/.local/share/`) | `%APPDATA%\AgentGateway\` | `~/Library/Application Support/AgentGateway/` | `context.getFilesDir()` | appSupportDir |
 
-**Phase 3~6 策略级隔离**：Gateway 启动 Agent Runtime 时通过 `Command::new` 裸启动，依赖 Runtime 侧的权限校验器（PermissionChecker）做路径白名单和网络权限检查。
+**Phase 3~6 策略级隔离**：Gateway 启动 Bot Runtime 时通过 `Command::new` 裸启动，依赖 Runtime 侧的权限校验器（PermissionChecker）做路径白名单和网络权限检查。
 
 **Phase 7 进程级沙箱实现示例（保留供参考）：**
 ```bash
@@ -127,46 +127,46 @@ bwrap \
 └── vault.key               # 主密钥，用户密码派生
 ```
 
-- Agent manifest 中用 `vault:openai_key` 引用 Key，不存明文。
-- Agent Runtime 启动后通过 MQTT 握手获取 Key（一次性传输，不通过环境变量）。
+- Bot manifest 中用 `vault:openai_key` 引用 Key，不存明文。
+- Bot Runtime 启动后通过 MQTT 握手获取 Key（一次性传输，不通过环境变量）。
 - Key 在 Rust 侧零拷贝/密封存储（使用 secrecy::SecretString），LLM Client 直接使用该 Secret 签名请求，WASM 插件层绝对没有 API 能读取到该字符串。
 
 ## 6. Budget Tracker
 
-接收 Agent Runtime 上报的 LLM 用量，维护跨 Agent 的统计：
+接收 Bot Runtime 上报的 LLM 用量，维护跨 Bot 的统计：
 
-- 每个 Agent 有独立的日/月 Token 和费用限额。
-- 超限时向 Agent 发送信号（stop / fallback / warn）。
-- 提供预算查询接口供 Agent 本地预检。
+- 每个 Bot 有独立的日/月 Token 和费用限额。
+- 超限时向 Bot 发送信号（stop / fallback / warn）。
+- 提供预算查询接口供 Bot 本地预检。
 
 ## 7. Rate Limiter
 
-协调多 Agent 对同一 LLM Provider 的并发请求，避免触发 API Rate Limit：
+协调多 Bot 对同一 LLM Provider 的并发请求，避免触发 API Rate Limit：
 
-- Agent 调 LLM 前通过 Gateway 申请速率令牌（极轻量 RPC，< 0.1ms）。
+- Bot 调 LLM 前通过 Gateway 申请速率令牌（极轻量 RPC，< 0.1ms）。
 - Gateway 基于 Provider 的 RPM/TPM 限制分配令牌。
 
 ## 8. 配置与数据存储
 
 - **Gateway 自身配置**：`~/.config/agent-gateway/config.toml`（含 Vault 配置、仓库列表、默认 LLM 配置等）。
-- **每个 Agent 的工作区**：`~/.local/share/agent-gateway/agents/<agent_id>/workspace/`：
+- **每个 Bot 的工作区**：`~/.local/share/agent-gateway/agents/<agent_id>/workspace/`：
   - `data/`：从包中复制，可读写。
   - `config/`：用户可修改的配置（初始来自包内 config）。
   - `memory/`：工作区 SQLite 存储文件（`private.sqlite`）——承载会话元数据与对话索引（ADR-082）。记忆节点存放在独立的记忆服务（`$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`，ADR-101）。
   - `runtime/`：临时文件（pid、HTTP 端口）。
-- **日志**：Gateway 收集所有 Agent 的 stdout/stderr，写入 `~/.local/share/agent-gateway/logs/`，支持按 Agent 过滤。
+- **日志**：Gateway 收集所有 Bot 的 stdout/stderr，写入 `~/.local/share/agent-gateway/logs/`，支持按 Bot 过滤。
 
 ## 9. HTTP API（Desktop App / CLI 接入层）
 
 > **当前实现状态**：HTTP API 已基于 Axum 完整实现，提供 REST 接口；流式事件经由 MQTT（详见 §9.1 双协议架构 与 [`docs/protocols/zh/README.md`](../../protocols/zh/README.md)）。以下接口定义反映实际实现，但为保持文档简洁仅列出核心路由。完整路由列表参见代码 `crates/acowork-gateway/src/http/routes.rs`。
 
-Gateway 与 Agent Runtime 之间的 IPC 自 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) 起统一为 **MQTT pub/sub + HTTP 反向代理**：MQTT 承担实时事件推送（chat chunk、tool_call、done、设备状态 Will+Retained），HTTP 反代承担大数据查询与会话历史拉取。HTTP API 作为 Desktop App 和 CLI 的统一接入层，对 Runtime 不可见。
+Gateway 与 Bot Runtime 之间的 IPC 自 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) 起统一为 **MQTT pub/sub + HTTP 反向代理**：MQTT 承担实时事件推送（chat chunk、tool_call、done、设备状态 Will+Retained），HTTP 反代承担大数据查询与会话历史拉取。HTTP API 作为 Desktop App 和 CLI 的统一接入层，对 Runtime 不可见。
 
 ### 9.1 为什么需要双协议（MQTT + HTTP）
 
 | 维度 | MQTT | HTTP 反向代理 |
 |------|------|---------------|
-| 消费者 | Agent Runtime（Gateway ↔ Runtime 双向） | Gateway → Runtime（按需转发） |
+| 消费者 | Bot Runtime（Gateway ↔ Runtime 双向） | Gateway → Runtime（按需转发） |
 | 监听端 | Gateway 内嵌 rumqttd broker（`127.0.0.1:19875`）| Gateway HTTP 反代（`127.0.0.1:19876`）|
 | 通信模式 | 主题 pub/sub（多对多，多路复用）| 请求/响应（点对点）|
 | 帧格式 | MQTT Payload（独立 protobuf 命名空间，见 [`core/acowork-core/proto/mqtt_payload.proto`](../../../core/acowork-core/proto/mqtt_payload.proto)）| 标准 HTTP/JSON |
@@ -286,7 +286,7 @@ pub fn http_routes() -> Router<GatewayState> {
 
 ### 9.4 核心接口详情
 
-#### 9.4.1 Agent 管理
+#### 9.4.1 Bot 管理
 
 ```json
 // GET /api/agents
@@ -387,7 +387,7 @@ Vault 的 HTTP API **不返回明文 Key**，只返回存在性和脱敏预览�
 
 > **历史**：v3.1 及更早版本曾用 Socket API（Unix Socket / Named Pipe / Local TCP）作为 Gateway ↔ Runtime 的 IPC 通道，gRPC 时代为 Protocol Buffers 双向流（参见 [`16-ipc-grpc-migration.md`](./16-ipc-grpc-migration.md)）。自 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) 起 IPC 收敛为 **MQTT + HTTP 反向代理**。
 
-HTTP API 中的 Agent 管理操作（安装/卸载/启停）直接调用 Gateway 内部组件，与 MQTT 通道的处理逻辑共享：
+HTTP API 中的 Bot 管理操作（安装/卸载/启停）直接调用 Gateway 内部组件，与 MQTT 通道的处理逻辑共享：
 
 ```
 POST /api/agents/:id/start
@@ -424,7 +424,7 @@ HTTP API 不是独立于 IPC 通道的旁路，而是 Runtime 协议的**管理�
 | Vault Key 脱敏 | GET 接口不返回明文，POST 接口接收明文 |
 | 无 CORS 白名单 | Gateway 不维护 origin allowlist（CORS 始终 permissive）——本地 loopback 0 风险 |
 | 可选 Auth Token | Gateway 生成随机 token，Desktop App 首次连接时获取，后续请求携带 `Authorization: Bearer <token>` |
-| Agent 安装校验 | 强制验证包签名（HTTP 与 MQTT 通道共享同一校验路径） |
+| Bot 安装校验 | 强制验证包签名（HTTP 与 MQTT 通道共享同一校验路径） |
 
 Auth Token 机制（可选，Phase 5+）：
 ```
@@ -518,7 +518,7 @@ Desktop App 也走这条路径
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| Gateway 不代理业务逻辑 | 纯协调层 | 避免单点瓶颈；Agent Runtime 直连 LLM 延迟更低 |
+| Gateway 不代理业务逻辑 | 纯协调层 | 避免单点瓶颈；Bot Runtime 直连 LLM 延迟更低 |
 | 双协议层（自 ADR-033） | MQTT + HTTP 反向代理 | MQTT 承载实时事件推送（chat chunk、tool_call、done、设备状态），HTTP 反代承载大数据查询与会话历史（见 ADR-033 / ADR-034）|
 | HTTP 框架 | Axum | Rust 生态最成熟的 HTTP 框架；Gateway 已在技术选型中确认 |
 | HTTP 端口 | 127.0.0.1:19876 | 仅 localhost，安全；端口可配置；冲突时自动递增 |

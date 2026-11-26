@@ -1,4 +1,4 @@
-# Agent Packaging Format (.agent)
+# Bot Packaging Format (.agent)
 
 > Version: v3.4 | Last Updated: 2026-11-23
 
@@ -8,7 +8,7 @@
 
 ## 1. Package Structure
 
-The `.agent` file is essentially a ZIP archive. Agent packages **contain no executable code** — only configuration, Prompts, and data. The Agent Runtime binary loads and executes them.
+The `.bot` file is essentially a ZIP archive. Bot packages **contain no executable code** — only configuration, Prompts, and data. The Bot Runtime binary loads and executes them.
 
 ```
 <agent_id>.agent
@@ -48,7 +48,7 @@ Filenames in `OVERRIDABLE_PROMPTS` (`summary.md`, `title.md`, `compact-template.
 
 ## 2. Package Signing Mechanism
 
-.agent packages must be signed before Gateway will install and execute them, similar to Android APK signatures. The signing mechanism protects three core security properties: **integrity** (package has not been tampered with), **source authentication** (verifying developer identity), and **update protection** (preventing malicious packages from replacing installed Agents).
+.bot packages must be signed before Gateway will install and execute them, similar to Android APK signatures. The signing mechanism protects three core security properties: **integrity** (package has not been tampered with), **source authentication** (verifying developer identity), and **update protection** (preventing malicious packages from replacing installed Bots).
 
 ### 2.1 Signature Structure — Signing Block
 
@@ -102,12 +102,12 @@ Phase 1 implements two signing identities. Future phases will introduce Distribu
 
 | Identity Type | Use Case | Description | Android Analogy |
 |--------------|----------|-------------|-----------------|
-| Developer | Regular Agents | Self-signed certificates, most common | Standard app debug/release signatures |
-| Platform | System Agents | Certificates signed by the ACowork platform; Gateway has the platform root public key built-in | Platform signature (system apps) |
+| Developer | Regular Bots | Self-signed certificates, most common | Standard app debug/release signatures |
+| Platform | System Bots | Certificates signed by the ACowork platform; Gateway has the platform root public key built-in | Platform signature (system apps) |
 
 ### 2.4 Signature Verification Flow
 
-> **Phase 1 Note**: Signature verification is optional in the current phase — unsigned .agent packages are allowed to install but generate a warning log. Strict enforcement will be implemented in Phase 2.
+> **Phase 1 Note**: Signature verification is optional in the current phase — unsigned .bot packages are allowed to install but generate a warning log. Strict enforcement will be implemented in Phase 2.
 
 ```
 User installs .agent package
@@ -159,7 +159,7 @@ Developer self-signed security relies on **fingerprint lock-in**: the certificat
 
 ### 2.5 Signature-to-Permission Mapping
 
-Gateway configuration can define trust rules based on signers; Agents with specific signatures can automatically receive additional permissions:
+Gateway configuration can define trust rules based on signers; Bots with specific signatures can automatically receive additional permissions:
 
 ```toml
 # ~/.config/agent-gateway/config.toml
@@ -237,9 +237,9 @@ Gateway behavior when installing debug packages:
 allow_debug_packages = true   # Set to false in production
 ```
 
-### 2.8 System Agent Local Debug
+### 2.8 System Bot Local Debug
 
-Agents with `platform.system = true` must be signed by the Platform Key, but local developers don't have one. Phase 1 addresses this with **local trust configuration** — the developer explicitly trusts specific fingerprints in the Gateway config to run with system permissions:
+Bots with `platform.system = true` must be signed by the Platform Key, but local developers don't have one. Phase 1 addresses this with **local trust configuration** — the developer explicitly trusts specific fingerprints in the Gateway config to run with system permissions:
 
 ```toml
 # ~/.config/agent-gateway/config.toml
@@ -396,16 +396,16 @@ progressive = false
 
 **Key Field Descriptions:**
 
-- `runtime_version`: Declares compatible Agent Runtime version. Currently `"0.1.0"`.
-- `dev`: Whether this is a development mode Agent. Used for local development and testing.
-- `name` / `role`: `name` is the **package name** and the initial value a new instance is materialized from (the instance's own name is later rewritten by the user on the agent settings panel and stored in the instance's `workspace/config/agent_config.json` as `name`, see [ADR-111](../../adr/en/ADR-111-one-agent-one-name-one-file.md)); `role` is the role title.
-- **The manifest does not declare an instance name.** The former `display_name` is gone (ADR-111): an instance has exactly one name and the instance owns it — a package that declared one inevitably split "the name a human sees" from "the name the agent uses for itself".
+- `runtime_version`: Declares compatible Bot Runtime version. Currently `"0.1.0"`.
+- `dev`: Whether this is a development mode Bot. Used for local development and testing.
+- `name` / `role`: `name` is the **package name** and the initial value a new instance is materialized from (the instance's own name is later rewritten by the user on the bot settings panel and stored in the instance's `workspace/config/agent_config.json` as `name`, see [ADR-111](../../adr/en/ADR-111-one-agent-one-name-one-file.md)); `role` is the role title.
+- **The manifest does not declare an instance name.** The former `display_name` is gone (ADR-111): an instance has exactly one name and the instance owns it — a package that declared one inevitably split "the name a human sees" from "the name the bot uses for itself".
 - `avatar`: Optional, in-package avatar image path (e.g. `"assets/avatar.png"`). Highest priority.
 - `builtin_avatar`: Optional, built-in avatar index (e.g. `"icon-05"` or bare number `"5"`). Used to assign a deterministic default icon to first-time installs when no `avatar` is set. Clients normalize this alphabetically/numerically to `"icon-XX"` and validate against their bundled icon set; fall back to random if unrecognized.
 
 #### Avatar Resolution Priority (Client Contract)
 
-Agent clients rendering Agent avatars MUST follow this priority (aligned with [Avatar resolution priority policy](../development_practice/agent-avatar-priority.md)):
+Bot clients rendering Bot avatars MUST follow this priority (aligned with [Avatar resolution priority policy](../development_practice/agent-avatar-priority.md)):
 
 1. **`manifest.avatar` in-package avatar** (highest priority). Desktop App fetches it via Gateway's `GET /api/agents/:id/avatar` endpoint with `?v=<manifest.version>` appended as the HTTP cache buster. When the package is reinstalled (same `agent_id` but different `version`), the URL changes automatically and the browser/WebView re-downloads.
 2. **`avatarIconId` in the profile store** (local persistence). Overrides both: the user-selected icon via `AgentSetupTab`, and the default icon assigned by `ensureBuiltinAvatars` on first install. The profile store self-heals after every `fetchAgents`: if the manifest newly adds `avatar`, any residual `avatarIconId` is cleared (so the in-package avatar takes effect).
@@ -421,18 +421,18 @@ This priority must also be preserved in remote Gateway scenarios (see [04-gatewa
 - `memory`: Memory system configuration. `enabled` toggles; `retention_days` is the retention period.
 - `identity_deps`: Declares required user identity fields at startup (e.g. `display_name`, `language`, `timezone`); Gateway injects via UserProfile during handshake.
 - `tools`: Tool declaration array. Supports `builtin` (default) and `rag` types. RAG tools must configure endpoint, auth, etc. in `[tools.xxx.rag]`.
-- `capabilities`: Declares capabilities this Agent can expose to other Agents via Intent. Uses map syntax (action name → description + schema).
+- `capabilities`: Declares capabilities this Bot can expose to other Bots via Intent. Uses map syntax (action name → description + schema).
 - `skills`: Skill system configuration. `progressive = true` enables progressive skill injection (only summaries injected into system prompt; full instructions loaded on demand).
 
 ### 3.1 identity_deps Injection Details
 
-`identity_deps` is a string array declaring required user identity fields at Agent startup. Gateway injects UserProfile into Runtime during handshake (AgentHello → AgentHelloResult), bypassing the system Agent. See [18-user-identity-simplified.md](./18-user-identity-simplified.md).
+`identity_deps` is a string array declaring required user identity fields at Bot startup. Gateway injects UserProfile into Runtime during handshake (AgentHello → AgentHelloResult), bypassing the system Bot. See [18-user-identity-simplified.md](./18-user-identity-simplified.md).
 
 **Field Naming Convention**:
 
 | Field Name | Meaning | Source | Phase 1 Default (when Gateway has no data) |
 |-----------|---------|--------|--------------------------------------|
-| `display_name` | How the user wants to be addressed | Onboarding required | `""` (empty string, Agent should gracefully degrade in prompt) |
+| `display_name` | How the user wants to be addressed | Onboarding required | `""` (empty string, Bot should gracefully degrade in prompt) |
 | `language` | User language preference (BCP 47) | Onboarding required | `"en-US"` (safe fallback to English) |
 | `timezone` | User timezone (IANA) | Onboarding required | `"UTC"` (safe fallback) |
 | `city` | Current city | Onboarding optional | `null` (unknown, do not guess) |
@@ -442,11 +442,11 @@ This priority must also be preserved in remote Gateway scenarios (see [04-gatewa
 
 **Required vs Optional Semantics**:
 
-All fields in the `identity_deps` array are treated as **optional** — even if the Agent declares `identity_deps = ["display_name", "city"]`, if Gateway doesn't have these fields (user has not provided them), Runtime starts normally; the injected UserProfile simply has `null` for those fields.
+All fields in the `identity_deps` array are treated as **optional** — even if the Bot declares `identity_deps = ["display_name", "city"]`, if Gateway doesn't have these fields (user has not provided them), Runtime starts normally; the injected UserProfile simply has `null` for those fields.
 
 This design is based on the following considerations:
-- Agents should not refuse to work just because they're missing some identity (e.g. a weather Agent that doesn't know the user's city should ask)
-- Required vs optional control belongs to the Onboarding side (which fields are mandatory), not the Agent declaration side
+- Bots should not refuse to work just because they're missing some identity (e.g. a weather Bot that doesn't know the user's city should ask)
+- Required vs optional control belongs to the Onboarding side (which fields are mandatory), not the Bot declaration side
 - If truly required semantics are needed in the future, append `!` to the field name (e.g. `"city!"`), but Phase 1 does not implement this
 
 **Handling Missing Fields in identity_delivery**:
@@ -494,7 +494,7 @@ Each permission string in the permissions array follows a unified pattern syntax
 | `network:*` | Entire network domain | Any HTTPS URL | — |
 | `filesystem:read:*` | Entire filesystem:read domain | `~/Documents`, `/tmp` | — |
 | `filesystem:*:*` | Entire filesystem domain | read/write any path | — |
-| `intent:send:*` | Can send Intent to any Agent | `com.example.calendar`, `com.acowork.system` | — |
+| `intent:send:*` | Can send Intent to any Bot | `com.example.calendar`, `com.acowork.system` | — |
 
 > Earlier revisions listed a `memory:read` row here; since ADR-101 memory is no longer a permission domain, so the wildcard rules do not apply to it.
 
@@ -525,7 +525,7 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 
 **Permission Check Flow**:
 
-1. Agent initiates tool call (e.g. `http_request({"method":"GET","url":"https://api.weather.com/..."})`)
+1. Bot initiates tool call (e.g. `http_request({"method":"GET","url":"https://api.weather.com/..."})`)
 2. Runtime constructs request permission string (e.g. `network:https://api.weather.com`)
 3. Iterate manifest.permissions, call `matches_permission`
 4. Any declared permission matches → allow execution
@@ -540,7 +540,7 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 | filesystem | `filesystem:read:/tmp` | file_read |
 | intent | `intent:send:com.example.calendar` | intent_send |
 | shell | (shell tool requires no permission declaration; controlled by Approval Gate) | shell |
-| identity | (identity_store available to system Agents only; authorized via `platform.system` declaration) | identity_store |
+| identity | (identity_store available to system Bots only; authorized via `platform.system` declaration) | identity_store |
 
 ### 3.3 The Declaration Surface (ADR-104)
 
@@ -548,14 +548,14 @@ The manifest is a **capability declaration surface**. Four declarations, each wi
 
 | Declaration | Meaning | Lands in |
 |---|---|---|
-| `[[tools]]` | builtin tools | this agent's builtin tool switches (`builtin_tools`) |
+| `[[tools]]` | builtin tools | this bot's builtin tool switches (`builtin_tools`) |
 | `[[mcp_servers]]` | **recommended** MCP servers | `agent_mcp.json.recommended`; the user confirms install/activation |
 | `[capabilities.<action>].skills` | which skills implement the capability | intent addressing + declaration-graph validation |
 | `[config]` | behaviour defaults for `agent_config.json` | fills `None` fields only; never overwrites a user value |
 
-**Recommendation != installation.** `[[mcp_servers]]` writes only `recommended` / `dismissed`, never `catalog` / `local` / `active_names`. After the user confirms, the server enters the **machine-wide MCP catalog** carrying an `origin` (`preset:<id>` / `agent-package:<agent_id>#<key>` / `user`); other agents see it but never auto-activate it.
+**Recommendation != installation.** `[[mcp_servers]]` writes only `recommended` / `dismissed`, never `catalog` / `local` / `active_names`. After the user confirms, the server enters the **machine-wide MCP catalog** carrying an `origin` (`preset:<id>` / `agent-package:<agent_id>#<key>` / `user`); other bots see it but never auto-activate it.
 
-**Capability != skill.** A skill is an internal workflow and is not exposed; a capability is an outward contract other agents address through an intent. One capability may be implemented by several skills, and one skill may serve several capabilities.
+**Capability != skill.** A skill is an internal workflow and is not exposed; a capability is an outward contract other bots address through an intent. One capability may be implemented by several skills, and one skill may serve several capabilities.
 
 **Declaration-graph validation** (`AgentManifest::validate_graph`):
 
@@ -600,4 +600,4 @@ The store maintains a Certificate Revocation List (CRL); Gateway queries online 
 
 ### 5.5 Debug Platform Key (Online Application)
 
-Developers apply for a Debug Platform Key (30-day validity, remotely revocable) via platform account authentication, used for local debugging of system=true Agents. Replaces the current Phase 1 local trust configuration scheme.
+Developers apply for a Debug Platform Key (30-day validity, remotely revocable) via platform account authentication, used for local debugging of system=true Bots. Replaces the current Phase 1 local trust configuration scheme.

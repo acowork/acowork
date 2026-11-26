@@ -179,7 +179,7 @@ pub fn analyze(raw: &str, cfg: &AnalyzerConfig) -> DualQuery;
 
 ### 3.2 检索策略契约 — `acowork-core/src/retrieval.rs`（类型）+ Runtime 配置装载
 
-**职责**（D6 前置）：`FusionPolicy` 作为**跨 crate 公共契约**定义在 `acowork-core::retrieval`（与 `MatchedBy`/`FusedHit` 同模块），三个调用方与评估 harness 共用同一类型；Runtime `search/policy.rs` 只做配置装载（读 agent config、套默认值、产出 `FusionPolicy`），不拥有类型定义。这样 memory 与 search 都只依赖 core，彼此零引用。
+**职责**（D6 前置）：`FusionPolicy` 作为**跨 crate 公共契约**定义在 `acowork-core::retrieval`（与 `MatchedBy`/`FusedHit` 同模块），三个调用方与评估 harness 共用同一类型；Runtime `search/policy.rs` 只做配置装载（读 bot config、套默认值、产出 `FusionPolicy`），不拥有类型定义。这样 memory 与 search 都只依赖 core，彼此零引用。
 
 ```rust
 /// Per-source fusion knobs (ADR-095 D3). Values are rank-fusion weights,
@@ -204,7 +204,7 @@ impl FusionPolicy {
 }
 ```
 
-**配置来源**：Runtime agent config 增 `search` 段（`analyzer_mode: off|shadow|on`、可选权重覆盖，供 Phase 4 阈值 sweep 使用）。默认值即上表常量；**Phase 2 之前不改任何线上权重**。
+**配置来源**：Runtime bot config 增 `search` 段（`analyzer_mode: off|shadow|on`、可选权重覆盖，供 Phase 4 阈值 sweep 使用）。默认值即上表常量；**Phase 2 之前不改任何线上权重**。
 
 ### 3.3 评估 Harness — `dev/eval/retrieval/` + 按二进制边界拆分的三个 runner
 

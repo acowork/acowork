@@ -2,11 +2,11 @@
 
 > 版本：v3.5 | 更新日期：2026-10-23
 
-> **v3.5 变更（已实施）**：`memory_recall` / `memory_store` 不再是内置工具——记忆已剥离为 Gateway 托管的独立服务 `acowork-memory`，Agent 侧以 MCP 工具 `mcp_memory__memory_recall` / `mcp_memory__memory_store` 访问（[ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)）。随之删除的还有 `memory:read` / `memory:write` 两个权限项，以及本文 §4 / §4.2.1 中描述的“主循环步骤② MemoryManager.retrieve() 自动注入”（auto-inject，ADR-101 决策 5）——记忆获取统一为工具主动调用。这些段落保留作历史设计记录，实际行为以 ADR-101 为准。
+> **v3.5 变更（已实施）**：`memory_recall` / `memory_store` 不再是内置工具——记忆已剥离为 Gateway 托管的独立服务 `acowork-memory`，Bot 侧以 MCP 工具 `mcp_memory__memory_recall` / `mcp_memory__memory_store` 访问（[ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)）。随之删除的还有 `memory:read` / `memory:write` 两个权限项，以及本文 §4 / §4.2.1 中描述的“主循环步骤② MemoryManager.retrieve() 自动注入”（auto-inject，ADR-101 决策 5）——记忆获取统一为工具主动调用。这些段落保留作历史设计记录，实际行为以 ADR-101 为准。
 
 ---
 
-工具系统是 Agent 感知和操作世界的唯一通道。LLM 通过 tool_calls 调用工具，Runtime 解析并路由到对应的工具实现。所有工具执行都经过权限校验，自定义工具在 WASM 沙箱中隔离运行。
+工具系统是 Bot 感知和操作世界的唯一通道。LLM 通过 tool_calls 调用工具，Runtime 解析并路由到对应的工具实现。所有工具执行都经过权限校验，自定义工具在 WASM 沙箱中隔离运行。
 
 ## 1. 工具分类
 
@@ -21,28 +21,28 @@ Tool Dispatcher
 | 类型     | 来源                             | 执行环境       | LLM 可直接调用         | Phase                                     |
 | -------- | -------------------------------- | -------------- | ---------------------- | ----------------------------------------- |
 | Built-in | Runtime 内置                     | 宿主进程内     | 是                     | Phase 1                                   |
-| WASM     | .agent 包 tools/ 目录            | Wasmtime 沙箱  | 是                     | Phase 1（声明+沙箱）/ Phase 3（完整权限） |
+| WASM     | .bot 包 tools/ 目录            | Wasmtime 沙箱  | 是                     | Phase 1（声明+沙箱）/ Phase 3（完整权限） |
 | RAG      | manifest 声明，指向企业 RAG 服务 | 远程 HTTP 调用 | 是                     | Phase 2                                   |
 | Gateway  | Gateway Service API              | Gateway 进程   | 否（Runtime 内部发起） | Phase 4                                   |
 
 ## 2. Built-in Tools 清单
 
-以下工具由 Agent Runtime 内置实现，Agent 可在 manifest 中声明使用，无需提供实现代码。
+以下工具由 Bot Runtime 内置实现，Bot 可在 manifest 中声明使用，无需提供实现代码。
 
-**平台基础设施级工具定义：** 内置工具的范围仅限**平台基础设施级**——即调用开放协议（HTTP/DNS/文件系统/操作系统 API）或本地计算（WASM/Embedding），不依赖特定第三方服务的付费 API。SaaS 集成（Jira/Notion/LinkedIn 等）由独立 Agent 提供，不内置。
+**平台基础设施级工具定义：** 内置工具的范围仅限**平台基础设施级**——即调用开放协议（HTTP/DNS/文件系统/操作系统 API）或本地计算（WASM/Embedding），不依赖特定第三方服务的付费 API。SaaS 集成（Jira/Notion/LinkedIn 等）由独立 Bot 提供，不内置。
 | 工具名                 | 功能                             | 所需权限                  | 说明                                                                                                                                                                                                                      |
 | ---------------------- | -------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | ~~`memory_recall`~~        | ~~语义检索私有 SQLite 记忆层~~          | ~~`memory:read`~~          | **已迁移** — ADR-101：记忆已剥离为独立服务，该工具现为 Gateway 托管记忆 MCP 的 `mcp_memory__memory_recall`，无权限域，经 `agent_mcp_tools.json` 做工具级 opt-in（ADR-069） |
 | ~~`memory_store`~~         | ~~写入私有 SQLite 记忆层~~              | ~~`memory:write`~~         | **已迁移** — 同上，现为 `mcp_memory__memory_store`；即时提取 / 五种类型 / importance / privacy 参数语义不变，只是调用通道改了 |
 | `http_request`         | HTTP 请求（GET/POST/PUT/DELETE） | `network:<url_pattern>`   | 支持 method 参数选择 HTTP 方法，JSON 响应自动解析，JSON body 和表单                                                                                                                                                       |
-| `web_fetch`            | 获取网页内容                     | `network:<url_pattern>`   | HTML → Markdown 转换，Agent 直接获得可读文本                                                                                                                                                                              |
+| `web_fetch`            | 获取网页内容                     | `network:<url_pattern>`   | HTML → Markdown 转换，Bot 直接获得可读文本                                                                                                                                                                              |
 | `shell`                | 执行 shell 命令                  | `filesystem:exec`         | 受沙箱限制，超时可中断                                                                                                                                                                                                    |
 | `file_read`            | 读取文件                         | `filesystem:read:<path>`  | 限制在工作区和授权目录内                                                                                                                                                                                                  |
 | `file_write`           | 写入文件                         | `filesystem:write:<path>` | 限制在工作区和授权目录内                                                                                                                                                                                                  |
 | `file_edit`            | 精确编辑文件                     | `filesystem:write:<path>` | 基于行范围的编辑（替换/插入/删除），比 file_write 更精准                                                                                                                                                                  |
 | `glob_search`          | 文件名模式搜索                   | `filesystem:read:<path>`  | 支持 glob 模式匹配，返回文件路径列表                                                                                                                                                                                      |
 | `content_search`       | 文件内容搜索                     | `filesystem:read:<path>`  | 类似 grep，支持正则表达式，返回匹配行及上下文                                                                                                                                                                             |
-| `intent_send`          | 发送 Intent 到其他 Agent         | `intent:send:<target>`    | 通过 Gateway 路由                                                                                                                                                                                                         |
+| `intent_send`          | 发送 Intent 到其他 Bot         | `intent:send:<target>`    | 通过 Gateway 路由                                                                                                                                                                                                         |
 | ~~`identity_store`~~   | ~~写入用户身份信息~~             | ~~`identity:write`~~      | **已删除** — 用户身份管理已迁移至 Gateway UserProfile，详见 `18-user-identity-simplified.md`                                                                                                                              |
 | ~~`identity_query`~~   | ~~查询用户身份信息~~             | ~~`identity:read`~~       | **已删除** — 用户身份管理已迁移至 Gateway UserProfile                                                                                                                                                                     |
 | ~~`identity_observe`~~ | ~~订阅身份变更通知~~             | ~~`identity:observe`~~    | **已删除** — 用户身份管理已迁移至 Gateway UserProfile                                                                                                                                                                     |
@@ -70,25 +70,25 @@ Tool Dispatcher
 
 **可用性级别定义：**
 
-| 级别               | 含义             | 对 Agent 的影响                                   |
+| 级别               | 含义             | 对 Bot 的影响                                   |
 | ------------------ | ---------------- | ------------------------------------------------- |
-| 全平台             | 所有平台行为一致 | Agent 可无差别使用                                |
-| 仅桌面端           | 移动端不支持     | Agent 声明 `required = true` 时，移动端安装被拒绝 |
-| 全平台，移动端受限 | 移动端行为降级   | Agent 可使用但需适配降级行为                      |
+| 全平台             | 所有平台行为一致 | Bot 可无差别使用                                |
+| 仅桌面端           | 移动端不支持     | Bot 声明 `required = true` 时，移动端安装被拒绝 |
+| 全平台，移动端受限 | 移动端行为降级   | Bot 可使用但需适配降级行为                      |
 
 **具体降级行为：**
 
 `shell`（仅桌面端）：
 - iOS 沙箱禁止执行外部进程，Android 也只有极少数场景可以（root 或 Termux）
 - 桌面端也存在 shell 差异：Windows 是 cmd/PowerShell，Linux/macOS 是 bash/zsh，命令语法不同
-- Agent 在 manifest 中声明 `required = true` 时，移动端安装检查直接拒绝
-- Agent 声明 `required = false`（默认）时，移动端安装成功，但 `shell` 工具不注册到可用工具列表
+- Bot 在 manifest 中声明 `required = true` 时，移动端安装检查直接拒绝
+- Bot 声明 `required = false`（默认）时，移动端安装成功，但 `shell` 工具不注册到可用工具列表
 
 `file_read` / `file_write` / `file_edit` / `glob_search` / `content_search`（移动端受限）：
 - iOS App Sandbox 只允许访问自己容器内的文件
 - Android Scoped Storage 限制了外部存储访问
-- 降级行为：路径白名单自动收窄到 Agent 工作目录（`<agent_data_dir>/workspace/`），超出范围的路径请求返回权限错误
-- `glob_search` / `content_search` 的搜索范围同样限制在 Agent 工作目录内
+- 降级行为：路径白名单自动收窄到 Bot 工作目录（`<agent_data_dir>/workspace/`），超出范围的路径请求返回权限错误
+- `glob_search` / `content_search` 的搜索范围同样限制在 Bot 工作目录内
 - 桌面端路径白名单由 `filesystem:read/write:<path>` 权限控制，可授权任意目录
 
 **运行时平台检测：**
@@ -139,7 +139,7 @@ permissions = ["filesystem:exec"]
 
 ## 3. WASM Tools（自定义工具沙箱）
 
-自定义工具由 Agent 开发者提供 .wasm 文件，在 Wasmtime 沙箱中隔离执行。
+自定义工具由 Bot 开发者提供 .wasm 文件，在 Wasmtime 沙箱中隔离执行。
 
 ### 3.1 运行时选型：Wasmtime
 
@@ -187,7 +187,7 @@ max_execution_time_ms = 5000
 | --------------------------------------- | ---- | ---------------------------------------- |
 | `name`                                  | 是   | 工具名称，LLM 通过此名称调用             |
 | `type`                                  | 是   | 必须为 `"wasm"`                          |
-| `binary`                                | 是   | .wasm 文件路径（相对于 .agent 包根目录） |
+| `binary`                                | 是   | .wasm 文件路径（相对于 .bot 包根目录） |
 | `permissions`                           | 是   | 所需权限列表（安装时展示，运行时校验）   |
 | `resource_limits.max_memory_mb`         | 否   | WASM 线性内存上限（默认 50）             |
 | `resource_limits.max_execution_time_ms` | 否   | 执行超时（默认 5000）                    |
@@ -292,7 +292,7 @@ pub extern "C" fn schema_len() -> u32;
 
 ### 3.5 WASM 工具开发工具链
 
-Agent 开发者编写 WASM 工具的推荐流程：
+Bot 开发者编写 WASM 工具的推荐流程：
 
 ```
 1. 用 Rust 编写工具逻辑（目标：wasm32-wasip2）
@@ -340,9 +340,9 @@ fn execute(input: ToolInput) -> Result<ToolOutput, ToolError> {
 
 ## 4. RAG Tools（企业知识库接入）
 
-RAG 工具让 Agent 对接企业自建的 RAG 知识库，实现"双通道检索"——本地记忆层（个人记忆）和企业 RAG（集体知识）并行查询，结果拼接送入 LLM 上下文。ACowork 不托管 RAG 服务，只定义标准查询协议（请求/响应 JSON Schema），企业 RAG 自行适配此协议（详见 00-prd.md §1.13）。
+RAG 工具让 Bot 对接企业自建的 RAG 知识库，实现"双通道检索"——本地记忆层（个人记忆）和企业 RAG（集体知识）并行查询，结果拼接送入 LLM 上下文。ACowork 不托管 RAG 服务，只定义标准查询协议（请求/响应 JSON Schema），企业 RAG 自行适配此协议（详见 00-prd.md §1.13）。
 
-**配置驱动 Opt-In**：RAG 不是默认能力，仅当 manifest 声明 `[[tools]] type = "rag"` 时使能。无 RAG 声明的 Agent，Tool Dispatcher 不注册 RAG 工具，MemoryManager.retrieve() 仅查 SQLite 记忆通道，行为与无 RAG 完全一致。
+**配置驱动 Opt-In**：RAG 不是默认能力，仅当 manifest 声明 `[[tools]] type = "rag"` 时使能。无 RAG 声明的 Bot，Tool Dispatcher 不注册 RAG 工具，MemoryManager.retrieve() 仅查 SQLite 记忆通道，行为与无 RAG 完全一致。
 
 **混合双触发**：RAG 有两种触发方式，均由 manifest 配置驱动：
 
@@ -427,7 +427,7 @@ Runtime 解析 tool_call
 
 | 规则         | 说明                                                                                  |
 | ------------ | ------------------------------------------------------------------------------------- |
-| 离线降级     | RAG 服务不可达时，返回空结果，不阻塞 Agent 运行（自动触发和显式触发均降级）           |
+| 离线降级     | RAG 服务不可达时，返回空结果，不阻塞 Bot 运行（自动触发和显式触发均降级）           |
 | 凭据安全     | auth_ref 引用 Vault 密钥，Runtime 每次调用时从 Vault 获取，不缓存在进程内存或环境变量 |
 | 结果标注     | 每条 RAG 结果标注 source_url 和 chunk_id，供 LLM 和用户追溯来源                       |
 | 查询范围限制 | collection 字段限定查询范围，防止跨租户数据泄露                                       |
@@ -443,7 +443,7 @@ RAG 工具和本地记忆层 是两条完全独立的检索通道：
 | 存储位置   | 本地文件（rusqlite）                       | 企业 RAG 服务（远程）                  |
 | 数据类型   | 个人偏好、交互历史、自传体                 | 产品文档、业务流程、内部规范           |
 | 检索方式   | 向量 + 全文 + 关联扩散（图扩展）           | 向量检索 + 可选混合关键词 + 元数据过滤 |
-| 隐私边界   | Agent 私有，打包分享时按 PrivacyLevel 过滤 | 企业管理，Agent 只读                   |
+| 隐私边界   | Bot 私有，打包分享时按 PrivacyLevel 过滤 | 企业管理，Bot 只读                   |
 
 RAG 检索结果与本地记忆层 检索结果在瞬态层拼接后统一送入 LLM 上下文，但不整合进 Memory 系统的抽象层——两者查询范式和存储模型完全不同。
 
@@ -462,14 +462,14 @@ RAG 检索结果与本地记忆层 检索结果在瞬态层拼接后统一送入
 | ------------------------------- | ----------------------------- | ----------------------------------------------- |
 | `KeyRelease`                    | 启动握手后                    | 获取 LLM API Key（一次性）                      |
 | `IdentityDelivery`              | 启动握手后                    | 获取用户身份信息（由 Gateway 主动推送）         |
-| `CapabilityOverview`            | 启动握手后                    | 获取已安装 Agent 的能力摘要（Gateway 主动推送） |
-| `IntentSend` / `IntentReceived` | LLM 调用 `intent_send` 工具时 | 跨 Agent 消息路由                               |
+| `CapabilityOverview`            | 启动握手后                    | 获取已安装 Bot 的能力摘要（Gateway 主动推送） |
+| `IntentSend` / `IntentReceived` | LLM 调用 `intent_send` 工具时 | 跨 Bot 消息路由                               |
 | `BudgetQuery`                   | 预算预检时                    | 查询剩余预算                                    |
 | `UsageReport`                   | 每轮迭代后（异步）            | 上报 LLM 用量                                   |
 | `RateAcquire`                   | 调用 LLM 前                   | 申请速率令牌                                    |
 | `PermissionRequest`             | 运行时请求额外权限            | 弹窗让用户确认                                  |
 
-**关键原则：** LLM 调用和工具执行不走 Gateway——Agent 直连 LLM API、本地执行工具。Gateway 只管必须集中化的协调。
+**关键原则：** LLM 调用和工具执行不走 Gateway——Bot 直连 LLM API、本地执行工具。Gateway 只管必须集中化的协调。
 
 ## 5. 工具调度流程
 
@@ -516,13 +516,13 @@ LLM 输出 tool_calls: [{name, arguments}, ...]
 | Fuel metering                             | 启用                                                         | 防止恶意/有缺陷的 WASM 工具死循环                                                                                                                                                                                       |
 | API Key 对 WASM 不可见                    | secrecy::SecretString                                        | WASM 工具是不可信代码，绝不能拿到 LLM API Key                                                                                                                                                                           |
 | SDK 延后                                  | Phase 2+                                                     | Phase 1 手动导出函数足够，SDK 降低门槛但不阻塞核心功能                                                                                                                                                                  |
-| Builtin 范围                              | 仅平台基础设施级                                             | SaaS 集成（Jira/Notion/LinkedIn 等）由独立 Agent 提供，不内置；垂直能力走 WASM Tool 或独立 Agent                                                                                                                        |
-| web_fetch 内置                             | 是                                                           | 几乎所有 Agent 都需要，是平台级基础设施                                                                                                                                     |
-| file_edit/glob_search/content_search 内置 | 是                                                           | 文件操作三件套（读+写+编辑+搜索），缺少任一个都会导致 Agent 用 file_write 模拟低效操作                                                                                                                                  |
-| RAG 工具类型                              | 独立 type="rag"，配置驱动 Opt-In                             | 企业 RAG 是外部服务接入，不是内置工具也不是 WASM 工具，需要独立的声明和执行模型；仅 manifest 声明时注册，无 RAG 的 Agent 零侵入                                                                                         |
+| Builtin 范围                              | 仅平台基础设施级                                             | SaaS 集成（Jira/Notion/LinkedIn 等）由独立 Bot 提供，不内置；垂直能力走 WASM Tool 或独立 Bot                                                                                                                        |
+| web_fetch 内置                             | 是                                                           | 几乎所有 Bot 都需要，是平台级基础设施                                                                                                                                     |
+| file_edit/glob_search/content_search 内置 | 是                                                           | 文件操作三件套（读+写+编辑+搜索），缺少任一个都会导致 Bot 用 file_write 模拟低效操作                                                                                                                                  |
+| RAG 工具类型                              | 独立 type="rag"，配置驱动 Opt-In                             | 企业 RAG 是外部服务接入，不是内置工具也不是 WASM 工具，需要独立的声明和执行模型；仅 manifest 声明时注册，无 RAG 的 Bot 零侵入                                                                                         |
 | RAG 凭据安全                              | Vault 引用，运行时获取                                       | 与内置工具 API Key 管理一致，不明文出现在 manifest 或进程环境变量                                                                                                                                                       |
 | RAG 触发模型                              | 混合双触发（自动 + 显式）                                    | 自动触发（步骤② Retrieve）解决"LLM 不知道该不该查"；显式触发（步骤⑤ tool_call）解决"需要更精确查询"；均由 manifest 配置驱动 opt-in（ADR-012，详见 plan-p4.md）                                                          |
 | RAG 协议适配                              | ACowork 定义标准协议，企业 RAG 自适配                    | 不为各家 RAG 实现 adapter，企业侧确保其 RAG 服务兼容标准查询接口；遵循 PRD "纯对接，不托管"原则                                                                                                                         |
 | identity_store 专用工具                   | 新增第 14~15 个内置工具（identity_query + identity_observe） | 身份数据有专属语义（字段级 confidence、变更通知、结构化查询），memory_store 通用 Fact 节点无法自然承载；专用工具有扩展点（字段校验、敏感加密、跨设备同步优先级）；内部实现基于 MemoryManager store 接口，不绕过记忆架构 |
-| identity_store 仅系统 Agent 可用          | 权限 `identity:write`                                        | 系统 Agent 是身份数据唯一写入方；其他 Agent 通过 intent_send 汇报，由系统 Agent LLM 判断后写入                                                                                                                          |
+| identity_store 仅系统 Bot 可用          | 权限 `identity:write`                                        | 系统 Bot 是身份数据唯一写入方；其他 Bot 通过 intent_send 汇报，由系统 Bot LLM 判断后写入                                                                                                                          |
 

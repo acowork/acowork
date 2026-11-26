@@ -1,4 +1,4 @@
-﻿# Agent as APP：平台设计总纲
+﻿# Bot as APP：平台设计总纲
 
 > 版本：v3.4 | 更新日期：2026-04-16
 
@@ -6,14 +6,14 @@
 
 ## 1. 背景与目标
 
-设计一个去中心化、高安全、可扩展的 AI Agent 运行时平台。核心思想是将每个 Agent 视为一个独立的"应用包"（类似 Android APP），由统一的 Agent Runtime 进程加载执行，运行在客户端（用户电脑）并由轻量级 Gateway 管理生命周期。
+设计一个去中心化、高安全、可扩展的 AI Bot 运行时平台。核心思想是将每个 Bot 视为一个独立的"应用包"（类似 Android APP），由统一的 Bot Runtime 进程加载执行，运行在客户端（用户电脑）并由轻量级 Gateway 管理生命周期。
 
 **核心类比——Android 模型：**
 
 | Android                | ACowork                              | 作用                           |
 | ---------------------- | ------------------------------------- | ------------------------------ |
-| zygote / ART           | Agent Runtime 二进制                  | 通用执行引擎，只有一个         |
-| APK (DEX + resources)  | .agent 包 (config + prompts + skills) | 声明式，无自定义代码           |
+| zygote / ART           | Bot Runtime 二进制                  | 通用执行引擎，只有一个         |
+| APK (DEX + resources)  | .bot 包 (config + prompts + skills) | 声明式，无自定义代码           |
 | APK Signature          | .agent Signing Block                  | 包签名，验证完整性和来源       |
 | ActivityManagerService | Gateway                               | 生命周期管理                   |
 | Binder IPC             | MQTT pub/sub + HTTP 反向代理           | 进程间通信（ADR-033）          |
@@ -27,18 +27,18 @@
 
 ## 2. 核心特性
 
-- **标准化打包**：Agent 以压缩包（.agent）分发，内含配置、Prompt、Skill、工具声明，**不含可执行文件**。所有包必须经过签名，Gateway 安装时强制验证签名完整性和来源。
-- **统一执行引擎**：Agent Runtime 是平台提供的唯一二进制，负责加载 .agent 包并执行 Agent 逻辑（LLM 交互、工具调度、记忆读写）。
-- **进程级隔离**：每个 Agent 由 Gateway 启动为独立 Agent Runtime 进程，拥有独立工作区、私有 SQLite 记忆数据库、文件系统隔离、可选资源限制（cgroups/容器）。
-- **Agent 自治**：Agent 进程内直连 LLM API、自主执行工具、自主管理权限校验，不依赖 Gateway 代理业务逻辑。
-- **仿生 Memory 系统**：记忆由独立的记忆服务 `acowork-memory` 承担（ADR-101），每个 Agent 实例一份
+- **标准化打包**：Bot 以压缩包（.agent）分发，内含配置、Prompt、Skill、工具声明，**不含可执行文件**。所有包必须经过签名，Gateway 安装时强制验证签名完整性和来源。
+- **统一执行引擎**：Bot Runtime 是平台提供的唯一二进制，负责加载 .bot 包并执行 Bot 逻辑（LLM 交互、工具调度、记忆读写）。
+- **进程级隔离**：每个 Bot 由 Gateway 启动为独立 Bot Runtime 进程，拥有独立工作区、私有 SQLite 记忆数据库、文件系统隔离、可选资源限制（cgroups/容器）。
+- **Bot 自治**：Bot 进程内直连 LLM API、自主执行工具、自主管理权限校验，不依赖 Gateway 代理业务逻辑。
+- **仿生 Memory 系统**：记忆由独立的记忆服务 `acowork-memory` 承担（ADR-101），每个 Bot 实例一份
   SQLite 库（`$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`）。存储后端为 SQLite
   （ADR-082）：向量存 `vectors` 表，词法走 FTS5 trigram 索引，检索为向量 + 词法混合；分层落在四类标签
   （经历 / 语义 / 程序 / 自传体），瞬态层即 LLM 上下文窗口、不落盘。包含遗忘机制（三因子衰减）、隐私分级
   （PrivacyLevel）与记忆生命周期（Retrieve/Inject/Record/Consolidate/Decay/Compact）。
   > 关联扩散检索（§6）是设计目标，当前未实现——ADR-082 D4 删除了图层间的图遍历，不建 `edges` 表。
-- **权限声明与授权**：Agent 在清单中声明所需权限（网络、文件、调用其他 Agent 等），Gateway 在启动时配置沙箱，Agent 在运行时自主校验。
-- **跨平台支持**：.agent 包格式和 MQTT + HTTP 协议合同跨平台统一，各平台运行时机制（进程模型、传输层、沙箱）可按平台特性适配。
+- **权限声明与授权**：Bot 在清单中声明所需权限（网络、文件、调用其他 Bot 等），Gateway 在启动时配置沙箱，Bot 在运行时自主校验。
+- **跨平台支持**：.bot 包格式和 MQTT + HTTP 协议合同跨平台统一，各平台运行时机制（进程模型、传输层、沙箱）可按平台特性适配。
 
 ## 3. 总体架构
 
@@ -96,17 +96,17 @@
 
 ## 4. 职责划分原则
 
-**Agent 尽可能自治，Gateway 只管必须集中化的事。**
+**Bot 尽可能自治，Gateway 只管必须集中化的事。**
 
 | 职责             | 执行位置                  | 原因                                  |
 | ---------------- | ------------------------- | ------------------------------------- |
-| LLM 调用         | Agent 进程                | 直连无 RPC 开销，流式自然，Agent 自治 |
-| Tool 执行        | Agent 进程                | 自治权限校验，低延迟                  |
+| LLM 调用         | Bot 进程                | 直连无 RPC 开销，流式自然，Bot 自治 |
+| Tool 执行        | Bot 进程                | 自治权限校验，低延迟                  |
 | 私有 Memory 读写 | 记忆服务 `acowork-memory` | 工具调用（ADR-101），零业务逻辑入 Runtime |
 | API Key 存储     | Gateway Vault             | 安全集中管理                          |
-| API Key 分发     | 启动时一次性给 Agent      | Agent 直连 LLM 需要                   |
-| 预算追踪         | Gateway（接收上报）       | 跨 Agent 统计                         |
-| 预算执行         | Agent（本地预检）         | 低延迟，自治                          |
+| API Key 分发     | 启动时一次性给 Bot      | Bot 直连 LLM 需要                   |
+| 预算追踪         | Gateway（接收上报）       | 跨 Bot 统计                         |
+| 预算执行         | Bot（本地预检）         | 低延迟，自治                          |
 | 预算硬限         | Gateway（超限信号）       | 兜底保障                              |
 | 速率限制         | Gateway（令牌分配）       | 共享资源协调                          |
 | 用户身份与偏好   | `acowork-user` 用户域      | 集中式身份管理（ADR-084）             |
@@ -126,18 +126,18 @@
 
 ## 5. 未来扩展
 
-- **Agent 商店**：建立公开仓库，用户可一键安装，含评分和评论。
-- **付费 Agent**：支持许可证验证（Gateway 内集成）。
+- **Bot 商店**：建立公开仓库，用户可一键安装，含评分和评论。
+- **付费 Bot**：支持许可证验证（Gateway 内集成）。
 - **联邦 Memory**：多个用户之间的 Memory 共享（需授权）。
-- **Agent 组合**：多个 Agent 编排为工作流（DAG 调度）。
-- **多模态 Agent**：支持图像、音频、视频输入输出的 Agent。
+- **Bot 组合**：多个 Bot 编排为工作流（DAG 调度）。
+- **多模态 Bot**：支持图像、音频、视频输入输出的 Bot。
 - **移动端深度适配**：Android 多进程 Service 架构、iOS App Extension 集成、移动端 UI 交互优化。
 
 ---
 
 > 详细设计见各子文档：
-> - [02-agent-package.md](./02-agent-package.md) — Agent 打包格式、签名机制、manifest.toml
-> - [03-agent-runtime.md](./03-agent-runtime.md) — Agent Runtime 内部结构与主循环
+> - [02-agent-package.md](./02-agent-package.md) — Bot 打包格式、签名机制、manifest.toml
+> - [03-agent-runtime.md](./03-agent-runtime.md) — Bot Runtime 内部结构与主循环
 > - [04-gateway.md](./04-gateway.md) — Gateway 组件详细设计
 > - [05-memory.md](./05-memory.md) — Memory 分层架构
 > - [06-communication.md](./06-communication.md) — 通信协议（MQTT pub/sub + HTTP 反代 + Intent 机制）
