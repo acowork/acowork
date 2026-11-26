@@ -6,13 +6,14 @@ import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ErrorBox } from "../common/ErrorBox";
 import { Dropdown } from "../common/Dropdown";
-import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fetchEmbeddingModelStatus, testEmbeddingModel, deleteEmbeddingModel, startMigration, selectEmbeddingModelWithMigration } from "../../lib/gateway-api";
+import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fetchEmbeddingModelStatus, testEmbeddingModel, deleteEmbeddingModel, startMigration, selectEmbeddingModelWithMigration, addLocalEmbeddingModel } from "../../lib/gateway-api";
 import { fetchCloudEmbeddingProviders, selectCloudEmbeddingModel, setCloudEmbeddingApiKey, deleteCloudEmbeddingApiKey, testCloudEmbeddingProvider, addCloudEmbeddingProvider } from "../../lib/gateway-api";
 import type { EmbeddingTestResponse } from "../../lib/types";
-import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle, Trash2, Cloud, KeyRound, HardDrive, Plus, RefreshCw } from "lucide-react";
+import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle, Trash2, Cloud, KeyRound, HardDrive, Plus, RefreshCw, ExternalLink } from "lucide-react";
 import { Badge, EmptyState, ExpandableRow, ListBox, ListRow } from "../common/list";
 import { Tooltip } from "../common/Tooltip";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
+import { openExternal } from "../../lib/openExternal";
 
 export function EmbeddingModelTab() {
     const { t } = useTranslation();
@@ -67,6 +68,8 @@ export function EmbeddingModelTab() {
 
     // Add custom cloud embedding provider dialog (S2)
     const [customDialogOpen, setCustomDialogOpen] = useState(false);
+    // Add custom LOCAL model dialog — same idea for the ONNX catalog.
+    const [localDialogOpen, setLocalDialogOpen] = useState(false);
 
     const loadModels = useCallback(async () => {
         setLoading(true);
@@ -637,7 +640,19 @@ export function EmbeddingModelTab() {
                     }
                     ariaLabel={t("embedding.localModels", { count: models.length })}
                     trailing={
-                        <span onClick={(e) => e.stopPropagation()}>
+                        <span
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex items-center gap-1"
+                        >
+                            <Tooltip content={t("embedding.addLocalModel")} variant="plain">
+                                <button
+                                    aria-label={t("embedding.addLocalModel")}
+                                    onClick={() => setLocalDialogOpen(true)}
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15 transition-colors"
+                                >
+                                    <Plus className="h-3.5 w-3.5" />
+                                </button>
+                            </Tooltip>
                             <Tooltip
                                 content={loading ? t("embedding.loading") : t("embedding.refresh")}
                                 variant="plain"
@@ -819,6 +834,17 @@ export function EmbeddingModelTab() {
                     )}
                 </ExpandableRow>
             </ListBox>
+
+            {/* Add custom LOCAL model dialog */}
+            <AddLocalEmbeddingModelDialog
+                open={localDialogOpen}
+                onClose={() => setLocalDialogOpen(false)}
+                onSaved={async () => {
+                    setLocalDialogOpen(false);
+                    await loadModels();
+                }}
+                existingIds={models.map((m) => m.id)}
+            />
 
             {/* Add custom cloud embedding provider dialog (S2) */}
             <AddCustomEmbeddingProviderDialog
@@ -1196,7 +1222,7 @@ function ModelCard({
                     <Cpu className="h-3 w-3" />
                     {model.dimension}d
                 </span>
-                <span>{model.size_mb} MB</span>
+                {model.size_mb > 0 && <span>{model.size_mb} MB</span>}
                 <span>{model.max_tokens} tokens</span>
                 {model.languages.length > 0 && (
                     <span className="inline-flex items-center gap-1">
@@ -1746,6 +1772,325 @@ function AddCustomEmbeddingProviderDialog({
                 </OverlayScrollbar>
 
                 {/* Footer */}
+                <div className="shrink-0 flex items-center justify-end gap-2 border-t border-border-divider px-6 py-4">
+                    <button
+                        onClick={handleClose}
+                        disabled={saving}
+                        className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50  dark:hover:bg-[var(--color-accent)]/15"
+                    >
+                        {t("embedding.cancel")}
+                    </button>
+                    <button
+                        onClick={handleSave}
+                        disabled={saving}
+                        className="btn-accent rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+                    >
+                        {saving ? t("embedding.saving") : t("embedding.save")}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// ── Add custom LOCAL model dialog ───────────────────────────────────────
+
+interface AddLocalEmbeddingModelDialogProps {
+    open: boolean;
+    onClose: () => void;
+    onSaved: () => void | Promise<void>;
+    /** Ids already in the catalog — a collision is a 409 server-side. */
+    existingIds: string[];
+}
+
+/** Accept a pasted HuggingFace URL as well as a bare `owner/name`: both the
+ *  download and the "Open on HuggingFace" link need the bare repo id. */
+export function normalizeHfRepo(raw: string): string {
+    return raw
+        .trim()
+        .replace(/^https?:\/\/(www\.)?huggingface\.co\//i, "")
+        .replace(/^\/+|\/+$/g, "");
+}
+
+/**
+ * Add a user-defined local ONNX embedding model.
+ *
+ * The fields are exactly the `embedding_models.json` parameters the embed
+ * service needs to download and load a graph — nothing is guessed: neither
+ * the dimension nor the pooling can be read off a repo without downloading
+ * it first, and a wrong pooling yields vectors that are silently useless.
+ */
+export function AddLocalEmbeddingModelDialog({
+    open,
+    onClose,
+    onSaved,
+    existingIds,
+}: AddLocalEmbeddingModelDialogProps) {
+    const { t } = useTranslation();
+    const [id, setId] = useState("");
+    const [name, setName] = useState("");
+    const [hfRepo, setHfRepo] = useState("");
+    const [dimension, setDimension] = useState("");
+    const [maxTokens, setMaxTokens] = useState("");
+    const [onnxFile, setOnnxFile] = useState("onnx/model.onnx");
+    const [tokenizerFile, setTokenizerFile] = useState("tokenizer.json");
+    const [pooling, setPooling] = useState("cls");
+    const [outputKind, setOutputKind] = useState("hidden_states");
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    if (!open) return null;
+
+    const repo = normalizeHfRepo(hfRepo);
+    const hfUrl = repo ? `https://huggingface.co/${repo}` : "";
+
+    const reset = () => {
+        setId("");
+        setName("");
+        setHfRepo("");
+        setDimension("");
+        setMaxTokens("");
+        setOnnxFile("onnx/model.onnx");
+        setTokenizerFile("tokenizer.json");
+        setPooling("cls");
+        setOutputKind("hidden_states");
+        setError(null);
+        setSaving(false);
+    };
+
+    const handleClose = () => {
+        reset();
+        onClose();
+    };
+
+    const handleSave = async () => {
+        setError(null);
+        const trimmedId = id.trim();
+        if (!trimmedId) {
+            setError(t("embedding.localModelIdRequired"));
+            return;
+        }
+        if (!/^[A-Za-z0-9._-]+$/.test(trimmedId)) {
+            setError(t("embedding.localModelIdInvalid"));
+            return;
+        }
+        if (existingIds.includes(trimmedId)) {
+            setError(t("embedding.localModelIdExists", { id: trimmedId }));
+            return;
+        }
+        if (!name.trim()) {
+            setError(t("embedding.localModelNameRequired"));
+            return;
+        }
+        if (!repo) {
+            setError(t("embedding.localModelHfRepoRequired"));
+            return;
+        }
+        const repoParts = repo.split("/");
+        if (repoParts.length !== 2 || repoParts.some((p) => !p.trim())) {
+            setError(t("embedding.localModelHfRepoInvalid"));
+            return;
+        }
+        const dim = parseInt(dimension.trim(), 10);
+        if (!Number.isFinite(dim) || dim <= 0) {
+            setError(t("embedding.localModelDimensionRequired"));
+            return;
+        }
+        if (!onnxFile.trim() || !tokenizerFile.trim()) {
+            setError(t("embedding.localModelFileRequired"));
+            return;
+        }
+        const ctx = parseInt(maxTokens.trim(), 10);
+
+        setSaving(true);
+        try {
+            await addLocalEmbeddingModel({
+                id: trimmedId,
+                name: name.trim(),
+                dimension: dim,
+                hf_repo: repo,
+                max_tokens: Number.isFinite(ctx) && ctx > 0 ? ctx : undefined,
+                onnx_file: onnxFile.trim(),
+                tokenizer_file: tokenizerFile.trim(),
+                pooling_strategy: pooling,
+                onnx_output_kind: outputKind,
+            });
+            await onSaved();
+            reset();
+        } catch (e: any) {
+            setError(e?.message || String(e));
+        } finally {
+            setSaving(false);
+        }
+    };return (
+        <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay"
+            onClick={handleClose}
+        >
+            <div
+                className="w-[520px] max-h-[85vh] overflow-hidden rounded-md bg-modal-surface shadow-xl flex flex-col"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="shrink-0 flex items-center gap-2 px-6 pt-6 pb-3">
+                    <h3 className="text-sm font-semibold">
+                        {t("embedding.localModelDialogTitle")}
+                    </h3>
+                </div>
+
+                <OverlayScrollbar fill="flex" className="px-6 pb-2 space-y-3">
+                    <p className="text-11 text-text-tertiary">
+                        {t("embedding.localModelHint")}
+                    </p>
+
+                    {/* Model ID */}
+                    <div>
+                        <label className="mb-1 block text-xs text-text-tertiary">
+                            {t("embedding.localModelId")}
+                        </label>
+                        <input
+                            type="text"
+                            value={id}
+                            onChange={(e) => setId(e.target.value)}
+                            placeholder={t("embedding.localModelIdPlaceholder")}
+                            className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs font-mono"
+                        />
+                    </div>
+
+                    {/* Display name */}
+                    <div>
+                        <label className="mb-1 block text-xs text-text-tertiary">
+                            {t("embedding.localModelName")}
+                        </label>
+                        <input
+                            type="text"
+                            value={name}
+                            onChange={(e) => setName(e.target.value)}
+                            placeholder={t("embedding.localModelNamePlaceholder")}
+                            className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs"
+                        />
+                    </div>
+
+                    {/* HuggingFace repo + link */}
+                    <div>
+                        <div className="mb-1 flex items-center justify-between gap-2">
+                            <label className="text-xs text-text-tertiary">
+                                {t("embedding.localModelHfRepo")}
+                            </label>
+                            {hfUrl && (
+                                <button
+                                    type="button"
+                                    onClick={() => openExternal(hfUrl)}
+                                    className="inline-flex items-center gap-1 text-11 text-text-tertiary hover:text-text-secondary"
+                                >
+                                    <ExternalLink className="h-3 w-3" />
+                                    {t("embedding.localModelOpenHf")}
+                                </button>
+                            )}
+                        </div>
+                        <input
+                            type="text"
+                            value={hfRepo}
+                            onChange={(e) => setHfRepo(e.target.value)}
+                            placeholder={t("embedding.localModelHfRepoPlaceholder")}
+                            className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs font-mono"
+                        />
+                    </div>
+
+                    {/* Dimension + max tokens */}
+                    <div className="grid grid-cols-2 gap-2">
+                        <div>
+                            <label className="mb-1 block text-xs text-text-tertiary">
+                                {t("embedding.localModelDimension")}
+                            </label>
+                            <input
+                                type="number"
+                                value={dimension}
+                                onChange={(e) => setDimension(e.target.value)}
+                                placeholder={t("embedding.localModelDimensionPlaceholder")}
+                                className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs"
+                            />
+                        </div>
+                        <div>
+                            <label className="mb-1 block text-xs text-text-tertiary">
+                                {t("embedding.localModelMaxTokens")}{" "}
+                                <span className="text-text-tertiary">
+                                    ({t("embedding.optional")})
+                                </span>
+                            </label>
+                            <input
+                                type="number"
+                                value={maxTokens}
+                                onChange={(e) => setMaxTokens(e.target.value)}
+                                placeholder={t("embedding.localModelMaxTokensPlaceholder")}
+                                className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs"
+                            />
+                        </div>
+                    </div>
+
+                    {/* Files inside the repo */}
+                    <div className="grid grid-cols-2 gap-2">
+                        <div>
+                            <label className="mb-1 block text-xs text-text-tertiary">
+                                {t("embedding.localModelOnnxFile")}
+                            </label>
+                            <input
+                                type="text"
+                                value={onnxFile}
+                                onChange={(e) => setOnnxFile(e.target.value)}
+                                className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs font-mono"
+                            />
+                        </div>
+                        <div>
+                            <label className="mb-1 block text-xs text-text-tertiary">
+                                {t("embedding.localModelTokenizerFile")}
+                            </label>
+                            <input
+                                type="text"
+                                value={tokenizerFile}
+                                onChange={(e) => setTokenizerFile(e.target.value)}
+                                className="w-full rounded-md border border-input-border bg-input-bg px-3 py-2 text-xs font-mono"
+                            />
+                        </div>
+                    </div>
+
+                    {/* Pooling + ONNX output shape */}
+                    <div className="grid grid-cols-2 gap-2">
+                        <div>
+                            <label className="mb-1 block text-xs text-text-tertiary">
+                                {t("embedding.localModelPooling")}
+                            </label>
+                            <Dropdown
+                                value={pooling}
+                                onChange={setPooling}
+                                options={[
+                                    { value: "cls", label: t("embedding.localModelPoolingCls") },
+                                    { value: "mean", label: t("embedding.localModelPoolingMean") },
+                                    { value: "last_token", label: t("embedding.localModelPoolingLastToken") },
+                                ]}
+                            />
+                        </div>
+                        <div>
+                            <label className="mb-1 block text-xs text-text-tertiary">
+                                {t("embedding.localModelOutputKind")}
+                            </label>
+                            <Dropdown
+                                value={outputKind}
+                                onChange={setOutputKind}
+                                options={[
+                                    { value: "hidden_states", label: t("embedding.localModelOutputHiddenStates") },
+                                    { value: "already_pooled", label: t("embedding.localModelOutputAlreadyPooled") },
+                                ]}
+                            />
+                        </div>
+                    </div>
+
+                    {error && (
+                        <div className="rounded-md border border-danger-border bg-danger-surface px-2 py-1.5 text-11 text-danger-text">
+                            {error}
+                        </div>
+                    )}
+                </OverlayScrollbar>
+
                 <div className="shrink-0 flex items-center justify-end gap-2 border-t border-border-divider px-6 py-4">
                     <button
                         onClick={handleClose}

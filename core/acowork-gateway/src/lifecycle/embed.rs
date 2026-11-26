@@ -329,6 +329,28 @@ pub async fn select_embed_model(port: u16, model_id: &str) -> Result<(), Gateway
     Ok(())
 }
 
+/// Ask acowork-embed to re-read `embedding_models.json`.
+///
+/// The embed process loads the registry once at startup. The Gateway writes a
+/// newly added local model into that same file, so without this call the model
+/// would be listed by the Gateway and rejected by the embed service on
+/// download ("not found in registry").
+pub async fn reload_embed_models(port: u16) -> Result<(), GatewayError> {
+    let url = format!("http://127.0.0.1:{}/models/reload", port);
+    let resp = http_client().post(&url).send().await.map_err(|e| {
+        GatewayError::Lifecycle(format!("Failed to call embed registry reload: {e}"))
+    })?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(GatewayError::Lifecycle(format!(
+            "Embed registry reload failed (HTTP {status}): {body}"
+        )));
+    }
+    tracing::info!("Embed model registry reloaded");
+    Ok(())
+}
+
 /// Trigger a model download via acowork-embed's download endpoint.
 ///
 /// The embed server runs downloads in the background (fire-and-forget)
