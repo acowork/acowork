@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo, lazy, Suspense } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, Suspense } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useFileEditorStore, registerFileDisposer, sourceRelPath, type OpenFile } from "../../stores/fileEditorStore";
 import { useGitStore } from "../../stores/gitStore";
@@ -63,6 +63,7 @@ import {
 // Type-only: the viewer component itself stays lazy-loaded (its payload is a
 // PDF engine), but the shape of the hand-off the panel builds is shared.
 import type { PdfChatProps } from "./PdfViewer";
+import { renderDocumentViewer } from "./documentViewer";
 
 /**
  * Encode a UTF-8 text string to base64 in a way that survives non-ASCII
@@ -109,15 +110,9 @@ function supportsPreviewToggle(file: OpenFile): boolean {
 // ── Document viewers (remote file preview plan) ─────────────────────
 // Lazy: the parser payloads (SheetJS / docx-preview / JSZip) only load
 // when a document tab actually mounts, never in the main bundle.
-const PdfViewer = lazy(() => import("./PdfViewer"));
-const SheetViewer = lazy(() => import("./SheetViewer"));
-const DocxViewer = lazy(() => import("./DocxViewer"));
-const PptxViewer = lazy(() => import("./PptxViewer"));
-const UnsupportedDocViewer = lazy(() => import("./UnsupportedDocViewer"));
 // Office → PDF wrapper: converts with the local LibreOffice / MS Office
 // engine and renders the result natively, falling back to the JS viewer
 // above when the machine cannot convert (see lib/docConvert.ts).
-const OfficePdfViewer = lazy(() => import("./OfficePdfViewer"));
 
 /**
  * Document extensions with NO Monaco path at all — the tab's `content`
@@ -135,7 +130,6 @@ const SHEET_EXT_RE = /\.(?:xlsx|xls|csv)$/i;
 /** Office formats converted to PDF by the local engine for a faithful,
  *  print-layout preview. CSV is NOT one of them: a PDF page break is a
  *  worse table preview than the live grid SheetJS gives. */
-const OFFICE_EXT_RE = /\.(?:docx|doc|pptx|ppt|xlsx|xls)$/i;
 
 /** Whether this tab is (or previews as) a document viewer file. */
 function isDocumentViewerFile(file: OpenFile): boolean {
@@ -164,48 +158,10 @@ type DocChatHandoff = Required<PdfChatProps>;
 
 /** Pick the viewer component for a document tab by extension. */
 function renderDocViewer(file: OpenFile, docChat: DocChatHandoff) {
-    const viewerFile = {
-        agentId: file.agentId,
-        workspaceId: file.workspaceId,
-        relPath: file.relPath,
-        fileName: file.fileName,
-        previewSeq: file.previewSeq,
-    };
-    if (/\.pdf$/i.test(file.fileName)) return <PdfViewer {...viewerFile} {...docChat} />;
-    // CSV keeps the grid (see OFFICE_EXT_RE); every other Office format
-    // tries the print-layout PDF path first and keeps its JS renderer as
-    // the fallback, so a machine without an engine — or one bad file —
-    // still previews exactly as it did before.
-    if (/\.csv$/i.test(file.fileName)) return <SheetViewer {...viewerFile} />;
-    if (OFFICE_EXT_RE.test(file.fileName)) {
-        const ext = file.fileName.toLowerCase().split(".").pop() ?? "";
-        // docx-preview / SheetJS / the pptx card stay reachable — they are
-        // what renders when this machine has no engine, and they are the
-        // only renderers for the intermediate loading-free states.
-        const fallback =
-            ext === "xlsx" || ext === "xls" ? (
-                <SheetViewer {...viewerFile} />
-            ) : ext === "docx" ? (
-                <DocxViewer {...viewerFile} />
-            ) : ext === "pptx" ? (
-                <PptxViewer {...viewerFile} />
-            ) : (
-                // Legacy .doc / .ppt — no in-app renderer by plan; the card
-                // routes the user to save-as / open-externally.
-                <UnsupportedDocViewer {...viewerFile} />
-            );
-        return (
-            <OfficePdfViewer
-                {...viewerFile}
-                {...docChat}
-                fallback={fallback}
-                size={file.previewSize}
-                mtimeMs={file.previewMtimeMs}
-            />
-        );
-    }
-    // Anything else in the document set (nothing today) keeps the card.
-    return <UnsupportedDocViewer {...viewerFile} />;
+    return renderDocumentViewer(file, docChat, {
+        size: file.previewSize,
+        mtimeMs: file.previewMtimeMs,
+    });
 }
 
 export function FileEditorPanel({ width }: { width: number }) {

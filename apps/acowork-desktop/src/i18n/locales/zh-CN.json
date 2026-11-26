@@ -1269,6 +1269,7 @@
       "matchWholeWord": "全字匹配"
     },
     "contextMenu": {
+      "addToDocLibrary": "添加到文档库",
       "addToChat": "添加到对话",
       "preview": "预览",
       "injectContext": "注入上下文",
@@ -2565,6 +2566,23 @@
     "title": "文档库",
     "sidebarLabel": "文档库",
     "treeLabel": "文档目录树",
+    "expandDir": "展开目录",
+    "collapseDir": "折叠目录",
+    "upload": {
+      "label": "上传文件到当前目录",
+      "uploaded": "已上传 {{count}} 个文件"
+    },
+    "filePreview": {
+      "addToChatUnavailable": "文档库文件不能加入对话"
+    },
+    "importTarget": {
+      "title": "添加到文档库",
+      "file": "文件：{{name}}",
+      "library": "文档库",
+      "libraryRoot": "（库根目录）",
+      "confirm": "添加",
+      "noLibrary": "还没有文档库，请先在文档视图里新建一个。"
+    },
     "newDir": "新建目录",
     "newDoc": "新建文档",
     "rename": "重命名",
@@ -2832,7 +2850,11 @@
     "homepage": "主页",
     "upstream": "上游项目",
     "noReadme": "该应用暂无说明文档。",
-    "selectHint": "选择一个应用查看详情。"
+    "recommendedTitle": "推荐",
+    "recommendedSubtitle": "文档预览与编辑，最常用的四个应用。",
+    "recommendedInstallAll": "一键安装（{{count}} 个）",
+    "recommendedAllInstalled": "推荐应用已全部安装。",
+    "recommendedNoPackage": "安装包不可用"
   },
   "deliverables": {
     "title": "本轮产出（{{count}}）",

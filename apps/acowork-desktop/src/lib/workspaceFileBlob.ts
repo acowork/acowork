@@ -70,9 +70,48 @@ function encodePathSegments(path: string): string {
         .join("/");
 }
 
+/**
+ * Reserved `agentId` that addresses a **doc-library file** through the same
+ * triple a workspace file uses.
+ *
+ * Why a sentinel instead of threading a second source type through every
+ * viewer: the doc library's imported files (pdf / docx / image …) must
+ * preview exactly like the right-hand workspace panel, and that means the
+ * SAME components (`PdfViewer` / `DocxViewer` / …), the same save-as and
+ * open-externally escape hatches, and the same blob LRU. All of them key off
+ * `(agentId, workspaceId, relPath)`; teaching this one URL builder that
+ * `__doc__` means "doc library" unifies the whole stack in one place, the
+ * way `__agent_home__` already stands in for a workspace id. Doc entries
+ * have no workspace, so:
+ *
+ *   agentId     = `__doc__`
+ *   workspaceId = the doc_id
+ *   relPath     = the entry's on-disk file name (display + save-as name)
+ */
+export const DOC_FILE_AGENT_ID = "__doc__";
+
+/** The viewer-facing triple for one doc-library entry. */
+export function docFileRef(entry: {
+    doc_id: string;
+    name: string;
+    ext?: string | null;
+}): { agentId: string; workspaceId: string; relPath: string; fileName: string } {
+    const fileName = `${entry.name}.${entry.ext ?? "md"}`;
+    return {
+        agentId: DOC_FILE_AGENT_ID,
+        workspaceId: entry.doc_id,
+        relPath: fileName,
+        fileName,
+    };
+}
+
 /** The one URL builder. Kept private — see the module header. */
 function workspaceFileUrl(agentId: string, workspaceId: string, relPath: string): string {
     const base = getGatewayUrl().replace(/\/+$/g, "");
+    // Doc-library bytes: see DOC_FILE_AGENT_ID above.
+    if (agentId === DOC_FILE_AGENT_ID) {
+        return `${base}/api/doc/docs/${encodeURIComponent(workspaceId)}/file`;
+    }
     return `${base}/workspace-files/${encodeURIComponent(agentId)}/${encodeURIComponent(workspaceId)}/${encodePathSegments(relPath)}`;
 }
 

@@ -1,5 +1,5 @@
 import { memo, useCallback, useState, useRef, useEffect, useMemo } from "react";
-import { ChevronRight, FilePlus, FolderPlus, MessageSquarePlus, Trash2, Copy, ClipboardPaste, Eye, Check, Code, Pencil, ExternalLink } from "lucide-react";
+import { ChevronRight, FilePlus, FolderPlus, MessageSquarePlus, Trash2, Copy, ClipboardPaste, Eye, Check, Code, Pencil, ExternalLink, BookPlus } from "lucide-react";
 import { cn } from "../../../lib/utils";
 import { listRowHover } from "../../../lib/ui-styles";
 import { getFileIcon } from "./fileIcons";
@@ -62,6 +62,13 @@ interface FileTreeNodeProps {
    * manipulated menu cannot trigger a cross-host spawn.
    */
   onReveal?: (relPath: string) => void | Promise<void>;
+  /**
+   * Right-click "Add to document library" — files only. The dialog (target
+   * library + directory) and the upload live in `FileTree`, not here: a row
+   * is a virtualizer slot and gets unmounted when it scrolls out of view,
+   * which would kill an open dialog.
+   */
+  onAddToDocLibrary?: (relPath: string, fileName: string) => void;
   /** When this matches the node's `relPath`, the node swaps its name
    * span for an inline rename input. Owned by the parent so the same
    * machinery drives right-click "New File / Folder / Paste" (which
@@ -119,6 +126,7 @@ export const FileTreeNode = memo(function FileTreeNode({
   onPaste,
   onRename,
   onReveal,
+  onAddToDocLibrary,
   renameTarget = null,
   renameInitialValue = "",
   onCancelRename,
@@ -329,6 +337,10 @@ export const FileTreeNode = memo(function FileTreeNode({
 
   // Check if this file qualifies as a prompt file (CLAUDE.md / AGENTS.md)
   const isPromptFile = !isDir && /^(CLAUDE|AGENTS)\.md$/i.test(entry.name);
+
+  const handleAddToDocLibrary = useCallback(() => {
+    onAddToDocLibrary?.(relPath, entry.name);
+  }, [onAddToDocLibrary, relPath, entry.name]);
   const workspace = useWorkspaceStore((s) => s.workspaces.find((ws) => ws.id === workspaceId));
   const isActivePromptFile = workspace?.prompt_file === entry.name;
 
@@ -360,6 +372,14 @@ export const FileTreeNode = memo(function FileTreeNode({
         icon: <Eye size={14} />,
         label: t("workspace.contextMenu.preview"),
         onClick: handlePreview,
+      });
+    }
+    if (onAddToDocLibrary) {
+      items.push({
+        key: "add-to-doc-library",
+        icon: <BookPlus size={14} />,
+        label: t("workspace.contextMenu.addToDocLibrary"),
+        onClick: handleAddToDocLibrary,
       });
     }
     if (isPromptFile) {
@@ -450,6 +470,8 @@ export const FileTreeNode = memo(function FileTreeNode({
     beginRename,
     handleReveal,
     handleDelete,
+    onAddToDocLibrary,
+    handleAddToDocLibrary,
   ]);
 
   // DnD visibility state — kept as locals because they're pure

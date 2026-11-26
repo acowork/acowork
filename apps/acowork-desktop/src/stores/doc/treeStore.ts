@@ -81,6 +81,14 @@ interface DocTreeState {
   deleteDir: (dirId: string, parentDirId: string) => Promise<boolean>;
 
   createDoc: (parentDirId: string, title: string) => Promise<DocMeta | null>;
+  /**
+   * 上传文件到 `dirId`（本机选择 / 工作区导入共用）。
+   *
+   * 逐个提交，单个失败不影响其余（`error` 记第一条失败原因 → sidebar toast）
+   * —— 用户一次选 5 个文件时，不该有 4 个成功却因为 1 个重名整批回滚。
+   * `files` 已是 `File`/`Blob`（工作区来源由调用方先取字节再包成 File）。
+   */
+  importFiles: (dirId: string, files: File[]) => Promise<DocMeta[]>;
   renameDoc: (docId: string, parentDirId: string, baseVersion: number, newTitle: string) => Promise<boolean>;
   deleteDoc: (docId: string, parentDirId: string) => Promise<boolean>;
 
@@ -272,6 +280,26 @@ export const useDocTreeStore = create<DocTreeState>((set, get) => ({
       set({ error: e instanceof Error ? e.message : String(e) });
       return null;
     }
+  },
+
+  importFiles: async (dirId, files) => {
+    const created: DocMeta[] = [];
+    let firstError: string | null = null;
+    for (const file of files) {
+      try {
+        created.push(await docApi.importDoc(dirId, file));
+      } catch (e) {
+        log.warn(`[doc:tree] importFiles ${file.name} failed:`, e);
+        firstError ??= `${file.name}: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+    if (created.length > 0) {
+      // 目标目录必须展开，否则用户看不到刚上传完的东西。
+      set((s) => ({ expanded: { ...s.expanded, [dirId]: true } }));
+      await get().refreshDir(dirId);
+    }
+    if (firstError) set({ error: firstError });
+    return created;
   },
 
   renameDoc: async (docId, parentDirId, baseVersion, newTitle) => {

@@ -220,6 +220,41 @@ export function deleteDoc(docId: string): Promise<void> {
   return request<void>(`/docs/${encodeURIComponent(docId)}`, { method: "DELETE" });
 }
 
+/**
+ * `POST /api/docs/import?dir_id=` — 上传一个文件到指定目录（multipart）。
+ *
+ * 文本类（md / markdown / txt）服务端落成普通 Markdown 文档；其余格式
+ * （pdf / docx / xlsx / pptx / 图片…）落成只读文件条目，字节由
+ * `GET /api/doc/docs/{id}/file` 提供——预览走工作区同一套预览组件。
+ *
+ * 不走 `request()` 的 JSON 分支：FormData 时不能设 Content-Type（boundary
+ * 必须由浏览器生成），`request()` 已经跳过这一步。
+ */
+export function importDoc(dirId: string, file: File): Promise<DocMeta> {
+  const form = new FormData();
+  // 第三个参数显式给文件名：从工作区读回来的 Blob 常常没有 name。
+  form.append("file", file, file.name);
+  return request<DocMeta>(`/docs/import?dir_id=${encodeURIComponent(dirId)}`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+/**
+ * 上传对话框 / `<input type=file>` 共用的 accept 串。
+ *
+ * 与服务端 `core/acowork-doc/src/types.rs::IMPORTABLE_EXTS` 同一张表：
+ * 这里多列几个常见图片别名没关系（服务端仍会拒收），少列一个就是用户
+ * 选不到支持的格式。
+ */
+export const DOC_IMPORT_ACCEPT =
+  ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.md,.markdown," +
+  ".png,.jpg,.jpeg,.gif,.webp,.svg,.bmp," +
+  "application/pdf,image/*,text/*," +
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document," +
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet," +
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+
 /** `GET /api/docs/:doc_id/path` — 相对路径 */
 export async function getDocPath(docId: string): Promise<string> {
   const v = await request<{ path: string }>(`/docs/${encodeURIComponent(docId)}/path`);

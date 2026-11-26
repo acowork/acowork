@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { FilePlus, FolderPlus, ClipboardPaste } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -15,6 +15,10 @@ import {
     type ContextMenuItem,
 } from "../../common/ContextMenu";
 import { OverlayScrollbar } from "../../common/OverlayScrollbar";
+import { useToast } from "../../common/ToastProvider";
+import { DocImportTargetDialog } from "../../doc/DocImportTargetDialog";
+import { fetchWorkspaceFileBlob } from "../../../lib/workspaceFileBlob";
+import { useDocTreeStore } from "../../../stores/doc/treeStore";
 
 const EMPTY_ARRAY: string[] = [];
 
@@ -215,6 +219,55 @@ export function FileTree({
     dropTarget = null,
     onPointerDownTreeEntry,
 }: FileTreeProps) {
+    const { t } = useTranslation();
+    const toast = useToast();
+
+    // 「添加文件到文档库」的待导入条目。状态放在树这一层（而不是 FileTreeNode
+    // 里）：行是虚拟化槽位，滚出视口就卸载，对话框会跟着丢。
+    const [docTarget, setDocTarget] = useState<{ relPath: string; name: string } | null>(null);
+    const [docUploading, setDocUploading] = useState(false);
+
+    const handleAddToDocLibrary = useCallback((relPath: string, fileName: string) => {
+        setDocTarget({ relPath, name: fileName });
+    }, []);
+
+    /**
+     * 选定目标目录后：读工作区字节 → 当成一个 File 上传。
+     *
+     * 走 `fetchWorkspaceFileBlob` 而不是再写一条读取路径：它已经带鉴权、
+     * LRU 缓存和 Tauri/Gateway 两种来源的分支，重写一份就是两份要维护的
+     * 文件读取逻辑。
+     */
+    const handleConfirmDocImport = useCallback(
+        async (dirId: string) => {
+            const target = docTarget;
+            if (!target || docUploading) return;
+            setDocUploading(true);
+            try {
+                const { blob } = await fetchWorkspaceFileBlob(agentId, workspaceId, target.relPath);
+                const file = new File([blob], target.name, {
+                    type: blob.type || "application/octet-stream",
+                });
+                const created = await useDocTreeStore.getState().importFiles(dirId, [file]);
+                if (created.length > 0) {
+                    toast.addToast({
+                        type: "success",
+                        message: t("doc.upload.uploaded", { count: created.length }),
+                    });
+                    setDocTarget(null);
+                }
+            } catch (e) {
+                toast.addToast({
+                    type: "error",
+                    message: e instanceof Error ? e.message : String(e),
+                });
+            } finally {
+                setDocUploading(false);
+            }
+        },
+        [docTarget, docUploading, agentId, workspaceId, toast, t],
+    );
+
     // Tree nodes are mirrored into a single Record<key, TreeNode>.
     // Subscribe to ONLY the current (agent, workspace) subtree so tree
     // transitions in other agents/workspaces don't re-render this
@@ -235,7 +288,6 @@ export function FileTree({
     const copiedEntry = useWorkspaceStore((s) => s.copiedEntry);
     const toggleTreeExpandedPath = useChatStore((s) => s.toggleTreeExpandedPath);
     const expandTreeToPath = useChatStore((s) => s.expandTreeToPath);
-    const { t } = useTranslation();
 
     /** Right-click on the empty area below the rows (the scroller
      * padding / unscrolled region) — semantically equivalent to a
@@ -589,6 +641,7 @@ export function FileTree({
                             onPaste={onPaste}
                             onRename={onRename}
                             onReveal={onReveal}
+                            onAddToDocLibrary={handleAddToDocLibrary}
                             renameTarget={renameTarget}
                             renameInitialValue={renameInitialValue}
                             onCancelRename={onCancelRename}
@@ -615,6 +668,16 @@ export function FileTree({
                 selectionAtOpen={ctxMenu.selectionAtOpen}
                 onClose={ctxMenu.close}
             />
+
+            {/* 「添加到文档库」目标选择：对话框挂在树（而不是行）上，因为行是
+                虚拟化槽位，滚出视口就被卸载，对话框会跟着消失。 */}
+            {docTarget ? (
+                <DocImportTargetDialog
+                    fileName={docTarget.name}
+                    onCancel={() => setDocTarget(null)}
+                    onConfirm={(dirId) => void handleConfirmDocImport(dirId)}
+                />
+            ) : null}
         </OverlayScrollbar>
     );
 }

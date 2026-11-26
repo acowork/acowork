@@ -1029,6 +1029,7 @@
       "matchWholeWord": "単語単位で検索"
     },
     "contextMenu": {
+      "addToDocLibrary": "ドキュメントライブラリに追加",
       "addToChat": "チャットに追加",
       "preview": "プレビュー",
       "injectContext": "コンテキストを注入",
@@ -2119,6 +2120,23 @@
     "title": "ドキュメントライブラリ",
     "sidebarLabel": "ドキュメント",
     "treeLabel": "ドキュメントツリー",
+    "expandDir": "ディレクトリを展開",
+    "collapseDir": "ディレクトリを折りたたむ",
+    "upload": {
+      "label": "現在のディレクトリにファイルをアップロード",
+      "uploaded": "{{count}} 件のファイルをアップロードしました"
+    },
+    "filePreview": {
+      "addToChatUnavailable": "ドキュメントライブラリのファイルはチャットに追加できません"
+    },
+    "importTarget": {
+      "title": "ドキュメントライブラリに追加",
+      "file": "ファイル：{{name}}",
+      "library": "ライブラリ",
+      "libraryRoot": "（ライブラリ直下）",
+      "confirm": "追加",
+      "noLibrary": "ドキュメントライブラリがありません。先に Doc ビューで作成してください。"
+    },
     "newDir": "新規フォルダ",
     "newDoc": "新規ドキュメント",
     "rename": "名前変更",
@@ -2375,7 +2393,11 @@
     "homepage": "ホームページ",
     "upstream": "アップストリーム",
     "noReadme": "README がありません。",
-    "selectHint": "アプリを選択して詳細を表示します。"
+    "recommendedTitle": "おすすめ",
+    "recommendedSubtitle": "文書のプレビューと編集に最もよく使う4つのアプリ。",
+    "recommendedInstallAll": "まとめてインストール（{{count}}）",
+    "recommendedAllInstalled": "おすすめのアプリはすべてインストール済みです。",
+    "recommendedNoPackage": "パッケージがありません"
   },
   "deliverables": {
     "title": "このターンの成果物（{{count}}）",
