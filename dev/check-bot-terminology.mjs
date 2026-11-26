@@ -251,7 +251,7 @@ function checkSite() {
 //   Budget: 0, whitelist empty.
 // Class B — the literal `.agent` inside user-visible strings (error
 //   messages, JSX copy, generated package templates). Budget at landing:
-//   1 — see the constant below.
+//   1, zeroed the same day (regression fix) — see the constant below.
 //
 // Whitelist (per the T7 card; each entry must carry its category):
 //   - test fixtures (*.test.ts/tsx, #[cfg(test)] rs modules): test data,
@@ -262,15 +262,15 @@ function checkSite() {
 // ─────────────────────────────────────────────────────────────────────────
 const DESKTOP_EXT_CLASS_A_BASELINE = 0;
 
-// Class B baseline — measured 2026-11-26 at landing: 1.
-// The single hit is a REGRESSION that arrived after T5 shipped:
-//   apps/acowork-desktop/src-tauri/src/commands/agent_library.rs:709
-//   `format!("Not an .agent package: {package_path}")` in the new
-//   `upgrade_local_agent` command, introduced by 9a5d18b4 (2026-11-26).
-// The T7 card forbids touching business code ("本卡只加检查"), so the
-// budget records the measured value; the fix is a one-word string change
-// and this baseline MUST go to 0 (T8 zeroes it). Do not raise it.
-const DESKTOP_AGENT_LITERAL_CLASS_B_BASELINE = 1;
+// Class B baseline — measured 2026-11-26 at landing: 1, then ZEROED the same
+// day on the card owner's instruction. The single hit was a REGRESSION that
+// arrived after T5 shipped:
+//   apps/acowork-desktop/src-tauri/src/commands/agent_library.rs
+//   `format!("Not an .agent package: {package_path}")` in `upgrade_local_agent`,
+//   introduced by 9a5d18b4 (2026-11-26) copying an error string T5 had already
+//   renamed. Fixed to `.bot` (matching ensure_local_agent's wording) and the
+//   baseline lowered 1 -> 0 in the same commit. It may only stay 0 from here.
+const DESKTOP_AGENT_LITERAL_CLASS_B_BASELINE = 0;
 
 const CLASS_A_PATTERNS = [
     // file-picker filter arrays: extensions: ["agent"] / ['agent']
@@ -330,9 +330,8 @@ function checkDesktop() {
             `ERROR: user-visible desktop strings carry the .agent literal again: ${hitsB.length} hits`,
             `       (budget: DESKTOP_AGENT_LITERAL_CLASS_B_BASELINE = ${DESKTOP_AGENT_LITERAL_CLASS_B_BASELINE}).`,
             ...hitsB,
-            '       The known budgeted hit is agent_library.rs:709 (regression from',
-            '       9a5d18b4, tracked for T8). A NEW one is a regression: fix the',
-            '       copy, never raise the baseline.',
+            '       Budget is 0: any hit is a regression. Fix the copy (D1/D4/D7:',
+            '       user-visible strings say "Bot"), never raise the baseline.',
         ]);
     }
     console.log(`desktop .agent literal red line: OK (A: ${hitsA.length} <= ${DESKTOP_EXT_CLASS_A_BASELINE}, B: ${hitsB.length} <= ${DESKTOP_AGENT_LITERAL_CLASS_B_BASELINE})`);

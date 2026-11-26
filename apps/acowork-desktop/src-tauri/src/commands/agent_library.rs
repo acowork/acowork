@@ -706,7 +706,7 @@ pub async fn upgrade_local_agent(
 
     let path = PathBuf::from(&package_path);
     if !has_package_extension(&path) {
-        return Err(format!("Not an .agent package: {package_path}"));
+        return Err(format!("Not an .bot package: {package_path}"));
     }
     let library = library_dir(&app)?;
     if !is_inside(&path, &library) {

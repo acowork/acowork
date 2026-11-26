@@ -1258,9 +1258,10 @@ run_package_ext_redline() {
 # src-tauri/src; comments and test fixtures are whitelisted (not user
 # visible); locale values are owned by assertion 1, not double-counted.
 # Measured 2026-11-26 (post T5): A = 0, B = 1 (agent_library.rs:709, a
-# regression introduced by 9a5d18b4 AFTER T5 — budgeted, T8 zeroes it).
+# regression introduced by 9a5d18b4 AFTER T5) — the string was fixed to
+# `.bot` the same day and the baseline lowered to 0.
 # Baselines: DESKTOP_EXT_CLASS_A_BASELINE = 0,
-#            DESKTOP_AGENT_LITERAL_CLASS_B_BASELINE = 1.
+#            DESKTOP_AGENT_LITERAL_CLASS_B_BASELINE = 0.
 run_desktop_agent_literal_redline() {
     echo "Checking desktop .agent literal red line (T7 #5)..."
     if ! node "$SCRIPT_DIR/check-bot-terminology.mjs" desktop; then
