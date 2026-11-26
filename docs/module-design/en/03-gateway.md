@@ -1,6 +1,6 @@
 ﻿# acowork-gateway — Gateway
 
-**Position**: persistent system-level process, manages Agent lifecycle, Intent routing, key distribution, budget coordination. **Does not proxy Agent business logic**.
+**Position**: persistent system-level process, manages Bot lifecycle, Intent routing, key distribution, budget coordination. **Does not proxy Bot business logic**.
 
 ```
 crates/acowork-gateway/

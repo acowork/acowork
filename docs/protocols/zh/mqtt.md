@@ -49,7 +49,7 @@ graph LR
 1. **Gateway 嵌入 rumqttd**，与 HTTP server 共生。Gateway 承担三件事：
    - **broker 宿主**：管理 MQTT 连接、ACL、retained 存储。
    - **HTTP server**：CRUD、Desktop 全量列表拉取（Settings）、Runtime 启动期注册。
-   - **Global Resources Publisher**：发布 `acowork/global/{kind}`(单主题,Retained)——Gateway 后台 health-check 后重新计算出的“已就绪”资源列表（**不区分 agent**，所有 Runtime 共享同一份）。
+   - **Global Resources Publisher**：发布 `acowork/global/{kind}`(单主题,Retained)——Gateway 后台 health-check 后重新计算出的“已就绪”资源列表（**不区分 bot**，所有 Runtime 共享同一份）。
 2. **Runtime 是 MQTT 客户端 + localhost HTTP server**：`rumqttc` 直连 Broker，只 PUBLISH 自己拥有的数据源（`agents/{id}/*` 下所有主题），SUBSCRIBE 自己关心的资源（`acowork/global/#` + `agents/{id}/sessions/control/#`，后者现在只剩 `intent` + `active_heartbeat`）。同时启动 localhost-only HTTP server，供 Gateway 反向代理大数据查询（全量 session 列表、message 列表、文件内容；**记忆不在此列**——ADR-101 之后记忆由独立进程 `acowork-memory` 提供，该进程**不说 MQTT**，也不连 Broker），以及接收用户操作（ADR-076 §决策 4）。
 3. **Desktop 是纯 MQTT 客户端**：通过 Tauri Rust backend 用 `rumqttc` 直连 Broker，SUBSCRIBE 数据源主题（`agents/{id}/*`）。**不经过 Gateway 转发**。
 4. **全局资源三层分离**（详见 §3.1）：
@@ -129,7 +129,7 @@ acowork/global/
                                # Gateway 重 publish 此主题，Runtime 立即收到。
 ```
 
-**Desktop 侧信号主题（不属于上图）**：`acowork/desktop/inventory` —— Gateway 的聚合表 `installed_agents` 每次变更（Node 安装/卸载、Node 重连重放清单、`DELETE /api/agents/{id}`）时发布一次，payload 为毫秒时间戳，**非 Retained**。Desktop 收到后重新拉取 `GET /api/agents`。它刻意不放在 `acowork/global/` 下：Runtime 对 `acowork/global/#` 的每个 payload 都按 protobuf `DataEnvelope` 解码，非 envelope 的 payload 会让每个 Runtime 打出解码失败的 warn；这个信号是给 Desktop 的，不是给 agent 的。
+**Desktop 侧信号主题（不属于上图）**：`acowork/desktop/inventory` —— Gateway 的聚合表 `installed_agents` 每次变更（Node 安装/卸载、Node 重连重放清单、`DELETE /api/agents/{id}`）时发布一次，payload 为毫秒时间戳，**非 Retained**。Desktop 收到后重新拉取 `GET /api/agents`。它刻意不放在 `acowork/global/` 下：Runtime 对 `acowork/global/#` 的每个 payload 都按 protobuf `DataEnvelope` 解码，非 envelope 的 payload 会让每个 Runtime 打出解码失败的 warn；这个信号是给 Desktop 的，不是给 bot 的。
 
 **为什么密钥在 `acowork/global/*` 主题里一起发布？** 这是 Runtime **唯一**的密钥获取路径——Runtime 启动时只 SUB `acowork/global/#`，所有密钥随 retained payload 一次性下发：
 
@@ -144,7 +144,7 @@ acowork/global/
 - **订阅者**:
   - **所有 Runtime**(`SUB acowork/global/#`)——Runtime 启动后立即收到 retained 当前快照,在内存中缓存(不需要持久化)。后续变化直接收到 push。
   - **Desktop**(可选,SUB `acowork/global/#`)——用于 Settings 页实时显示"某 provider 暂时不可用"等状态。
-- **关键性质**:**不区分 agent**。所有 Runtime 看到的是同一份可用清单——因为"provider 已就绪"是全局事实,不是某个 agent 的属性。
+- **关键性质**:**不区分 bot**。所有 Runtime 看到的是同一份可用清单——因为"provider 已就绪"是全局事实,不是某个 bot 的属性。
 - **触发场景**:
   - 用户在 Settings 新增 provider 并填好 API key → Gateway health-check 通过 → PUBLISH `acowork/global/providers`(retain=true)
   - 一个 mcp 包下载失败 / 进程崩溃 → Gateway 检测 → 重算 payload 后 PUBLISH `acowork/global/mcps`(retain=true)
@@ -215,7 +215,7 @@ Runtime 拿到 §3.1.1 的可用资源后，**用户从这些可用资源里选�
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 Agent 数据源（Runtime 权威）
+### 3.2 Bot 数据源（Runtime 权威）
 
 ```
 acowork/agents/{agent_id}/
@@ -391,16 +391,16 @@ acowork/users/{user_id}/
 8. **Gateway 不在 Runtime 与 Desktop 之间做事件转发**：Runtime 发布的 session 事件由 Desktop **直接订阅** `agents/{id}/sessions/{sid}/messages/...`；而 **Desktop 触发的一切用户操作都走 HTTP**（经 Gateway 鉴权 + 反代注入 `x-user-id`，ADR-076 §决策 4）——MQTT 上**不再有任何 Desktop → Runtime 的控制指令**。Runtime 是 session 权威，Gateway 不维护 session 状态视图。
 9. **全局资源三层分离**:
    - **第 1 层 - 全量原始列表**(用户在 Desktop Settings 里管理的原始配置):HTTP only,不走 MQTT。Desktop Settings 拉取后表单渲染,提交修改走 HTTP POST。
-   - **第 2 层 - 已就绪可用状态**(Gateway health-check 后的可用资源):MQTT pub/sub,主题为 `acowork/global/{kind}`(单主题,Retained)。**不区分 agent**,所有 Runtime 共享同一份,因为"资源是否就绪"是全局事实。
-   - **第 3 层 - Runtime per-agent 持久化选择**(`agent_mcp.json`):本地文件,Desktop 通过 HTTP 拉 agent config 查看,不走 MQTT。
-   - **为什么不能把第 2 层放到 `agents/{id}/` 下**:所有 agent 看到的可用资源完全相同,放在 per-agent 主题下会造成冗余数据;所有 Runtime 都 SUB `acowork/global/#` 即可。
-10. **全局资源原始列表 vs 可用状态 vs agent 选择不可混淆**:
+   - **第 2 层 - 已就绪可用状态**(Gateway health-check 后的可用资源):MQTT pub/sub,主题为 `acowork/global/{kind}`(单主题,Retained)。**不区分 bot**,所有 Runtime 共享同一份,因为"资源是否就绪"是全局事实。
+   - **第 3 层 - Runtime per-agent 持久化选择**(`agent_mcp.json`):本地文件,Desktop 通过 HTTP 拉 bot config 查看,不走 MQTT。
+   - **为什么不能把第 2 层放到 `agents/{id}/` 下**:所有 bot 看到的可用资源完全相同,放在 per-agent 主题下会造成冗余数据;所有 Runtime 都 SUB `acowork/global/#` 即可。
+10. **全局资源原始列表 vs 可用状态 vs bot 选择不可混淆**:
     - 全量原始列表 = 用户管理,HTTP only
     - 可用状态 = Gateway 验证后的运行时真相,MQTT pub/sub(全局共享)
-    - agent 选择 = Runtime 本地持久化,HTTP 拉 config 即可
-    之前误把"Gateway 计算的 per-agent 子集"放进 `agents/{id}/resource_cache` 是错误的——Gateway 不应该感知 agent 维度,资源可用性是全局维度。
+    - bot 选择 = Runtime 本地持久化,HTTP 拉 config 即可
+    之前误把"Gateway 计算的 per-agent 子集"放进 `agents/{id}/resource_cache` 是错误的——Gateway 不应该感知 bot 维度,资源可用性是全局维度。
 
-### 3.6 节点控制面（Node Agent 数据源，ADR-055）
+### 3.6 节点控制面（Node Service 数据源，ADR-055）
 
 ```
 acowork/nodes/{node_id}/
@@ -745,7 +745,7 @@ sequenceDiagram
 
 - **全量原始列表变更**走 HTTP `POST/PUT/DELETE /api/global/{kind}`（仅 Gateway 内部使用，Desktop Settings 调用）。
 - **可用状态变更**走 MQTT `acowork/global/{kind}`(Retained)，由 Gateway 后台 health-check loop 触发。这是 Gateway **唯一主动**发布的业务主题。
-- **不区分 agent**：所有 Runtime 看到同一份。Runtime 只在内存中替换自己的缓存，不持久化。
+- **不区分 bot**：所有 Runtime 看到同一份。Runtime 只在内存中替换自己的缓存，不持久化。
 - **Retained 实现快照+增量**：Broker 为每个全局主题保留最新一条消息，新订阅者立即收到当前快照，后续变化直接收到 push。无需 `available`/`change` 两个子主题。
 
 ### 5.5 异常断开（Will Message）
@@ -769,7 +769,7 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 |--------|---------------|-----------|
 | **Gateway Publisher** | `gateway:publisher` | （仅 PUBLISH `acowork/global/#` Retained，不 SUBSCRIBE 业务主题） |
 | **Gateway Subscriber** | `gateway:subscriber` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready` |
-| **Runtime** | `agent:{agent_id}` | `acowork/global/#`<br/>`acowork/agents/{id}/sessions/control/#`（**仅剩** `intent` + `active_heartbeat` 两条非用户动作；其余控制命令已删除，用户操作走 HTTP） |
+| **Runtime** | `bot:{agent_id}` | `acowork/global/#`<br/>`acowork/agents/{id}/sessions/control/#`（**仅剩** `intent` + `active_heartbeat` 两条非用户动作；其余控制命令已删除，用户操作走 HTTP） |
 | **Desktop (Tauri Rust) — 始终订阅** | `user:{user_id}:desktop:{pid}` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready`<br/>`acowork/agents/+/meta`<br/>`acowork/agents/+/config`<br/>`acowork/agents/+/sessions/created`<br/>`acowork/agents/+/sessions/deleted`<br/>`acowork/global/#`（可选，Settings 页用）<br/>`acowork/users/+/chat/changed`（§3.4；通配是因为过滤器表是编译期的，前端按登录 `user_id` 过滤） |
 | **Mobile (WebView) — 会话通道** | `user:{sub}:mobile:{device_uuid}` | 只订当前前台会话（设计文档 25 §8.1） |
 | **Mobile (WebView) — 后台通道** | `user:{sub}:mobile:{device_uuid}-presence` | `acowork/agents/+/status`<br/>`acowork/users/{me}/chat/changed`（**同一个 SUBSCRIBE 包**，按精确主题匹配；§3.4） |
@@ -801,8 +801,8 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | **全局资源可用状态**（Gateway health-check 后的就绪列表） | `acowork/global/{kind}` (Retained,QoS 1) | — |
 | **Runtime per-agent 资源激活选择**（agent_mcp.json） | ❌ 不走（本地文件，不是广播数据） | `GET /api/agents/{id}` → config 字段 |
 | **Session 内 provider/model/embedding 选择**（per-session） | 已包含在 `sessions/{sid}/meta` 中 | `GET /api/agents/{id}/sessions/{sid}/state` |
-| **Agent 状态**（status + meta） | `status` Retained+LWT（在线/离线） + `meta` Retained（单主题） | `GET /api/agents/{id}` 详情 |
-| **Agent config**（Runtime 当前生效的 agent_config.json，合并 manifest 默认值） | `config` Retained（单主题，Runtime 自己 PUBLISH） | —（Runtime 启动时本地加载，Desktop 改走 `PUT /api/agents/{id}/config`） |
+| **Bot 状态**（status + meta） | `status` Retained+LWT（在线/离线） + `meta` Retained（单主题） | `GET /api/agents/{id}` 详情 |
+| **Bot config**（Runtime 当前生效的 agent_config.json，合并 manifest 默认值） | `config` Retained（单主题，Runtime 自己 PUBLISH） | —（Runtime 启动时本地加载，Desktop 改走 `PUT /api/agents/{id}/config`） |
 | **Session 列表** | ❌ 不走（变化频繁，仅操作时点查询） | ✅ `GET /api/agents/{id}/sessions`（全量唯一通道；ADR-076 §决策 4 起按调用者 scope 过滤） |
 | **Session 列表增量通知** | `sessions/created` + `sessions/deleted`（sid 在 payload 中；由**已迁 HTTP 的** create/delete 触发，Runtime 执行后 PUBLISH） | — |
 | **Session 生命周期控制**（create / open / close / delete） | ❌ **已迁出并删除**（ADR-076 §决策 4；proto 字段已移除） | ✅ `POST|DELETE /api/agents/{id}/sessions...`（携带身份，Runtime 校验 owner） |
@@ -815,7 +815,7 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | **Memory graph 全量** | ❌ 不走（MB+，且服务不说 MQTT） | ✅ `GET /api/agents/{id}/memory/graph`（反代到记忆服务，ADR-101） |
 | **Sidecar 端点** | `sidecar/{kind}/status` Retained | `GET /api/sidecar/{kind}` |
 | **文件内容** | ❌ | ✅ `GET /api/files/{id}` |
-| **跨 agent 聚合查询** | ❌（单点推送无法聚合） | ✅ `GET /api/agents?status=active` 等 |
+| **跨 bot 聚合查询** | ❌（单点推送无法聚合） | ✅ `GET /api/agents?status=active` 等 |
 
 ### 7.2 决策流程图
 
@@ -841,7 +841,7 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 - **链路**：Runtime PUB `agents/{id}/sessions/{sid}/messages/chunk` → Broker 路由 → Desktop 直连收到。链路短、Gateway 零参与、消息延迟 ×1、Gateway 崩溃不影响 session 通信。
 - **Gateway 仅承担**：
   1. 维护 broker 进程（连接管理、ACL、retained 存储）
-  2. 维护 `acowork/global/*` 主题（这是 Gateway 真正拥有的 MQTT 数据资源——所有 Runtime 共享的全局资源可用状态，**不区分 agent**）
+  2. 维护 `acowork/global/*` 主题（这是 Gateway 真正拥有的 MQTT 数据资源——所有 Runtime 共享的全局资源可用状态，**不区分 bot**）
   3. HTTP API 给 Desktop 和 Runtime 调用（CRUD、Runtime 注册、全局资源全量列表 CRUD、Desktop config 修改透传至 Runtime）；**不**提供任何"初始拉取"/"启动期拉取"接口——Runtime config 从本地 `<work_dir>/config/agent_config.json` 加载并通过 `agents/{id}/config` retained 同步，全局资源通过 MQTT retained 获取
   4. **HTTP 反向代理**到后端 localhost HTTP server（全量 session 列表、message 列表、文件内容等大数据——Gateway 不直接读 Runtime 本地文件。记忆不再属于本条：ADR-101 之后 `memory graph` / `nodes` 等反代目标是 `acowork-memory`）
   5. **不**转发任何 session/agent 业务事件
@@ -852,18 +852,18 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 |---------|-------|-------|----------|---------------------|
 | Provider list（全量） | Gateway | KB | ❌（静态全量，不走 MQTT） | `GET /api/global/providers` |
 | MCP list（全量） | Gateway | KB | ❌ | `GET /api/global/mcps` |
-| LSP relay 端点（node-local，ADR-055 §6.7） | Node | B | `acowork/nodes/{node_id}/lsps` (R, QoS 1) | `GET /api/agents/{id}/lsp-endpoint`（Gateway 按 agent → node 解析） |
+| LSP relay 端点（node-local，ADR-055 §6.7） | Node | B | `acowork/nodes/{node_id}/lsps` (R, QoS 1) | `GET /api/agents/{id}/lsp-endpoint`（Gateway 按 bot → node 解析） |
 | Embedding model list（全量） | Gateway | B-KB | ❌ | `GET /api/global/embedding_models` |
 | Provider available（Gateway health-check 后） | Gateway | KB | `acowork/global/providers` (R, QoS 1) | — |
 | MCP available | Gateway | KB | `acowork/global/mcps` (R, QoS 1) | — |
 | Embedding model available | Gateway | B-KB | `acowork/global/embedding_models` (R, QoS 1) | — |
 | Active user profile（ADR-042） | Gateway | B | `acowork/global/user_profile` (R, QoS 1) | —（Runtime 启动等 retained 快照，5s timeout fallback 到 None） |
-| Agent MCP 选择（`agent_mcp.json`） | Runtime（本地） | B-KB | 含在 `agents/{id}/config` retained 内（`active_mcp_servers`） | —（Desktop SUB retained 获取） |
+| Bot MCP 选择（`agent_mcp.json`） | Runtime（本地） | B-KB | 含在 `agents/{id}/config` retained 内（`active_mcp_servers`） | —（Desktop SUB retained 获取） |
 | Session provider/model 选择（`session_meta`） | Runtime（本地） | B | `agents/{id}/sessions/{sid}/meta` (R) | —（Desktop 进入 session 时 SUB retained） |
-| Agent status (在线) | Runtime | B | `agents/{id}/status` (LWT+Retained) | `GET /api/agents/{id}/status` |
-| Agent ready（HTTP server 已 bind、Phase A–C 完成） | Runtime | B | `agents/{id}/ready` (R, QoS 1) | `GET /api/agents/{id}/ready` |
-| Agent meta | Runtime | KB | `agents/{id}/meta` (R, 单主题) | `GET /api/agents/{id}` |
-| Agent config（Runtime 工作区 agent_config.json 合并默认值，含 MCP） | Runtime（本地） | KB | `agents/{id}/config` (R, 单主题，Runtime 自己 PUBLISH) | —（Desktop SUB retained；写入走 `PUT /api/agents/{id}/config` → Gateway MQTT control） |
+| Bot status (在线) | Runtime | B | `agents/{id}/status` (LWT+Retained) | `GET /api/agents/{id}/status` |
+| Bot ready（HTTP server 已 bind、Phase A–C 完成） | Runtime | B | `agents/{id}/ready` (R, QoS 1) | `GET /api/agents/{id}/ready` |
+| Bot meta | Runtime | KB | `agents/{id}/meta` (R, 单主题) | `GET /api/agents/{id}` |
+| Bot config（Runtime 工作区 agent_config.json 合并默认值，含 MCP） | Runtime（本地） | KB | `agents/{id}/config` (R, 单主题，Runtime 自己 PUBLISH) | —（Desktop SUB retained；写入走 `PUT /api/agents/{id}/config` → Gateway MQTT control） |
 | Session list | Runtime | 任意 | ❌ 仅 `created` / `deleted` 增量通知 | ✅ `GET /api/agents/{id}/sessions`（Gateway 反向代理到 Runtime HTTP） |
 | Session messages 增量 | Runtime | KB | `agents/{id}/sessions/{sid}/messages/*` (QoS 0) | — |
 | Session messages 全量 | Runtime | MB+ | ❌ | ✅ `GET /api/agents/{id}/sessions/{sid}/messages`（Gateway 反向代理） |
@@ -920,7 +920,7 @@ Desktop ──HTTP──▶ Gateway (:19876) ──HTTP 反向代理──▶ Ru
 
 | 场景 | 走 MQTT retained | 走 HTTP 反向代理 |
 |------|-----------------|----------------|
-│ Agent config（含 MCP） | ✅ `agents/{id}/config` | ❌（不需要 HTTP GET） |
+│ Bot config（含 MCP） | ✅ `agents/{id}/config` | ❌（不需要 HTTP GET） |
 | Session meta | ✅ `agents/{id}/sessions/{sid}/meta` | ❌ |
 | Session 列表（全量） | ❌（仅 `created`/`deleted` 增量） | ✅ `GET .../sessions` |
 | Message 列表（全量） | ❌（数据量 MB+） | ✅ `GET .../messages` |
@@ -956,7 +956,7 @@ let conn_opts = ConnectOptions::new()
 client.connect(conn_opts).await?;
 ```
 
-**作用**：Runtime 进程被 `kill -9` / 崩溃 / 网络断开时，Broker 在 keep-alive 超时后自动以 retained flag 发布 `offline`。Desktop 订阅 `acowork/agents/+/status` 立即获知 Agent 离线，**不存在 "幽灵在线" 状态**。
+**作用**：Runtime 进程被 `kill -9` / 崩溃 / 网络断开时，Broker 在 keep-alive 超时后自动以 retained flag 发布 `offline`。Desktop 订阅 `acowork/agents/+/status` 立即获知 Bot 离线，**不存在 "幽灵在线" 状态**。
 
 ### 8.2 Retained Message（保留消息）
 
@@ -981,7 +981,7 @@ client.publish(
 
 **适用场景**：
 - `agents/{id}/status`（online/offline，配合 LWT）
-- `agents/{id}/meta`（完整 agent meta）
+- `agents/{id}/meta`（完整 bot meta）
 - `agents/{id}/config`（完整 config）
 - `acowork/global/{kind}`（Gateway health-check 后的全局资源可用状态，同时承担快照与增量语义）
 - `agents/{id}/sessions/{sid}/meta`（完整 session meta）
@@ -1011,9 +1011,9 @@ client.publish(
 | Gateway Publisher | `gateway:publisher` | 唯一标识 Gateway 的 MQTT 客户端（仅发 `acowork/global/#` Retained） |
 | 用户服务 | `user:service` | `acowork-user` 独立进程的 publisher（发 `acowork/user/profiles/changed` 与 `acowork/users/{uid}/chat/changed`，两者都是 QoS 1 non-retained 门铃）；CONNECT 密码 = Gateway publisher token（由 user supervisor 经 `--mqtt-password` 注入，ADR-084 §决策 4b） |
 | 文档服务 | `doc:service` | `acowork-doc` 独立进程的 publisher（仅发 `acowork/doc/tree/changed`）；CONNECT 密码 = Gateway publisher token（由 doc supervisor 经 `--mqtt-password` 注入，ADR-084 §决策 4b） |
-| Runtime | `agent:{agent_id}` | 业务主体，每个 Runtime 一个；Phase 5a 起 CONNECT 密码 = 宿主 Node 的 node_token（见 §8.7） |
+| Runtime | `bot:{agent_id}` | 业务主体，每个 Runtime 一个；Phase 5a 起 CONNECT 密码 = 宿主 Node 的 node_token（见 §8.7） |
 | Desktop | `user:{user_id}:desktop:{pid}` | 多用户场景区分（`{pid}` = 进程 PID，用于同 user 多 desktop 实例）；Phase 5a 起 CONNECT 密码 = `http_token`（见 §8.7） |
-| Node Agent | `node:{node_id}` | 节点身份（ADR-055 §6.2）；CONNECT 密码 = node_token，或首次接入时有效的 enrollment token（见 §8.7） |
+| Node Service | `node:{node_id}` | 节点身份（ADR-055 §6.2）；CONNECT 密码 = node_token，或首次接入时有效的 enrollment token（见 §8.7） |
 
 ### 8.6 Session Expiry & Clean Start
 
@@ -1033,7 +1033,7 @@ client.publish(
 | client_id | 放行条件（password） |
 |-----------|---------------------|
 | `node:{node_id}` | == 该节点已签发的 node_token；或 == 一个有效且未消费的 enrollment token（首次接入路径） |
-| `agent:{agent_id}` | == **任一**已注册 node_token（第一档简化：不校验 agent→node 归属，ADR-055 注明） |
+| `bot:{agent_id}` | == **任一**已注册 node_token（第一档简化：不校验 bot→node 归属，ADR-055 注明） |
 | `gateway:publisher` | == Gateway 内部 publisher token（启动时生成） |
 | `user:service` | == Gateway 内部 publisher token（启动时生成；由 user supervisor 经 `--mqtt-password` 注入，ADR-084 §决策 4b） |
 | `doc:service` | == Gateway 内部 publisher token（启动时生成；由 doc supervisor 经 `--mqtt-password` 注入，ADR-084 §决策 4b） |
@@ -1046,7 +1046,7 @@ client.publish(
 - Node 签发的长期凭据明文存 `{data_dir}/node_tokens.json`（node_id → {token, created_at}）——这是节点凭据的信任锚，保护级别等同 `http_token`。Gateway 重启后已注册 node 用 node_token 自动重连（持久化验证）。
 - **topic 级 ACL 偏差**：rumqttd 0.20 无 per-topic ACL 能力，Phase 5a 仅落地 CONNECT 层鉴权；mosquitto 切换评估列入 Phase 5b（ADR-055 §6.8）。
 - **MQTT 用户身份验证已暂缓**（ADR-076 §决策 4）：CONNECT 层确实能识别 `user:{uid}:desktop:{pid}`，但**订阅授权没有 per-user 约束**——所以多用户隔离只能靠 HTTP 侧的 owner 校验，事件面读侧保密性是已知缺口，见 §10。
-- **HTTP 通道鉴权**：Node 拉取 package（`GET /api/packages/{id}/download`）与 Node 入站反代校验使用 `X-ACowork-Node-Token` header（详见 [http.md](./http.md)）；Gateway 出站反代请求自动注入该 header（按 agent → 宿主 Node 解析）。
+- **HTTP 通道鉴权**：Node 拉取 package（`GET /api/packages/{id}/download`）与 Node 入站反代校验使用 `X-ACowork-Node-Token` header（详见 [http.md](./http.md)）；Gateway 出站反代请求自动注入该 header（按 bot → 宿主 Node 解析）。
 
 **一键接入流程**（开启鉴权后）：
 
@@ -1098,7 +1098,7 @@ Desktop fetch POST /api/agents/{id}/sessions/{sid}/{action} (Bearer token)
 | 切换工作区 | HTTP `PUT .../sessions/{sid}/workspace` | — |
 | 会话生命周期（create / open / close / delete / visibility） | HTTP | — |
 | 存在性心跳 | MQTT `control/active_heartbeat` | Desktop → Runtime，**非用户动作**，留在 MQTT |
-| 跨 agent 意图 | MQTT `control/intent` | Runtime → Runtime，**非用户动作**，留在 MQTT |
+| 跨 bot 意图 | MQTT `control/intent` | Runtime → Runtime，**非用户动作**，留在 MQTT |
 
 ### 9.3 单工具取消（ADR-045）
 
@@ -1167,7 +1167,7 @@ Runtime 在工具运行 ≥5s 后开始每 5s 发一次心跳，**不带任何 s
 1. **主题不带 user_id**：`agents/{id}/sessions/{sid}/messages/...` 对所有授权 desktop 客户端可见
 2. **client_id 表达 user**：`user:{uid}:desktop:{pid}` 格式
 3. **ACL 限制**：`user:{uid}:*` 的 desktop 只能 SUBSCRIBE 该 user 有权访问的 agent/session
-4. **Gateway 维护 user → agent 授权关系**（来自 HTTP `GET /api/auth/acl`），动态生成 ACL 规则并写入 rumqttd
+4. **Gateway 维护 user → bot 授权关系**（来自 HTTP `GET /api/auth/acl`），动态生成 ACL 规则并写入 rumqttd
 
 ### 10.2 rumqttd ACL 配置示例
 
@@ -1247,7 +1247,7 @@ Gateway 进程由 **4 个核心组件 + 1 个发布器** 构成：
 | **HTTP Server** (`:19876`) | 提供 CRUD、Runtime 注册、全局资源全量 CRUD 接口；**HTTP 反向代理**到 Runtime localhost HTTP server（大数据查询）；**不**转发业务事件，**不**维护 session 状态 |
 | **Runtime Registry** (内存) | 维护 Runtime 注册信息（agent_id → `{http_port, mqtt_client_id, online}`），供 HTTP 反向代理查询目标 Runtime |
 | **rumqttd Broker** (`:19875`) | 嵌入进程内的 MQTT broker，负责连接管理、ACL、retained 存储；接收并路由所有 MQTT 消息 |
-| **Global Resources Publisher** (`client_id: gateway:publisher`) | 后台 health-check loop 检测 provider/mcp/lsp/embedding 状态变化，重算 payload 后 PUBLISH `acowork/global/{kind}` Retained。Gateway 是唯一权威，**不**区分 agent |
+| **Global Resources Publisher** (`client_id: gateway:publisher`) | 后台 health-check loop 检测 provider/mcp/lsp/embedding 状态变化，重算 payload 后 PUBLISH `acowork/global/{kind}` Retained。Gateway 是唯一权威，**不**区分 bot |
 | **Global Resources Store** (JSON / Vault) | 持久化全局资源全量原始列表（Desktop Settings CRUD） + 可用状态缓存（Publisher health-check 计算） |
 
 **进程组件关系图**：
@@ -1278,7 +1278,7 @@ graph TB
 
 **核心简化**：
 
-- **Gateway 不转发业务事件**：Runtime ↔ Desktop 直连 broker，session / agent 业务事件不经 Gateway
+- **Gateway 不转发业务事件**：Runtime ↔ Desktop 直连 broker，session / bot 业务事件不经 Gateway
 - **Gateway 不维护 session 状态**：Runtime 才是 session 数据源权威
 - **Gateway 不直接读 Runtime 文件**：大数据查询通过 HTTP 反向代理到 Runtime localhost HTTP server，Gateway 只做转发
 
@@ -1289,8 +1289,8 @@ graph TB
 1. **Desktop 不应在前端直接连 MQTT Broker**：浏览器 JS 无法走原生 TCP，统一由 Tauri Rust backend 用 `rumqttc` 直连更可靠安全。
 2. **MQTT payload ≤ 100KB 阈值**：单条消息超过此阈值必须改走 HTTP（经 Gateway 反向代理到后端 HTTP：Runtime，或 ADR-101 之后的记忆服务）；超过 `max_packet_size`（10MB）Broker 直接断开连接。Retained 消息占用 Broker 内存，全量大数据（message 列表、memory graph）不应走 MQTT retained。
 3. **顺序保证**：MQTT 协议保证同一 topic 内消息有序（RFC）。Session messages 全部走 `agents/{id}/sessions/{sid}/messages/*` 下各子主题，同一子主题内顺序天然保证；不同子主题之间不保证顺序（chunk / tool_call 间无需严格有序）。
-4. **多用户 ACL（已暂缓）**：设计上按 user → agent 授权关系动态生成 ACL，但 rumqttd 0.20 无 per-topic ACL 能力，故**当前未实现**；多用户隔离目前只靠 HTTP 侧 owner 校验（见 §10）。
-5. **Gateway 单点**：当前架构 Gateway 已是单点（Agent 子进程管理、本地文件系统访问）；MQTT 不改变这一点。
+4. **多用户 ACL（已暂缓）**：设计上按 user → bot 授权关系动态生成 ACL，但 rumqttd 0.20 无 per-topic ACL 能力，故**当前未实现**；多用户隔离目前只靠 HTTP 侧 owner 校验（见 §10）。
+5. **Gateway 单点**：当前架构 Gateway 已是单点（Bot 子进程管理、本地文件系统访问）；MQTT 不改变这一点。
 6. **消息丢失检测**：QoS 0 的流式事件丢一帧由下一帧覆盖；QoS 1 的状态变更由 retained message + HTTP `GET` 拉取快照修正。
 7. **LWT 与 retained status 共用同一 topic**：`agents/{id}/status` 既作为 retained message 传递当前状态，也作为 Will Message 的目标 topic。Broker 在 TCP 断开后用 retained flag 重新发布 LWT payload。
 8. **envelope 模式扩展**：新增数据资源时，扩展 `DataEnvelope.payload` oneof 即可，不破坏已有消息。主题路径与 oneof 字段一一对应。

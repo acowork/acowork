@@ -15,8 +15,8 @@
 - [3. API Category Overview](#3-api-category-overview)
 - [4. Gateway Native Endpoints (do not require Runtime online)](#4-gateway-native-endpoints-do-not-require-runtime-online)
   - [4.1 System & Health](#41-system--health)
-  - [4.2 Agent Package Management](#42-agent-package-management)
-  - [4.3 Agent Lifecycle Control](#43-agent-lifecycle-control)
+  - [4.2 Bot Package Management](#42-agent-package-management)
+  - [4.3 Bot Lifecycle Control](#43-agent-lifecycle-control)
   - [4.4 Avatar / Manifest Resources](#44-avatar--manifest-resources)
   - [4.5 LLM Providers & Models](#45-llm-providers--models)
   - [4.6 MCP Catalog](#46-mcp-catalog)
@@ -29,7 +29,7 @@
   - [4.13 Global Resource Snapshot (Runtime active pull entry)](#413-global-resource-snapshot-runtime-active-pull-entry)
   - [4.17 Chat execution-block projection read (ADR-106 D5/D9/D10)](#417-chat-execution-block-projection-read-adr-106-d5d9d10)
 - [5. Gateway → Runtime Reverse Proxy (requires Runtime online)](#5-gateway--runtime-reverse-proxy-requires-runtime-online)
-  - [5.1 Agent Runtime Configuration](#51-agent-runtime-configuration)
+  - [5.1 Bot Runtime Configuration](#51-agent-runtime-configuration)
   - [5.2 Session Read-Only Queries](#52-session-read-only-queries)
   - [5.3 Attachments](#53-attachments)
     - [5.3.1 `POST /sessions/{sid}/files`](#531-post-sessionssidfiles)
@@ -103,7 +103,7 @@ sequenceDiagram
 | MQTT commands / streaming | rumqttd Broker relay | Yes (Runtime responds via MQTT subscription) |
 | Global resource active pull (`GET /api/global-resources`) | Gateway single‑point responds to Runtime active pull | **No** (see [§4.13](#413-global-resource-snapshot-runtime-active-pull-entry)) |
 
-Gateway **does not persist business data**: Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite; since ADR-101 memory belongs to a separate process, `acowork-memory` (one database per agent instance — Gateway only supervises its lifecycle and reverse-proxies it). Gateway pulls snapshots or passthrough requests via HTTP reverse proxy, while commands / writes go through MQTT control topics.
+Gateway **does not persist business data**: Skill, Bot runtime config, Session state, etc. are stored in Runtime local files / SQLite; since ADR-101 memory belongs to a separate process, `acowork-memory` (one database per bot instance — Gateway only supervises its lifecycle and reverse-proxies it). Gateway pulls snapshots or passthrough requests via HTTP reverse proxy, while commands / writes go through MQTT control topics.
 
 ---
 
@@ -128,68 +128,68 @@ Source mapping:
 
 ## 4. Gateway Native Endpoints (do not require Runtime online)
 
-Gateway handles these directly, without needing the Runtime subprocess online. Covers: system health, Agent package management, LLM Provider / Models global resources, MCP catalog, embedding models, user profiles, Cron, Skills, debug tools.
+Gateway handles these directly, without needing the Runtime subprocess online. Covers: system health, Bot package management, LLM Provider / Models global resources, MCP catalog, embedding models, user profiles, Cron, Skills, debug tools.
 
 ### 4.1 System & Health
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Health check (no auth), includes IPC (MQTT) / CronStore / disk space |
-| GET | `/api/status` | System status: version, running Agent count, memory usage; if `mqtt.auth_enabled` is enabled, additionally returns `mqtt_username` / `mqtt_password` (Desktop MQTT credential delivery, ADR-055 Phase 5a) |
+| GET | `/api/status` | System status: version, running Bot count, memory usage; if `mqtt.auth_enabled` is enabled, additionally returns `mqtt_username` / `mqtt_password` (Desktop MQTT credential delivery, ADR-055 Phase 5a) |
 | GET | `/api/config` | Read Gateway configuration |
 | PUT | `/api/config` | Update log level, log rotation, idle_timeout, default provider/model, HF mirror, etc. |
 | DELETE | `/api/logs` | Clear logs |
-| GET | `/api/agents/{id}/lsp-endpoint` | LSP Relay endpoint (node-local, ADR-055 §6.7): resolves the relay base URL (`endpoint`/`ready` fields) for the hosting Node per agent, for Desktop / Runtime to connect directly |
+| GET | `/api/agents/{id}/lsp-endpoint` | LSP Relay endpoint (node-local, ADR-055 §6.7): resolves the relay base URL (`endpoint`/`ready` fields) for the hosting Node per bot, for Desktop / Runtime to connect directly |
 
-### 4.2 Agent Package Management
+### 4.2 Bot Package Management
 
 Package-level CRUD and publishing. Packages are installed to `<packages_dir>`, and Gateway maintains a manifest in `installed_agents`.
 
-> `<packages_dir>` defaults to `<node_home>/packages` (`ACOWORK_NODE_HOME` env → `$HOME/.acowork/acowork-node` → `./.acowork-node`), giving local and standalone Node agents the same layout. File operations actually execute on the Node side; Gateway only exposes the HTTP API and maintains the manifest. See [ADR-055 §6.11 / §6.20](../adr/zh/ADR-055-remote-runtime-node-topology.md) and [runbook `single-machine-remote-topology.md`](../runbooks/single-machine-remote-topology.md).
+> `<packages_dir>` defaults to `<node_home>/packages` (`ACOWORK_NODE_HOME` env → `$HOME/.acowork/acowork-node` → `./.acowork-node`), giving local and standalone Node bots the same layout. File operations actually execute on the Node side; Gateway only exposes the HTTP API and maintains the manifest. See [ADR-055 §6.11 / §6.20](../adr/zh/ADR-055-remote-runtime-node-topology.md) and [runbook `single-machine-remote-topology.md`](../runbooks/single-machine-remote-topology.md).
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/agents` | List all installed Agents (including status, avatar, mqtt_online, etc.) |
-| GET | `/api/agents/{id}` | Agent details (manifest, installed/connected/dev_mode, etc.) |
-| DELETE | `/api/agents/{id}` | Uninstall Agent |
-| POST | `/api/agents/install` | Install `.agent` package (multipart: `package` + **required** `node_id`; ADR-113) |
-| POST | `/api/agents/{id}/clone` | Clone Agent (skeleton or full) |
+| GET | `/api/agents` | List all installed Bots (including status, avatar, mqtt_online, etc.) |
+| GET | `/api/agents/{id}` | Bot details (manifest, installed/connected/dev_mode, etc.) |
+| DELETE | `/api/agents/{id}` | Uninstall Bot |
+| POST | `/api/agents/install` | Install `.bot` package (multipart: `package` + **required** `node_id`; ADR-113) |
+| POST | `/api/agents/{id}/clone` | Clone Bot (skeleton or full) |
 | POST | `/api/agents/{id}/publish/prepare` | Prepare packaging (validation, cleanup) |
-| POST | `/api/agents/{id}/publish/build` | Build `.agent` package |
+| POST | `/api/agents/{id}/publish/build` | Build `.bot` package |
 | POST | `/api/agents/{id}/publish/export` | Export package to target path |
 | POST | `/api/agents/{id}/publish/install-locally` | Install a build artifact; the JSON body's `node_id` is **required** (ADR-113 — "locally" describes where the artifact came from, not a default target on this machine) |
-| GET | `/api/packages/{agent_id}/download` | Download `.agent` package (Node install pull path); when auth enabled, validates `X-ACowork-Node-Token` (ADR-055 Phase 5a): missing/mismatch → 401/403 |
+| GET | `/api/packages/{agent_id}/download` | Download `.bot` package (Node install pull path); when auth enabled, validates `X-ACowork-Node-Token` (ADR-055 Phase 5a): missing/mismatch → 401/403 |
 
 > **ADR-113 contract**: `POST /api/agents/install`, `POST /api/agents/ensure` and `POST /api/agents/{id}/publish/install-locally` all require an explicit `node_id`. The Gateway **does not** infer a default from its own hostname, a launcher marker, or `local_node.json`; a missing/blank value → `400 missing required field: 'node_id'`. Callers select a usable node from `GET /api/nodes` (`online` + `control_ready !== false` + `can_manage !== false`); the final readiness gate remains the Gateway's `ensure_node_ready()` (structured `dependency_not_ready`). Having no usable node is a legitimate empty state, not a 409.
 
 `GET /api/nodes` → `control_ready` is **tri-state**: `true` / `false` when a bootstrap readiness registry is wired, and the field is **omitted** when there is none (MQTT disabled / minimal server). Omission means "readiness unknown", matching a pre-ADR-113 Gateway, because `ensure_node_ready()` is fail-open in that configuration. Clients must not coerce an absent value to `false`.
 
-### 4.3 Agent Lifecycle Control
+### 4.3 Bot Lifecycle Control
 
 Subprocess-level control: start / stop / restart-debug / model provider probing.
 **Model/provider switching** is done via MQTT `sessions/control/model_switch`, not HTTP.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/agents/{id}/start` | Start Agent Runtime subprocess |
-| POST | `/api/agents/{id}/stop` | Stop Agent |
+| POST | `/api/agents/{id}/start` | Start Bot Runtime subprocess |
+| POST | `/api/agents/{id}/stop` | Stop Bot |
 | POST | `/api/agents/{id}/restart-debug` | Restart in debug mode (enables Debug channel) |
 | GET | `/api/agents/{id}/model` | Currently used model / provider (Gateway derives from manifest) |
 
 ### 4.4 Avatar / Manifest Resources
 
-Gateway caches avatar resources (readable even when Agent is stopped); synchronized via MQTT `AgentHello`.
+Gateway caches avatar resources (readable even when Bot is stopped); synchronized via MQTT `AgentHello`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/agents/{id}/avatar` | Retrieve built‑in avatar image from Agent package |
+| GET | `/api/agents/{id}/avatar` | Retrieve built‑in avatar image from Bot package |
 | POST | `/api/agents/{id}/manifest/avatar` | Upload/update manifest avatar |
 | POST | `/api/agents/{id}/manifest/file` | Upload manifest resource file |
 | GET | `/api/agents/{id}/manifest/avatar-assets` | List manifest avatar resources |
 | GET | `/api/agents/{id}/avatar-file` | Retrieve avatar resource file |
 | DELETE | `/api/agents/{id}/avatar-file` | Delete avatar resource |
 | GET | `/api/agents/{id}/avatar-config` | Retrieve avatar runtime config (Gateway cache) |
-| PUT | `/api/agents/{id}/avatar-config` | Update avatar config (takes effect only when Agent is stopped) |
+| PUT | `/api/agents/{id}/avatar-config` | Update avatar config (takes effect only when Bot is stopped) |
 
 ### 4.5 LLM Providers & Models
 
@@ -235,7 +235,7 @@ Embedding sidecar managed by Gateway (ONNX Runtime).
 
 ### 4.8 Users & User-level Avatars
 
-Global user profiles (independent of Agents).
+Global user profiles (independent of Bots).
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -256,7 +256,7 @@ Cron is managed by Gateway itself (persisted in SQLite).
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/agents/{id}/cron` | List Agent's scheduled tasks |
+| GET | `/api/agents/{id}/cron` | List Bot's scheduled tasks |
 | POST | `/api/agents/{id}/cron` | Register new scheduled task (schedule + action + params) |
 | DELETE | `/api/agents/{id}/cron/{cron_id}` | Delete scheduled task |
 
@@ -301,10 +301,10 @@ Used only when a remote Desktop connects to a remote Gateway (not needed for loc
 
 **Why this endpoint is needed (fix for Bug B)**
 
-Bug B: after clearing `.acowork` and going through onboarding again, the first chat with the system agent reported "unexpected error", while subsequent chats worked. Root cause:
+Bug B: after clearing `.acowork` and going through onboarding again, the first chat with the system bot reported "unexpected error", while subsequent chats worked. Root cause:
 
 1. Gateway immediately published an empty `AvailableProviders` (`provider_count=0, api_key_lengths=[]`) right after vault unlock but before any provider was added.
-2. system agent started ~150 ms later, subscribed to `acowork/global/providers`, received retained → cached empty snapshot.
+2. system bot started ~150 ms later, subscribed to `acowork/global/providers`, received retained → cached empty snapshot.
 3. Desktop took ~19s to complete onboarding and add a provider; Gateway republished the new snapshot with keys.
 4. But rumqttd's retained delivery **only delivers new values to subscribers that have not seen the old value** — Runtime that already cached the empty snapshot would not receive the update, and the session's provider=empty became permanently fixed, requiring manual `model_switch` to recover.
 
@@ -419,12 +419,12 @@ Runtime consumption rule: `503` **does not update local cache**, backs off per `
 
 #### 4.16.1 `POST /api/intents/task-dispatch`
 
-Dispatches a PM task into its project group chat and wakes the target agent's execution session (Design 27 §5.4.2). Request body:
+Dispatches a PM task into its project group chat and wakes the target bot's execution session (Design 27 §5.4.2). Request body:
 
 | Field | Required | Description |
 |---|---|---|
 | `project_id` / `task_id` | yes | Task coordinates; `conversation_id` is minted by the Gateway via the `task:{project}:{task}` constant helper |
-| `target_agent` | yes | Target agent instance id (ADR-073 UUID) |
+| `target_agent` | yes | Target bot instance id (ADR-073 UUID) |
 | `owner` | yes | Dispatching human (project owner) — the chat row's `from` |
 | `title` | no | Task title (used when ensuring the group chat) |
 | `message` | yes | **Human text** (title + description): goes to the group-chat row body and the envelope's `params.message` |
@@ -455,7 +455,7 @@ re-deliver the Intent. This is the *only* caller that waits: the generic
 
 #### 4.16.2 `POST /api/intents/task-close`
 
-Ends the target agent's logical execution context for a task when it reaches a terminal state (Done / Rejected / Cancelled). Request body `{project_id, task_id, target_agent}` (any empty → 400; internal-service token required); the Gateway forwards the `conv:task:{project}:{task}` routing key to the target Runtime's `/intent-context/close`. Idempotent; an unreachable Runtime is reported, not retried (the next dispatch self-heals a dead mapping). Response `{ "status": "closed | skipped | failed", "key": "conv:task:…", "reason" | "error": … }` (`skipped` = the agent is not running, nothing to close).
+Ends the target bot's logical execution context for a task when it reaches a terminal state (Done / Rejected / Cancelled). Request body `{project_id, task_id, target_agent}` (any empty → 400; internal-service token required); the Gateway forwards the `conv:task:{project}:{task}` routing key to the target Runtime's `/intent-context/close`. Idempotent; an unreachable Runtime is reported, not retried (the next dispatch self-heals a dead mapping). Response `{ "status": "closed | skipped | failed", "key": "conv:task:…", "reason" | "error": … }` (`skipped` = the bot is not running, nothing to close).
 
 #### 4.16.3 New PM task resource field (acowork-pm REST; source of truth: Design 27 §5.4.2)
 
@@ -522,7 +522,7 @@ Response (**in request order**, exactly one entry per ref):
 Conventions:
 
 - **`unreachable` ≠ in progress.** Rendering an outage as "still running" lets a node that has stopped rewrite what happened. The only durable test for "in progress" is a live projection reporting `terminal=false`; a cache can never hold `terminal=false` (see below).
-- **Three permission walls**: ① whether the reference row is visible at all = chat participation, decided by acowork-user with the same hidden-404 rule as the transcript (non-participant → this endpoint answers 404, not 403, and does not fetch around the denial); ② the source fetch uses the same scope injection as the agent proxy (`x-user-id` plus the chat membership set derived server-side from the token — **never a chat scope from a request header**), and the Runtime still runs `authorize_read` ([§5.7](#57-round-projection-read-adr-106-d4)); ③ **the binding guard** — the Runtime stamps every projection with that execution session's own `chat_session_id` (read from the session meta on disk, unaffected by request headers), and the Gateway serves and caches only projections bound to *the* chat being read. Without the third wall, a member of both chats A and B could pour B's execution content into A's cache and have it survive as history.
+- **Three permission walls**: ① whether the reference row is visible at all = chat participation, decided by acowork-user with the same hidden-404 rule as the transcript (non-participant → this endpoint answers 404, not 403, and does not fetch around the denial); ② the source fetch uses the same scope injection as the bot proxy (`x-user-id` plus the chat membership set derived server-side from the token — **never a chat scope from a request header**), and the Runtime still runs `authorize_read` ([§5.7](#57-round-projection-read-adr-106-d4)); ③ **the binding guard** — the Runtime stamps every projection with that execution session's own `chat_session_id` (read from the session meta on disk, unaffected by request headers), and the Gateway serves and caches only projections bound to *the* chat being read. Without the third wall, a member of both chats A and B could pour B's execution content into A's cache and have it survive as history.
 - **Degrade, never outage**: an unreadable cache reads as "every ref missed"; an unreachable Runtime makes those blocks `unreachable` while the rest are served; one broken ref (a malformed token, a lost coordinate) spoils only its own slot; a failed write-back is a `warn` whose only cost is that the next render re-pays this fetch. A momentary read fault and a permanent hole stay in different boxes: a batch item's `found: false` **plus** `error` is an outage (`unreachable`, retryable), never `not_found` — rendering a disk hiccup as "this round never happened" leaves the surface with no reason to retry, and the cache has no invalidation path to rescue it. Only the chat relation itself may fail the request (user service not ready → 503; a malformed `chat_id` → 404, same discipline as the hidden 404).
 - **Not routed through `/api/agents/*`**, so to the [ADR-087](../../adr/en/ADR-087-node-agent-owner-permissions.md) path classifier it is `Target::None` — the handler proves its own permission, like the `/lsp` proxies. It must be a new top-level prefix: `/api/chat-sessions/*` is already wildcard-forwarded by `user_proxy`, so reusing it would make this a passthrough request rather than an orchestrated one.
 
@@ -553,21 +553,21 @@ Conventions:
 >
 > **Runtime‑side** actual interfaces see [`core/acowork-runtime/src/http/server.rs`](../../../core/acowork-runtime/src/http/server.rs) for the 25‑route inventory (ADR-034 §11.2).
 >
-> **Node reverse‑proxy authentication (ADR-055 Phase 5a)**: when `mqtt.auth_enabled` is enabled, Gateway, on outbound reverse‑proxy, resolves the agent's hosting Node via `installed_agents.node_id` → node registry, and automatically injects `X-ACowork-Node-Token: <node_token>` header; Node inbound validates this header (an enrolled Node must match `identity.node_token`; mismatch → 403 + `X-Error-Origin: node`). When auth is disabled, no header is sent, behaviour identical to pre‑Phase 4.
+> **Node reverse‑proxy authentication (ADR-055 Phase 5a)**: when `mqtt.auth_enabled` is enabled, Gateway, on outbound reverse‑proxy, resolves the bot's hosting Node via `installed_agents.node_id` → node registry, and automatically injects `X-ACowork-Node-Token: <node_token>` header; Node inbound validates this header (an enrolled Node must match `identity.node_token`; mismatch → 403 + `X-Error-Origin: node`). When auth is disabled, no header is sent, behaviour identical to pre‑Phase 4.
 
 Gateway does not parse the Runtime response body; all reads and writes are verbatim passthrough. This means Runtime is the **authoritative owner of workspace config / session state**, and Gateway acts purely as a reverse proxy. (Memory is not in that list: since ADR-101 it is private data of `acowork-memory`, see [§5.4](#54-memory).)
 
-### 5.1 Agent Runtime Configuration
+### 5.1 Bot Runtime Configuration
 
 | Method | Path | Purpose | Runtime path |
 |---|---|---|---|
-| GET | `/api/agents/{id}/config` | Read merged Agent configuration | `/agents/{id}/config` |
-| PUT | `/api/agents/{id}/config` | Update Agent config (max_output_tokens, temperature, prompt, avatar…) | `/agents/{id}/config` |
+| GET | `/api/agents/{id}/config` | Read merged Bot configuration | `/agents/{id}/config` |
+| PUT | `/api/agents/{id}/config` | Update Bot config (max_output_tokens, temperature, prompt, avatar…) | `/agents/{id}/config` |
 | GET | `/api/agents/{id}/tools` | Read enabled built‑in tools list | `/agents/{id}/tools` |
 | GET | `/api/agents/{id}/builtin-tools` | Read builtin‑tools enabled list | `/agents/{id}/builtin-tools` |
 | PUT | `/api/agents/{id}/builtin-tools` | Write builtin‑tools enabled list | `/agents/{id}/builtin-tools` |
 | GET | `/api/agents/{id}/status` | Runtime‑perspective status (cumulative tokens, loop state, etc.) | `/agents/{id}/status` |
-| GET | `/api/agents/{id}/mcp-servers` | Read Agent's MCP service config | `/agents/{id}/mcp-servers` |
+| GET | `/api/agents/{id}/mcp-servers` | Read Bot's MCP service config | `/agents/{id}/mcp-servers` |
 | PUT | `/api/agents/{id}/mcp-servers` | Write MCP service config | `/agents/{id}/mcp-servers` |
 | GET | `/api/agents/{id}/providers` | Read Runtime‑side Provider list (actual data after MQTT sync) | `/agents/{id}/providers` |
 
@@ -711,8 +711,8 @@ RAG is not part of the memory surface and stays with the Runtime:
 | Method | Path | Caller | Service path |
 |---|---|---|---|
 | GET | `/api/memory/search?instance_id={id}` | Desktop global search memory tab | `/memory/search` |
-| POST | `/api/memory/mcp` | Agent Runtime (MCP tool calls) | `/mcp` |
-| POST | `/api/memory/admin/bootstrap?instance_id={id}` | Agent Runtime first-start bootstrap (write entry D) | `/admin/bootstrap` |
+| POST | `/api/memory/mcp` | Bot Runtime (MCP tool calls) | `/mcp` |
+| POST | `/api/memory/admin/bootstrap?instance_id={id}` | Bot Runtime first-start bootstrap (write entry D) | `/admin/bootstrap` |
 | POST | `/api/memory/admin/import?instance_id={id}` | **Node only**: one-shot legacy-store handover (ADR-101 decision 10) | `/admin/import` |
 
 Mapping and gating rules:
@@ -834,7 +834,7 @@ identity, with no exceptions.
 | POST | `/api/agents/{id}/sessions/{sid}/answer` | Answer `ask_user_question` (ex-mqtt `question_answer`) | `/sessions/{sid}/answer` | owner |
 | POST | `/api/agents/{id}/sessions/{sid}/cancel-tool` | Cancel one running tool (ex-mqtt `cancel_tool`, ADR-045) | `/sessions/{sid}/cancel-tool` | owner |
 | POST | `/api/agents/{id}/sessions/{sid}/compress` | Context compression (ex-mqtt `compress_action`; `compact_context` was a duplicate command, removed too) | `/sessions/{sid}/compress` | owner |
-| GET | `/api/agents/{id}/sessions/{sid}/tool-policy` | Read this session's tool narrowing (`null` = follow the agent layer; ADR-109, **not** an MQTT migration item) | `/sessions/{sid}/tool-policy` | read auth |
+| GET | `/api/agents/{id}/sessions/{sid}/tool-policy` | Read this session's tool narrowing (`null` = follow the bot layer; ADR-109, **not** an MQTT migration item) | `/sessions/{sid}/tool-policy` | read auth |
 | PUT | `/api/agents/{id}/sessions/{sid}/tool-policy` | Write this session's tool narrowing (whole replacement; ADR-109, **not** an MQTT migration item) | `/sessions/{sid}/tool-policy` | write auth |
 
 **Action request bodies** (fields map 1:1 onto the Runtime handlers; all
@@ -895,27 +895,27 @@ no broker client can silently rewrite someone else's session through them.
 
 #### 5.6.3 Tool narrowing: per-session over per-agent
 
-Tool switches have two layers, and the direction is **one-way**: the agent layer
+Tool switches have two layers, and the direction is **one-way**: the bot layer
 (`agent-tools.json` / `agent-mcp.json`, edited in the right-panel settings)
-decides which builtin tools and which MCP servers / tools this agent has at all;
+decides which builtin tools and which MCP servers / tools this bot has at all;
 the session layer can only **take away from it**, never add back. The reason is
-composability: if it could widen, sessions of one agent would each hold their own
+composability: if it could widen, sessions of one bot would each hold their own
 tool set, and both the agent-level approval / risk rules and `agent-mcp.json`'s
-connection lifecycle would stop applying (a tool an agent did not enable has no
+connection lifecycle would stop applying (a tool a bot did not enable has no
 wrapper in memory to begin with).
 
 - **A new session inherits**: the `tool_policy` column is `NULL`, and it stays
   `NULL` until a switch is actually moved — "write only on change" is a property
   of the data model, not a convention. Values set per session affect **that
-  session only**; the agent layer keeps describing what the *next* session starts
+  session only**; the bot layer keeps describing what the *next* session starts
   from.
 - **Three independent groups**: builtin tools, MCP servers, MCP tools (per
-  server). Each has its own "follow the agent default" reset. Disabling a server
+  server). Each has its own "follow the bot default" reset. Disabling a server
   wins over its tools, and the per-tool rows are kept so re-enabling the server
   restores the previous per-tool choices instead of wiping them.
 - **Whole replacement** on write, so an optimistic retry cannot compound and
   there is exactly one writer (the UI) to lose a race against.
-- Names are stored as given; an entry naming a tool the agent no longer exposes
+- Names are stored as given; an entry naming a tool the bot no longer exposes
   is inert (the layer only filters), which is why the endpoint validates nothing.
 
 ### 5.7 Round Projection Read (ADR-106 D4)
@@ -973,7 +973,7 @@ Conventions:
 > Gateway side is still the transparent proxy in
 > [`core/acowork-gateway/src/http/proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs).
 > **There is no separate endpoint**: the second `@` level answers "which execution sessions may this
-> person address inside this chat", which is the same question as "this agent's session list" asked with a
+> person address inside this chat", which is the same question as "this bot's session list" asked with a
 > scope — a second endpoint would only produce two answers that can drift apart.
 
 | Method | Runtime path | Purpose | Permission |
@@ -986,8 +986,8 @@ Conventions:
 
 - **The filter IS the permission**: the permission set is the router's own candidate rule (1:1 lists
   sessions bound to this chat plus sessions the human started by hand; a group lists only sessions *I*
-  initiated; kinds never mix; a session an agent started carries an instance UUID as its `initiator`, which
-  never equals a human account id, so agent↔agent runs never reach a human's list). Letting the picker
+  initiated; kinds never mix; a session a bot started carries an instance UUID as its `initiator`, which
+  never equals a human account id, so bot↔bot runs never reach a human's list). Letting the picker
   recompute it would have a surface offer sessions the router would have refused.
 - **The filter runs BEFORE pagination**: `total_count` / `total_pages` count only the rows this chat may
   address, so **the paging is the window** — the 20-row cap and the 7-day freshness test that lived on the
@@ -1021,7 +1021,7 @@ Conventions:
 
 | Field | Required | Notes |
 |---|---|---|
-| `agent_instance_id` | yes | Must be one of this message's delivery targets (material travels to the agent the human named, never to a bystander) |
+| `agent_instance_id` | yes | Must be one of this message's delivery targets (material travels to the bot the human named, never to a bystander) |
 | `session_id` | yes | The execution-session id as the picker's candidate list offered it; re-checked server-side against the Runtime charset (`[A-Za-z0-9_-]`, ≤ 128 bytes) |
 | `round_id` | no | Only echoed back by an addressing-card re-delivery (its row was already pinned); absent = the Gateway pins it now. **An echo with a `round_id` may ride beside the card answer's `target_sessions`** — it is a fact of an already-written sentence, not a new delivery instruction |
 | `terminal` | no | Echoed with `round_id`, marks whether the pinned round had reached terminal |
@@ -1031,7 +1031,7 @@ Conventions:
 
 Discipline (**the row is not written first**):
 
-- more than 5 refs (`MAX_CHAT_REFS`) → 400; a ref naming an agent this message does not deliver to, a blank or path-shaped `session_id`, a blank `round_id`, a **fresh** ref whose agent both receives a `target_sessions` delivery and carries `refs`, or a duplicate `(agent, session)` → 400. **The delivery-vs-quote contradiction is judged only for a fresh ref**: a pre-pinned echo (with `round_id`, i.e. the card answer's re-delivery) may ride beside `target_sessions`, because it is a fact of an already-written sentence, not a new delivery instruction. `force_new_for` + `refs` is **not** a contradiction: "new task" plus "quote this round while you do it" is one coherent instruction (unlike an address, a reference never decides where the sentence goes).
+- more than 5 refs (`MAX_CHAT_REFS`) → 400; a ref naming a bot this message does not deliver to, a blank or path-shaped `session_id`, a blank `round_id`, a **fresh** ref whose bot both receives a `target_sessions` delivery and carries `refs`, or a duplicate `(bot, session)` → 400. **The delivery-vs-quote contradiction is judged only for a fresh ref**: a pre-pinned echo (with `round_id`, i.e. the card answer's re-delivery) may ride beside `target_sessions`, because it is a fact of an already-written sentence, not a new delivery instruction. `force_new_for` + `refs` is **not** a contradiction: "new task" plus "quote this round while you do it" is one coherent instruction (unlike an address, a reference never decides where the sentence goes).
 - A pinning read that fails: **the row is not written**, the surface keeps the draft. A Runtime `404` (no such session / not readable) → `400`; Runtime / node unreachable and every other failure → `502`; an empty side table `latest: null` (no round to quote) → `400`.
 - **A message carrying `refs` skips the level-3 continuation branch** (a reference is already explicit material, so the model is not left to guess the target).
 - **Naming caveat**: `meta.refs` (chat material coordinates, this section), `context_refs` (the ADR-107 reference-part channel) and the chat-block `refs` (the `instance|session|r:round` triple of a D4 block projection read) are three different layers and must never be conflated in code or docs.
@@ -1046,7 +1046,7 @@ Discipline (**the row is not written first**):
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/workspace-files/{agent_id}/{workspace_id}/{*path}` | Direct link to any workspace file, resolves absolute path via `workspace_id` |
-| GET | `/ws-files/{agent_id}/{*path}` | Direct link to Agent home (no workspace_id) |
+| GET | `/ws-files/{agent_id}/{*path}` | Direct link to Bot home (no workspace_id) |
 
 > The two path names are historical and remain unchanged.
 
@@ -1111,8 +1111,8 @@ need during development, see [mqtt.md](./mqtt.md) §4).
 |---|---|
 | 400 | Parameter validation failure, content too long, invalid id format |
 | 401 | Bearer token missing or invalid |
-| 404 | Agent / resource not found |
-| 409 | State conflict: Agent not running, not installed |
+| 404 | Bot / resource not found |
+| 409 | State conflict: Bot not running, not installed |
 | 500 | Gateway internal error |
 | 502 / 503 | MQTT / reverse proxy channel unavailable, Runtime disconnected (**proxy‑endpoint specific**) |
 | 504 | Gateway → Runtime request timeout |
@@ -1121,7 +1121,7 @@ need during development, see [mqtt.md](./mqtt.md) §4).
 
 ## 9. Typical Request Examples
 
-### 9.1 Install Agent (Gateway native)
+### 9.1 Install Bot (Gateway native)
 
 ```http
 POST /api/agents/install HTTP/1.1
@@ -1142,7 +1142,7 @@ Content-Disposition: form-data; name="node_id"
 
 A missing `node_id` → `400`; an offline target or one whose control plane has not announced `NodeReady` is gated by `ensure_node_ready()` with a structured `dependency_not_ready`.
 
-### 9.2 Start Agent and send message (MQTT)
+### 9.2 Start Bot and send message (MQTT)
 
 ```http
 POST /api/agents/{id}/start HTTP/1.1
@@ -1332,7 +1332,7 @@ produced no result at all).
 
 ### 9.5.2 Legacy memory store handover (Node only → memory service)
 
-ADR-101 decision 10: the `{workspace}/memory/private.sqlite` that every Agent workspace
+ADR-101 decision 10: the `{workspace}/memory/private.sqlite` that every Bot workspace
 held before ADR-101 is handed to the service **unilaterally by `acowork-node`** — Node
 owns the node-local filesystem (ADR-055), and neither the Runtime nor the Gateway takes
 part.
@@ -1501,7 +1501,7 @@ if body["instance_id"] != cache.bootstrap_instance_id().unwrap_or("") {
 
 ## 10. Notes
 
-1. **Gateway does not persist business data**: Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite, and memory in the separate `acowork-memory` process's per-instance database (ADR-101); Gateway pulls snapshots or passthrough via HTTP reverse proxy.
+1. **Gateway does not persist business data**: Skill, Bot runtime config, Session state, etc. are stored in Runtime local files / SQLite, and memory in the separate `acowork-memory` process's per-instance database (ADR-101); Gateway pulls snapshots or passthrough via HTTP reverse proxy.
 2. **Proxy endpoints require the backend online**: if Runtime is not registered / has exited, returns 503; the MQTT channel `acowork/agents/{id}/http_port` is the **sole source** for Gateway to discover the Runtime port — **retained publish** is critical (after Gateway restart, broker replays the last port). The memory surface (§5.4 / §5.4.1) is the only exception: its backend is the `acowork-memory` process the Gateway supervisor starts itself (port read from the port-file, not from MQTT), so a down Runtime does not affect it.
 3. **Most writes trigger hot pushes**: for example, after modifying Provider / MCP config, Gateway synchronises the latest available list to all connected Runtimes via MQTT **retained publish**; see [mqtt.md §Global resource availability broadcast](./mqtt.md).
 4. **CORS**: always enabled as `CorsLayer::permissive()` (any origin, any method, any header; **without** `allow_credentials(true)` — `*` wildcard conflicts with `Access-Control-Allow-Credentials: true`, tower-http panics at build; also frontend `fetch` defaults to `credentials: 'same-origin'`, so this header is unnecessary). Dev mode Vite (`:5173`) and production Tauri custom protocol (`tauri://localhost` / `http(s)://tauri.localhost`) both cross‑origin access Gateway (`:19876`); any hardcoded allowlist would be broken when browsers resolve `localhost` to different IP literals. Local bind defaults to `127.0.0.1` — an attacker would already need access to the loopback to exploit permissive CORS, so it's zero‑risk on loopback. For remote deployments, CSRF protection relies on `Authorization: Bearer <token>` (`[http].auth_enabled = true`); Gateway does not send Set‑Cookie, and browsers by default do not send cookies with `credentials: 'same-origin'`.

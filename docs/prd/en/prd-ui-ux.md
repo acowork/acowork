@@ -5,7 +5,7 @@
 > Related Implementation Plan: S1 User Mode Task Definitions (archived in `docs/_internal/archive/plan/zh/plan-p5.md`, local reference)  
 >  
 > **v2.0 Revision Notes**: v1.0 of this document described a layout (top title bar with Gateway indicator, left navigation bar with Chat/Models/Skills/Settings, dynamic system tray status, independent Models view, Vault/Providers Settings tabs, etc.) that severely diverged from the current codebase. v2.0 has been completely rewritten section by section based on the actual code in `apps/acowork-desktop` to reflect the implementation as it stands.  
-> Key differences: the navigation bar now has 5 views (Chat/Projects/Docs/Harness/Settings) + top avatar; Gateway status moved to the bottom status bar; system tray only contains a Quit menu; no standalone Models view (Provider management lives in the Harness view); Settings has four tabs: Profile/General/Appearance/Gateway (Nodes is not a tab of its own — it is the node tree section inside the Gateway tab); the chat area consists of "Agent List + Chat Panel + optional File Editor + Results Panel + 40px right toolbar".
+> Key differences: the navigation bar now has 5 views (Chat/Projects/Docs/Harness/Settings) + top avatar; Gateway status moved to the bottom status bar; system tray only contains a Quit menu; no standalone Models view (Provider management lives in the Harness view); Settings has four tabs: Profile/General/Appearance/Gateway (Nodes is not a tab of its own — it is the node tree section inside the Gateway tab); the chat area consists of "Bot List + Chat Panel + optional File Editor + Results Panel + 40px right toolbar".
 
 ---
 
@@ -93,7 +93,7 @@ The current implementation **does not use CSS media query breakpoints**. Panel w
 
 | Panel | Default | Min | Max | Persistence key |
 |-------|---------|-----|-----|-----------------|
-| Agent List (sidebar) | 240px | 100px (collapses to 64px avatar‑only when dragged below 100px) | 400px | `acowork-sidebar-width` |
+| Bot List (sidebar) | 240px | 100px (collapses to 64px avatar‑only when dragged below 100px) | 400px | `acowork-sidebar-width` |
 | Results Panel (right) | 340px | 200px | 600px | `acowork-right-width` |
 | File Editor | 450px | 200px | No fixed cap (dynamic: window − sidebar − right panel − chat minimum 338px) | `acowork-file-width` |
 
@@ -170,7 +170,7 @@ All view switching is driven by `AppLayout.currentView` state; non‑Chat views 
 
 **Closing the window = hide to tray**: `CloseRequested` event is intercepted (when window visible) → `window.hide()` + `prevent_close()`, keeping the app in tray; only the tray Quit menu (or system exit) really terminates the process. This gives the tray a dual role of **window restore entry** + **persistent host**.
 
-**Note**: The dynamic menu items described in v1.0 ("Show Dashboard / Agent Chat / Status / Start Gateway") and coloured status icons are **not implemented**.
+**Note**: The dynamic menu items described in v1.0 ("Show Dashboard / Bot Chat / Status / Start Gateway") and coloured status icons are **not implemented**.
 
 ### 3.4 Bottom Status Bar (`AppLayout.tsx` inline, height 24px)
 
@@ -179,7 +179,7 @@ Located at the very bottom of the window, carrying global status signals:
 | Element | Description |
 |---------|-------------|
 | Status pill | `error` (red) / `warning` (amber) / `info` (grey); click to copy full text; hover Tooltip shows full content |
-| Agent + context pill | Shown when selected Agent is running and Results Panel is collapsed or not on Status tab: `Agent: {name}` + `Context: {usage}% | {tokens}/{window}` (≥90% highlighted) |
+| Bot + context pill | Shown when selected Bot is running and Results Panel is collapsed or not on Status tab: `Bot: {name}` + `Context: {usage}% | {tokens}/{window}` (≥90% highlighted) |
 | MQTT debug controls | `MqttDebugControls` (developer use, shows MQTT connection status) |
 | File status cluster | When file editor is open, positioned absolutely below the file panel, shows cursor position / LSP status, etc. |
 
@@ -236,17 +236,17 @@ Rendered only when `gatewayStatus === "error"` (steady‑state offline; startup 
 6. `ResultsPanel` (rendered when `!resultsCollapsed`, foldable and resizable)
 7. `RightNavBar` (40px toolbar)
 
-### 4.2 Agent List (`AgentList.tsx`, default 240px)
+### 4.2 Bot List (`AgentList.tsx`, default 240px)
 
 #### Data Sources
 
 | Data | Source | Refresh timing |
 |------|--------|----------------|
-| Agent list | Zustand `agentStore.agents` (internally calls Tauri `list_agents` command) | Initial load + after install/uninstall/clone/create + poll every 30s |
-| Session title | `fetchLatestSession(id)` (async fetch latest session title for running Agents) | When Agent becomes running and title not cached |
+| Bot list | Zustand `agentStore.agents` (internally calls Tauri `list_agents` command) | Initial load + after install/uninstall/clone/create + poll every 30s |
+| Session title | `fetchLatestSession(id)` (async fetch latest session title for running Bots) | When Bot becomes running and title not cached |
 | Session activity dot | `chatStore.agentStates` per‑session `sessionStatus` not idle | Real‑time (MQTT event‑driven) |
 
-#### Agent Entry
+#### Bot Entry
 
 ```
 ┌────────────────────────────────────────────┐
@@ -268,8 +268,8 @@ Rendered only when `gatewayStatus === "error"` (steady‑state offline; startup 
 
 | Action | Trigger | Behaviour |
 |--------|---------|-----------|
-| Single click | Left click | Select Agent, Chat Panel loads its sessions |
-| Double click | Left click ×2 | Stopped Agent directly starts (`startAgentAndSyncUI`) |
+| Single click | Left click | Select Bot, Chat Panel loads its sessions |
+| Double click | Left click ×2 | Stopped Bot directly starts (`startAgentAndSyncUI`) |
 | Right click | Right click | Shows context menu (see below) |
 
 **Right‑click context menu** (conditional rendering):
@@ -280,9 +280,9 @@ Rendered only when `gatewayStatus === "error"` (steady‑state offline; startup 
 | ▶ Start in Debug | `!running` | Start in DevMode (`startAgentAndSyncUI(id, true)`) |
 | ⏹ Stop | `running` | Stop after confirmation |
 | Details | Always | Open `AgentDetailDialog` |
-| Clone | Always | Open `CloneDialog`, auto‑select cloned Agent on success |
-| Publish | Always | Open `PublishWizard` (export .agent package) |
-| 🗑 Uninstall | Every agent, System Agent included (ADR‑077 drops the privilege) | Uninstall after confirmation |
+| Clone | Always | Open `CloneDialog`, auto‑select cloned Bot on success |
+| Publish | Always | Open `PublishWizard` (export .bot package) |
+| 🗑 Uninstall | Every bot, System Bot included (ADR‑077 drops the privilege) | Uninstall after confirmation |
 
 **Stop / Uninstall / dangerous action confirmation dialogs**: unified `ConfirmDialog` component with `destructive` red styling; Esc closes, Cancel is default focus.
 
@@ -296,8 +296,8 @@ Rendered only when `gatewayStatus === "error"` (steady‑state offline; startup 
 ```
 
 - Multi‑node scenario: before install, `fetchNodes()` resolves online nodes; if >1 online node, the menu switches to a **node selector** (ADR‑055 §6.13.3)
-- While installing, button shows loading state; on success, Toast + auto‑select new Agent
-- `com.acowork.system` ships as the bundled default agent and installs/starts/uninstalls like any other agent (ADR‑077)
+- While installing, button shows loading state; on success, Toast + auto‑select new Bot
+- `com.acowork.system` ships as the bundled default bot and installs/starts/uninstalls like any other bot (ADR‑077)
 
 ### 4.3 Chat Panel (`ChatPanel.tsx`, elastic width)
 
@@ -305,7 +305,7 @@ Rendered only when `gatewayStatus === "error"` (steady‑state offline; startup 
 
 | Area | Content |
 |------|---------|
-| Session Tab Bar (`SessionTabBar`) | Multi‑session tabs for current Agent's `openSessionIds`; each tab has title + close button; includes "New Session" entry |
+| Session Tab Bar (`SessionTabBar`) | Multi‑session tabs for current Bot's `openSessionIds`; each tab has title + close button; includes "New Session" entry |
 | Toolbar | **Model selector** (Layers icon, popover lists models + capability tags + "Add Model"), **Reasoning effort** (Brain icon: Auto/Off/Low/Medium/High), **Workspace** (folder icon), **Skills** (puzzle/skills), **Upload** (file/image, 50MiB pre‑check), **Send/Stop**, etc. |
 | Message stream | Virtualised list (`VirtualMessageList`), scroll snapshot restoration |
 | Input area | Multi‑line `textarea` (Enter sends / Shift+Enter newline / IME composition 300ms protection), with Send/Stop buttons and context menu |
@@ -316,9 +316,9 @@ Toolbar buttons **collapse to icon‑only** on narrow width (from the leftmost b
 
 | State | Placeholder |
 |-------|-------------|
-| No Agent selected / no sessions | "Select an Agent to start chatting" (centred icon + text) |
-| Agent stopped | "Start Agent" button (centred, click to start) |
-| Agent running but not ready | "Connecting to agent..." (when MQTT not connected) |
+| No Bot selected / no sessions | "Select a Bot to start chatting" (centred icon + text) |
+| Bot stopped | "Start Bot" button (centred, click to start) |
+| Bot running but not ready | "Connecting to bot..." (when MQTT not connected) |
 
 #### 4.3.3 Message Stream and Message Types
 
@@ -334,9 +334,9 @@ Messages are virtualised by `VirtualMessageList`, grouped by session (`messageFo
 | `system` | System message (session creation/cleanup, small centred text) |
 | `compaction` | Context compaction card (`CompactionCard`) |
 
-Additional message components: `AskQuestionCard` (Agent asks user), `RetryWaitBanner`, `DebugPausedBanner`, `ExploreBlock`, `StreamingSourceBlock`, `ThinkBlock`.
+Additional message components: `AskQuestionCard` (Bot asks user), `RetryWaitBanner`, `DebugPausedBanner`, `ExploreBlock`, `StreamingSourceBlock`, `ThinkBlock`.
 
-**Attachments**: Users can paste/upload files and images (`UserWithAttachmentsBubble`); top `AttachedContextChips` show mounted context; Agent‑referenced files show `DocumentChip`.
+**Attachments**: Users can paste/upload files and images (`UserWithAttachmentsBubble`); top `AttachedContextChips` show mounted context; Bot‑referenced files show `DocumentChip`.
 
 #### 4.3.4 Streaming Output
 
@@ -356,7 +356,7 @@ MQTT connection status is maintained by Rust `rumqttc` event loop and pushes `mq
 | Stop | Must click Stop button (Enter does not trigger stop, to avoid accidental interruption) |
 | IME protection | Enter within 300ms after `onCompositionEnd` is treated as IME confirmation, not send |
 | Multi‑line | Scrolls within `max‑h‑48` |
-| Disabled conditions | Disabled when Gateway is disconnected / Agent not running / MQTT disconnected; placeholder changes accordingly |
+| Disabled conditions | Disabled when Gateway is disconnected / Bot not running / MQTT disconnected; placeholder changes accordingly |
 | Paste | Pasting images/files auto‑uploads (50MiB pre‑check) |
 | Context menu | Custom copy/paste menu (Tauri WebView has no native menu) |
 
@@ -366,17 +366,17 @@ The right‑side Results Panel consists of a **40px toolbar (RightNavBar)** + co
 
 | Tab | Icon | Show condition | Content |
 |-----|------|----------------|---------|
-| Workspace | folder | Agent running | `WorkspaceExplorer` (file tree / browse / locate) |
-| Status | dashboard | Always | Agent runtime status, token stats, model/Provider, session stats (see below) |
-| Memory | database | Agent running | `MemoryPanel` (memory management) |
-| Debug | bug | Agent running | `DebugPanel` (DevMode debugging, see §4.4.2) |
-| Setup | gear | Agent running | `AgentSetupTab` (Agent configuration; hosts the builtin-tools / MCP / prompts-and-skills cards, see §4.4.3) |
+| Workspace | folder | Bot running | `WorkspaceExplorer` (file tree / browse / locate) |
+| Status | dashboard | Always | Bot runtime status, token stats, model/Provider, session stats (see below) |
+| Memory | database | Bot running | `MemoryPanel` (memory management) |
+| Debug | bug | Bot running | `DebugPanel` (DevMode debugging, see §4.4.2) |
+| Setup | gear | Bot running | `AgentSetupTab` (Bot configuration; hosts the builtin-tools / MCP / prompts-and-skills cards, see §4.4.3) |
 
 **Interaction rules**:
 - Clicking an already‑active tab's toolbar button → collapses the panel; clicking again → expands
-- When Agent stops, Workspace/Memory/Debug/Setup buttons hide, panel auto‑jumps back to Status (see `AppLayout` lifecycle effect)
+- When Bot stops, Workspace/Memory/Debug/Setup buttons hide, panel auto‑jumps back to Status (see `AppLayout` lifecycle effect)
 - The rail has **5 tabs**: the former Tools tab is gone (its builtin-tools / MCP cards moved into Setup), and the Debug tab's prompts-and-skills card moved there as well
-- When Agent enters debug mode, panel auto‑switches to Debug tab
+- When Bot enters debug mode, panel auto‑switches to Debug tab
 - The top title bar shows the current tab name; left side is the drag‑resize handle
 
 #### 4.4.1 Status Tab
@@ -387,7 +387,7 @@ Displays current session/Agent statistics: token usage (`tokenUsage`), context u
 
 | State | Presentation |
 |-------|--------------|
-| Agent not running | "No Agent is in debug mode" empty state |
+| Bot not running | "No Bot is in debug mode" empty state |
 | Running but DevMode off | "Enable Debug" button (`enable_agent_debug` runtime, no restart needed) |
 | DevMode on + remote Gateway | "Debugging is not available in remote mode" (ADR‑048 D6: debug RPC depends on local MQTT) |
 | DevMode on + local + disconnected | "Debug connection lost" |
@@ -399,7 +399,7 @@ The Setup tab is the single entry point for agent-level configuration — seven 
 
 | # | Card | Content |
 |---|------|---------|
-| 1 | Agent Info | Avatar (ADR-017, server‑side), display name |
+| 1 | Bot Info | Avatar (ADR-017, server‑side), display name |
 | 2 | Session Parameters | Session language, max iterations / sessions, shell approval, compression ratio |
 | 3 | Model Parameters | Max output tokens, context window, temperature |
 | 4 | Chat Session Router | Router model / timeout / history budget (ADR‑099) |
@@ -411,7 +411,7 @@ One more, **conditionally rendered**, card sits between 6 and 7: **MCP servers r
 
 Only the **first 3** cards start expanded; the rest start collapsed (order and defaults are defined once in `agentSetupCards.ts`). Expand state is component‑local, not persisted.
 
-**Known exception**: the recommendation card starts **expanded** (its own component‑local initial value, outside the rule). It only renders when recommendations exist, and then it is the notice that "this agent is still missing something" — collapsing it would reduce that notice to a title bar. The cost is that the panel is then no longer strictly "only the first 3 expanded". Rationale and the future unification: ADR‑108 D3.
+**Known exception**: the recommendation card starts **expanded** (its own component‑local initial value, outside the rule). It only renders when recommendations exist, and then it is the notice that "this bot is still missing something" — collapsing it would reduce that notice to a title bar. The cost is that the panel is then no longer strictly "only the first 3 expanded". Rationale and the future unification: ADR‑108 D3.
 
 ### 4.5 File Editor (`FileEditorPanel.tsx`, optional)
 
@@ -448,8 +448,8 @@ The Harness entry (puzzle icon) in the navigation bar opens `HarnessPage`, with 
 | Profile | User identity: display name, avatar (upload / built‑in), language, timezone, city, occupation |
 | General | Logs: Gateway log level, frontend log level, log file size/limit, delete logs; data directory (read‑only, from `/api/config`); About; Reset Onboarding |
 | Appearance | Theme (light/dark/system), accent colour (`ACCENT_PRESETS` palette), content width (40–100%), font size (S–XXL), window transparency (slider 0–100%) |
-| Gateway | Gateway Connection (transport radio: Direct / Relay) + a single server-address picker, local status & Start/Stop/Restart, connected Agents list (with model info, Debug badge) |
-| Nodes | Node topology (`GET /api/nodes`): node_id / online status / OS / architecture / version / hostname / Agent count (read‑only table) |
+| Gateway | Gateway Connection (transport radio: Direct / Relay) + a single server-address picker, local status & Start/Stop/Restart, connected Bots list (with model info, Debug badge) |
+| Nodes | Node topology (`GET /api/nodes`): node_id / online status / OS / architecture / version / hostname / Bot count (read‑only table) |
 
 ### 6.1 Appearance Details
 
@@ -466,7 +466,7 @@ The Harness entry (puzzle icon) in the navigation bar opens `HarnessPage`, with 
 - **Run mode**: local (Tauri manages Gateway subprocess) / remote (connect to user‑configured URL)
 - local: status indicator (Running/Starting/Stopped), [Start] (when externally stopped) / [Restart] [Stop] (when Tauri‑managed), version
 - remote: URL input (save on blur/Enter), [Apply], status indicator, [Test Connection]
-- **Connected Agents**: lists Agents from `/api/agents` where `running || connected`; each row shows name, `provider/model`, and Debug badge
+- **Connected Bots**: lists Bots from `/api/agents` where `running || connected`; each row shows name, `provider/model`, and Debug badge
 
 ---
 
@@ -534,23 +534,23 @@ Brand logo + welcome message + **[Start Configuration]** (→ Step 2) + **[Skip 
 - `requiredFilled = name && language && timezone`; [Next] disabled until filled
 - On completion, calls `createUser(...)` (fire‑and‑forget), syncs local `userProfileStore`; if no avatar, assigns a random built‑in avatar
 
-### 7.6 Step 5: Install First Agent
+### 7.6 Step 5: Install First Bot
 
-**Differences from v1.0**: recommended Agent list is **6 built‑in roles** (instead of v1.0's Weather/Calendar), with **batch multi‑select installation**:
+**Differences from v1.0**: recommended Bot list is **6 built‑in roles** (instead of v1.0's Weather/Calendar), with **batch multi‑select installation**:
 
 | Resource name | Display name | Role | Description |
 |---------------|--------------|------|-------------|
-| software‑architect‑agent | Architect | Software Architect | System design, architectural review, technical planning, risk assessment |
-| senior‑engineer‑agent | SSE | Senior Software Engineer | Code review, architectural design, debugging, refactoring, testing, documentation |
-| quality‑assurance‑agent | QA | Quality Assurance Manager | Quality strategy, test planning, defect management, release validation |
-| project‑manager‑agent | PM | Project Manager | Requirements analysis, task breakdown, progress tracking, risk management |
-| product‑manager‑agent | Product | Product Manager | Product strategy, user research, PRD writing, roadmap, release planning |
-| document‑manager‑agent | Docs | Document Manager | Document collection, organisation, writing, conversion, knowledge base maintenance |
+| software‑architect‑bot | Architect | Software Architect | System design, architectural review, technical planning, risk assessment |
+| senior‑engineer‑bot | SSE | Senior Software Engineer | Code review, architectural design, debugging, refactoring, testing, documentation |
+| quality‑assurance‑bot | QA | Quality Assurance Manager | Quality strategy, test planning, defect management, release validation |
+| project‑manager‑bot | PM | Project Manager | Requirements analysis, task breakdown, progress tracking, risk management |
+| product‑manager‑bot | Product | Product Manager | Product strategy, user research, PRD writing, roadmap, release planning |
+| document‑manager‑bot | Docs | Document Manager | Document collection, organisation, writing, conversion, knowledge base maintenance |
 
 - Each item is a checkbox card (Name · Role / Description); all pre‑checked by default; [Select All] / [Clear All] provided
 - **[Install Selected (N)]**: `waitBootstrapReady()` (poll `/api/bootstrap` until READY) → `runBounded(items, 3)` concurrent 3 submissions of `install_bundled_agent` → for each item `wait_agent_installed` polling → per‑item status badges (pending/submitted/completed/failed, including operation_id)
-- **[Install from File]**: opens .agent file picker, calls `install_agent`
-- **[Finish]**: available whether or not any Agent installed; sets `onboarding_completed`, enters main UI
+- **[Install from File]**: opens .bot file picker, calls `install_agent`
+- **[Finish]**: available whether or not any Bot installed; sets `onboarding_completed`, enters main UI
 
 ---
 
@@ -571,15 +571,15 @@ All non‑fatal errors and successes are shown via Toast.
 
 | Component | Loading state |
 |-----------|---------------|
-| Agent list initial load | Centred Spinner (`animate‑spin`) |
-| Agent session titles | Skeleton second line (`animate‑pulse` rectangle) |
+| Bot list initial load | Centred Spinner (`animate‑spin`) |
+| Bot session titles | Skeleton second line (`animate‑pulse` rectangle) |
 | Install / start | Button loading / disabled + Toast feedback |
 | Panel data | Tab‑internal "loading" text |
 
 ### 8.3 Network / Connection Errors
 
 - Gateway `error` → `GatewayStatusChip` in the title bar (§3.5) + red status pill in bottom bar
-- MQTT disconnected (while Agent running) → warning pill in bottom bar ("Realtime connection lost, retrying…"); sleeping Agents do not show this (expected behaviour)
+- MQTT disconnected (while Bot running) → warning pill in bottom bar ("Realtime connection lost, retrying…"); sleeping Bots do not show this (expected behaviour)
 - Any async operation failure → Toast + error details
 
 ---
@@ -592,7 +592,7 @@ All non‑fatal errors and successes are shown via Toast.
 | Panel collapse/expand | Instant width switch (no transition animation) |
 | Toast | Slide‑in from right + fade‑in / fade‑out |
 | Streaming typing | No blinking cursor (block‑level rendering) |
-| Agent status change | No colour gradient (instant switch) |
+| Bot status change | No colour gradient (instant switch) |
 | Welcome / startup | SplashScreen fade‑in (700ms translate+opacity), LoadingDots every 400ms |
 | Accent colour change | Instant effect |
 
@@ -621,16 +621,16 @@ All non‑fatal errors and successes are shown via Toast.
 
 | Frontend action | Command | Description |
 |-----------------|---------|-------------|
-| List Agents | `list_agents` | `agentStore.fetchAgents()` |
-| Install Agent | `install_agent` | `{ packagePath, devMode, nodeId }` |
-| Install built‑in Agent | `install_bundled_agent` | `{ resourceName, devMode }` → `OperationAck` |
+| List Bots | `list_agents` | `agentStore.fetchAgents()` |
+| Install Bot | `install_agent` | `{ packagePath, devMode, nodeId }` |
+| Install built‑in Bot | `install_bundled_agent` | `{ resourceName, devMode }` → `OperationAck` |
 | Wait for install completion | `wait_agent_installed` | `{ agentId, timeoutSecs }` |
-| Uninstall Agent | `uninstall_agent` | `{ agentId }` |
-| Start Agent | `start_agent` | `{ agentId, devMode }` |
-| Stop Agent | `stop_agent` | `{ agentId }` |
+| Uninstall Bot | `uninstall_agent` | `{ agentId }` |
+| Start Bot | `start_agent` | `{ agentId, devMode }` |
+| Stop Bot | `stop_agent` | `{ agentId }` |
 | Restart debug | `restart_agent_in_debug` | `{ agentId }` |
-| Clone Agent | `clone_agent` | |
-| Create Agent | `create_agent` | |
+| Clone Bot | `clone_agent` | |
+| Create Bot | `create_agent` | |
 | Publish/export | `prepare_publish` / `build_publish` / `export_package` | |
 | Vault Keys | `list_keys` / `add_key` / `remove_key` / `update_key` / `list_search_keys` / `add_search_key` | |
 | Debug | `enable_agent_debug` / `disable_agent_debug` / `debug_rpc` | |
@@ -647,10 +647,10 @@ All non‑fatal errors and successes are shown via Toast.
 | Bootstrap status | GET | `/api/bootstrap` |
 | Config | GET/PUT | `/api/config` |
 | Nodes | GET | `/api/nodes` |
-| Agent list | GET | `/api/agents` |
-| Agent detail | GET | `/api/agents/{id}` |
-| Agent model | GET | `/api/agents/{id}/model` |
-| Agent status | GET | `/api/agents/{id}/status` |
+| Bot list | GET | `/api/agents` |
+| Bot detail | GET | `/api/agents/{id}` |
+| Bot model | GET | `/api/agents/{id}/model` |
+| Bot status | GET | `/api/agents/{id}/status` |
 | Delete logs | DELETE | `/api/logs` |
 | Create user | POST | `/api/users` (`createUser`) |
 | Providers | GET | `/api/providers` |
@@ -664,7 +664,7 @@ All non‑fatal errors and successes are shown via Toast.
 |-------|----------------|
 | `settingsStore` | theme/osTheme/accentColor/fontSize/contentWidth/opacity/gatewayUrl/gatewayUrlHistory/lastGoodUrl/gatewayMode(derived)/relayActive/autoStartLocalNode/logLevel, persisted to localStorage |
 | `gatewayStore` | status/health/localState + checkHealth/startLocalGateway/stopLocalGateway/checkLocalStatus |
-| `agentStore` | agents(including meta/profile/sessions/sessionTitle/tokenTotals), selectedAgentId, fetchAgents/selectAgent/install/uninstall/start/stop/clone |
+| `agentStore` | bots(including meta/profile/sessions/sessionTitle/tokenTotals), selectedAgentId, fetchAgents/selectAgent/install/uninstall/start/stop/clone |
 | `chatStore` | agentStates → sessionStates (messages/tokenUsage/contextUsage/sessionStatus/model/provider/inputValue), mqttConnected, MQTT event handling |
 | `debugStore` | debug session state, snapshots, connect/disconnect/resume/pause/step/stop/restart/rewind/reExecute/patchContext |
 | `layoutStore` | activePanelTab/resultsCollapsed/filePanelBounds |
@@ -684,7 +684,7 @@ All non‑fatal errors and successes are shown via Toast.
 | Rule | Implementation |
 |------|----------------|
 | Keyboard navigation | All interactive elements focusable via Tab |
-| ARIA labels | NavBar `role="navigation"`, Agent list `role="list"/"listitem"`, drag handles `role="separator"`, inputs/buttons `aria‑label` |
+| ARIA labels | NavBar `role="navigation"`, Bot list `role="list"/"listitem"`, drag handles `role="separator"`, inputs/buttons `aria‑label` |
 | Focus indicators | Focusable elements have `focus‑visible:ring` |
 | Contrast | Primary text zinc‑700/zinc‑900 (light) / zinc‑300 (dark), ≥4.5:1 |
 | Tooltips | `Tooltip` component (delay, direction controllable) |

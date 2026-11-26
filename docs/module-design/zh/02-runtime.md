@@ -1,6 +1,6 @@
-# acowork-runtime — Agent Runtime
+# acowork-runtime — Bot Runtime
 
-**定位**：加载 .agent 包并执行 Agent 逻辑的统一二进制。每个 Agent 是一个独立进程。
+**定位**：加载 .bot 包并执行 Bot 逻辑的统一二进制。每个 Bot 是一个独立进程。
 
 ```
 crates/acowork-runtime/
@@ -159,7 +159,7 @@ crates/acowork-runtime/
 
 ### `agent/loop_.rs` — 主循环
 
-主循环是 Agent Runtime 的核心调度单元，其设计要点如下：
+主循环是 Bot Runtime 的核心调度单元，其设计要点如下：
 
 ```
 主循环流程：
@@ -210,7 +210,7 @@ pub enum InboundMessage {
 }
 ```
 
-关键设计差异（相比单进程 Agent 循环）：
+关键设计差异（相比单进程 Bot 循环）：
 - 增加 DevMode 步进控制层
 - 权限校验在工具调度前执行（步骤⑤→⑤'），而非在安全策略层；Approval Gate 单独作为步骤⑤' 串行等待
 - **新增** `inbound_tx/rx` 消息队列，支持循环间隙注入消息
@@ -222,8 +222,8 @@ pub enum InboundMessage {
 
 ACowork-AI **工具系统设计原则**：
 
-1. **Runtime 提供完整工具池**（~77 个核心工具），但不是每个 Agent 都能用所有工具
-2. **Manifest 声明驱动激活**：`.agent` 包的 `tools` 和 `permissions` 字段决定该 Agent 可用哪些工具
+1. **Runtime 提供完整工具池**（~77 个核心工具），但不是每个 Bot 都能用所有工具
+2. **Manifest 声明驱动激活**：`.bot` 包的 `tools` 和 `permissions` 字段决定该 Bot 可用哪些工具
 3. **工具按类别分目录**：builtin / schedule / integration / agent / browser / dev / skill / mcp / wasm / sop（`memory/` 已随 ADR-101 删除——记忆工具改成托管 MCP 提供）
 4. **安全包装器组合**：采用 `RateLimitedTool` + `PathGuardedTool` 装饰器模式，实现限流与路径校验的组合安全策略
 
@@ -247,9 +247,9 @@ fn build_tool_registry(manifest: &AgentManifest, all_tools: Vec<Arc<dyn Tool>>) 
 |------|-------------|
 | 工具注册 | 分两步：`all_tools()` 构建池 + `activate()` 按 manifest 过滤 |
 | 激活机制 | manifest `tools[]` + `permissions[]` 声明驱动 |
-| Intent 工具 | 新增 `intent_send` / `intent_receive`（跨 Agent 通信） |
+| Intent 工具 | 新增 `intent_send` / `intent_receive`（跨 Bot 通信） |
 | 身份工具 | 新增 `identity_query`（查询用户身份） |
-| Agent 协作 | `delegate` 可跨进程（通过 Gateway Intent） |
+| Bot 协作 | `delegate` 可跨进程（通过 Gateway Intent） |
 | 第三方集成 | manifest 声明 + 运行时配置双重控制 |
 
 **工具分类参考（完整设计空间，实际激活取决于 manifest 声明）**：
@@ -258,11 +258,11 @@ fn build_tool_registry(manifest: &AgentManifest, all_tools: Vec<Arc<dyn Tool>>) 
 
 | 分类 | ACowork 目录 | 工具数 | Phase 1 实现 |
 |------|-------------|--------|------------|
-| 核心 Builtin | `builtin/` | 17 | ✅ 13 个（weather/git/pdf/screenshot/image 系移到 WASM 或 Agent 内置） |
+| 核心 Builtin | `builtin/` | 17 | ✅ 13 个（weather/git/pdf/screenshot/image 系移到 WASM 或 Bot 内置） |
 | Memory | ~~`memory/`~~ | 0 | ❌ ADR-101 已移出 Runtime：`memory_store` / `memory_recall` 由 Gateway 托管的记忆 MCP 提供 |
 | 定时任务 | `schedule/` | 7 | ❌ Phase 2 |
-| 第三方集成 | `integration/` | 8 | ❌ 由独立 Agent 提供 |
-| Agent 协作 | `agent/` | 6 | ✅ intent_send/receive 已实现，其余 Phase 2 |
+| 第三方集成 | `integration/` | 8 | ❌ 由独立 Bot 提供 |
+| Bot 协作 | `agent/` | 6 | ✅ intent_send/receive 已实现，其余 Phase 2 |
 | 浏览器 | `browser/` | 3 | ❌ Phase 2+ |
 | 开发者 | `dev/` | 4 | ❌ Phase 2+ |
 | Skill 动态 | `skill/` | 2 | ✅ Phase 1 |
@@ -271,7 +271,7 @@ fn build_tool_registry(manifest: &AgentManifest, all_tools: Vec<Arc<dyn Tool>>) 
 | SOP 流程 | `sop/` | 5 | ❌ Phase 2+ |
 | 其他工具 | 根级 | ~14 | ❌ Phase 2+ |
 
-**Phase 1 工具策略**：内置工具仅限平台基础设施级，SaaS 集成由独立 Agent 提供（不内置）。详见 [12-tool-system.md](../design/zh/12-tool-system.md)。
+**Phase 1 工具策略**：内置工具仅限平台基础设施级，SaaS 集成由独立 Bot 提供（不内置）。详见 [12-tool-system.md](../design/zh/12-tool-system.md)。
 
 ### `ipc/transport.rs` — 传输层抽象
 

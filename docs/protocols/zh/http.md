@@ -16,8 +16,8 @@
 - [3. 接口分类总览](#3-接口分类总览)
 - [4. Gateway 原生端点（不依赖 Runtime 在线）](#4-gateway-原生端点不依赖-runtime-在线)
   - [4.1 系统与健康](#41-系统与健康)
-  - [4.2 Agent 包管理](#42-agent-包管理)
-  - [4.3 Agent 生命周期控制](#43-agent-生命周期控制)
+  - [4.2 Bot 包管理](#42-agent-包管理)
+  - [4.3 Bot 生命周期控制](#43-agent-生命周期控制)
   - [4.4 Avatar / Manifest 资源](#44-avatar--manifest-资源)
   - [4.5 LLM Provider 与 Models](#45-llm-provider-与-models)
   - [4.6 MCP 目录](#46-mcp-目录)
@@ -30,7 +30,7 @@
   - [4.13 全局资源快照（Runtime 主动拉取入口）](#413-全局资源快照runtime-主动拉取入口)
   - [4.17 Chat 执行块投影读取（ADR-106 D5/D9/D10）](#417-chat-执行块投影读取adr-106-d5d9d10)
 - [5. Gateway → Runtime 反向代理（需 Runtime 在线）](#5-gateway--runtime-反向代理需-runtime-在线)
-  - [5.1 Agent 运行时配置](#51-agent-运行时配置)
+  - [5.1 Bot 运行时配置](#51-agent-运行时配置)
   - [5.2 会话只读查询](#52-会话只读查询)
   - [5.3 附件（Attachment）](#53-附件attachment)
     - [5.3.1 `POST /sessions/{sid}/files`](#531-post-sessionssidfiles)
@@ -122,7 +122,7 @@ sequenceDiagram
 | MQTT 事件流（后端 → 前端上报） | rumqttd Broker 中转 | 是（Runtime 发布事件，前端订阅） |
 | 全局资源主动拉取（`GET /api/global-resources`） | Gateway 单点响应 Runtime 主动拉取 | **否**（见 [§4.13](#413-全局资源快照runtime-主动拉取入口)） |
 
-Gateway **不持久化业务数据**：Skill、Agent 运行时配置、Session 状态等真实数据存于
+Gateway **不持久化业务数据**：Skill、Bot 运行时配置、Session 状态等真实数据存于
 Runtime 本地文件 / SQLite；ADR-101 之后记忆另属于独立进程 `acowork-memory`（每实例一库，
 Gateway 只负责它的生命周期与反代）。Gateway 通过 HTTP 反向代理拉取快照、透传用户操作（并注入身份），
 命令 / 写入则通过 MQTT 控制主题，MQTT 同时承担 Runtime / Gateway → 前端的事件上报。
@@ -150,7 +150,7 @@ Gateway 只负责它的生命周期与反代）。Gateway 通过 HTTP 反向代�
 
 ## 4. Gateway 原生端点（不依赖 Runtime 在线）
 
-Gateway 直接处理、不需要 Runtime 子进程在线的端点。涵盖：系统健康、Agent 包管理、
+Gateway 直接处理、不需要 Runtime 子进程在线的端点。涵盖：系统健康、Bot 包管理、
 LLM Provider / Models 全局资源、MCP 目录、嵌入模型、用户档案、Cron、Skill、调试工具。
 
 ### 4.1 系统与健康
@@ -158,11 +158,11 @@ LLM Provider / Models 全局资源、MCP 目录、嵌入模型、用户档案、
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/health` | 健康检查（无鉴权），含 IPC（MQTT）/ CronStore / 磁盘空间 |
-| GET | `/api/status` | 系统状态：版本、运行中 Agent 数、内存占用；`auth_mode`（`local` / `multi_user`）+ `registration_open`（非 admin 能否建号，账号系统未启用时恒 `false`）；`mqtt.auth_enabled` 开启时额外返回 `mqtt_username` / `mqtt_password`（Desktop MQTT 凭据下发，ADR-055 Phase 5a）。**免认证可读** |
+| GET | `/api/status` | 系统状态：版本、运行中 Bot 数、内存占用；`auth_mode`（`local` / `multi_user`）+ `registration_open`（非 admin 能否建号，账号系统未启用时恒 `false`）；`mqtt.auth_enabled` 开启时额外返回 `mqtt_username` / `mqtt_password`（Desktop MQTT 凭据下发，ADR-055 Phase 5a）。**免认证可读** |
 | GET | `/api/config` | 读取 Gateway 配置 |
 | PUT | `/api/config` | 更新日志级别、日志切分、idle_timeout、默认 provider/model、HF mirror 等（**不含** `[security]` 段——见下） |
 | DELETE | `/api/logs` | 清空日志 |
-| GET | `/api/agents/{id}/lsp-endpoint` | LSP Relay 端点（node-local，ADR-055 §6.7）：按 agent 解析宿主 Node 的 relay base URL（`endpoint`/`ready` 字段），供 Desktop / Runtime 直连 |
+| GET | `/api/agents/{id}/lsp-endpoint` | LSP Relay 端点（node-local，ADR-055 §6.7）：按 bot 解析宿主 Node 的 relay base URL（`endpoint`/`ready` 字段），供 Desktop / Runtime 直连 |
 
 #### 4.1.1 对端 IP 白名单（安全兜底，`[security].allowed_node_ips`）
 
@@ -195,7 +195,7 @@ ACOWORK_GATEWAY_ALLOWED_NODE_IPS="192.168.1.20,192.168.1.0/24"
 > [ADR-055 §6.8](../adr/zh/ADR-055-remote-runtime-node-topology.md) 与
 > [runbook `single-machine-remote-topology.md`](../runbooks/single-machine-remote-topology.md)。
 
-### 4.2 Agent 包管理
+### 4.2 Bot 包管理
 
 包级 CRUD 与发布。包安装到 `<packages_dir>`，Gateway 在 `installed_agents` 中维护清单。
 
@@ -203,22 +203,22 @@ ACOWORK_GATEWAY_ALLOWED_NODE_IPS="192.168.1.20,192.168.1.0/24"
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/api/agents` | 列出全部已安装 Agent（含 status、avatar、mqtt_online 等） |
-| GET | `/api/agents/{id}` | Agent 详情（manifest、installed/connected/dev_mode 等） |
-| DELETE | `/api/agents/{id}` | 卸载 Agent |
-| POST | `/api/agents/install` | 安装 `.agent` 包（multipart：`package` + **必填** `node_id`；ADR-113） |
-| POST | `/api/agents/{id}/clone` | 克隆 Agent（skeleton 或 full） |
+| GET | `/api/agents` | 列出全部已安装 Bot（含 status、avatar、mqtt_online 等） |
+| GET | `/api/agents/{id}` | Bot 详情（manifest、installed/connected/dev_mode 等） |
+| DELETE | `/api/agents/{id}` | 卸载 Bot |
+| POST | `/api/agents/install` | 安装 `.bot` 包（multipart：`package` + **必填** `node_id`；ADR-113） |
+| POST | `/api/agents/{id}/clone` | 克隆 Bot（skeleton 或 full） |
 | POST | `/api/agents/{id}/publish/prepare` | 准备打包（校验、清理） |
-| POST | `/api/agents/{id}/publish/build` | 构建 `.agent` 包 |
+| POST | `/api/agents/{id}/publish/build` | 构建 `.bot` 包 |
 | POST | `/api/agents/{id}/publish/export` | 导出包到目标路径 |
 | POST | `/api/agents/{id}/publish/install-locally` | 安装构建产物；JSON body 的 `node_id` **必填**（ADR-113，名称里的 "locally" 仅指产物来源，不表示默认落点是本机节点） |
-| GET | `/api/packages/{agent_id}/download` | 下载 `.agent` 包（Node install 拉取路径）；开启鉴权时校验 `X-ACowork-Node-Token`（ADR-055 Phase 5a）：缺失/不匹配 → 401/403 |
+| GET | `/api/packages/{agent_id}/download` | 下载 `.bot` 包（Node install 拉取路径）；开启鉴权时校验 `X-ACowork-Node-Token`（ADR-055 Phase 5a）：缺失/不匹配 → 401/403 |
 
 > **ADR-113 契约**：`POST /api/agents/install`、`POST /api/agents/ensure` 与 `POST /api/agents/{id}/publish/install-locally` 都要求显式 `node_id`。Gateway **不会**依据本机 hostname、进程启动者标记或 `local_node.json` 推断默认落点；缺失或空白 → `400 missing required field: 'node_id'`。调用方先从 `GET /api/nodes` 取可用节点（`online` + `control_ready !== false` + `can_manage !== false`）；最终就绪门禁仍是 Gateway 的 `ensure_node_ready()`（结构化 `dependency_not_ready`）。没有可用节点是合法的空状态，不是 409。
 
 `GET /api/nodes` 的 `control_ready` 是**三态**：接入 bootstrap readiness registry 时为 `true` / `false`；未接入时（MQTT 关闭 / 精简 server）该字段**不出现**。缺失表示「就绪状态未知」，与 ADR-113 之前的 Gateway 等价，因为该配置下 `ensure_node_ready()` 是 fail-open。调用方不得把缺失值强制转成 `false`。
 
-### 4.3 Agent 生命周期控制
+### 4.3 Bot 生命周期控制
 
 子进程级控制：start / stop / restart-debug / 模型与搜索 provider 探测。
 **模型与 provider 的切换是 per-session 配置**，走 HTTP `PUT /api/agents/{id}/sessions/{sid}/config`
@@ -226,25 +226,25 @@ ACOWORK_GATEWAY_ALLOWED_NODE_IPS="192.168.1.20,192.168.1.0/24"
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| POST | `/api/agents/{id}/start` | 启动 Agent Runtime 子进程 |
-| POST | `/api/agents/{id}/stop` | 停止 Agent |
+| POST | `/api/agents/{id}/start` | 启动 Bot Runtime 子进程 |
+| POST | `/api/agents/{id}/stop` | 停止 Bot |
 | POST | `/api/agents/{id}/restart-debug` | 重启为 debug 模式（开启 Debug 通道） |
 | GET | `/api/agents/{id}/model` | 当前使用的模型 / provider（Gateway 从 manifest 推导） |
 
 ### 4.4 Avatar / Manifest 资源
 
-Gateway 缓存了 avatar 资源（即便 Agent 停止也能读取）；通过 MQTT `AgentHello` 同步。
+Gateway 缓存了 avatar 资源（即便 Bot 停止也能读取）；通过 MQTT `AgentHello` 同步。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/api/agents/{id}/avatar` | 取 Agent 包内置头像图片 |
+| GET | `/api/agents/{id}/avatar` | 取 Bot 包内置头像图片 |
 | POST | `/api/agents/{id}/manifest/avatar` | 上传/更新 manifest 头像 |
 | POST | `/api/agents/{id}/manifest/file` | 上传 manifest 资源文件 |
 | GET | `/api/agents/{id}/manifest/avatar-assets` | 列出 manifest 头像资源 |
 | GET | `/api/agents/{id}/avatar-file` | 取 avatar 资源文件 |
 | DELETE | `/api/agents/{id}/avatar-file` | 删除 avatar 资源 |
 | GET | `/api/agents/{id}/avatar-config` | 取 avatar 运行时配置（Gateway 缓存） |
-| PUT | `/api/agents/{id}/avatar-config` | 更新 avatar 配置（仅当 Agent 停止时生效） |
+| PUT | `/api/agents/{id}/avatar-config` | 更新 avatar 配置（仅当 Bot 停止时生效） |
 
 ### 4.5 LLM Provider 与 Models
 
@@ -291,7 +291,7 @@ Gateway 缓存了 avatar 资源（即便 Agent 停止也能读取）；通过 MQ
 
 ### 4.8 用户与用户级 Avatar
 
-全局用户档案（独立于 Agent）。
+全局用户档案（独立于 Bot）。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
@@ -312,7 +312,7 @@ Cron 由 Gateway 自管（持久化于 SQLite）。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/api/agents/{id}/cron` | 列出 Agent 的定时任务 |
+| GET | `/api/agents/{id}/cron` | 列出 Bot 的定时任务 |
 | POST | `/api/agents/{id}/cron` | 注册新定时任务（schedule + action + params） |
 | DELETE | `/api/agents/{id}/cron/{cron_id}` | 删除定时任务 |
 
@@ -357,12 +357,12 @@ Cron 由 Gateway 自管（持久化于 SQLite）。
 
 **为什么需要这个端点（修复 Bug B）**
 
-Bug B：清除 `.acowork` 重新走引导后，第一次与 system agent 聊天报
+Bug B：清除 `.acowork` 重新走引导后，第一次与 system bot 聊天报
 “unexpected error”，后续聊天正常。根因：
 
 1. Gateway 在 vault 刚解锁但 provider 还未添加时，立刻 publish 空
    `AvailableProviders`（`provider_count=0, api_key_lengths=[]`）。
-2. system agent ~150 ms 后启动，订阅 `acowork/global/providers`，接收
+2. system bot ~150 ms 后启动，订阅 `acowork/global/providers`，接收
    retained → cached 空快照。
 3. Desktop ~19s 后才完成 onboarding、新增 provider，Gateway 重新 publish
    带 key 的快照。
@@ -577,16 +577,16 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 
 #### 4.16.1 `POST /api/intents/task-dispatch`
 
-把一条 PM 任务派发到项目群聊并唤醒目标 agent 的执行会话（设计 27 §5.4.2）。请求体：
+把一条 PM 任务派发到项目群聊并唤醒目标 bot 的执行会话（设计 27 §5.4.2）。请求体：
 
 | 字段 | 必需 | 说明 |
 |---|---|---|
 | `project_id` / `task_id` | 是 | 任务坐标；`conversation_id` 由 Gateway 用 `task:{project}:{task}` 常量函数铸造 |
-| `target_agent` | 是 | 目标 agent instance id（ADR-073 UUID） |
+| `target_agent` | 是 | 目标 bot instance id（ADR-073 UUID） |
 | `owner` | 是 | 派发人（项目 owner），chat 行的 `from` |
 | `title` | 否 | 任务标题（群聊 ensure 用） |
 | `message` | 是 | **人读文本**（标题+描述）：进群聊 chat 行正文与信封 `params.message` |
-| `assignment_brief` | 否 | **高信任信封字段**（claim→work→submit playbook）：只进 Runtime 执行会话系统块，不落任何聊天表面；agent 来源的 params 携带该键会被 Gateway 出口剥离（ADR-102） |
+| `assignment_brief` | 否 | **高信任信封字段**（claim→work→submit playbook）：只进 Runtime 执行会话系统块，不落任何聊天表面；bot 来源的 params 携带该键会被 Gateway 出口剥离（ADR-102） |
 | `chat_session_id` | 否 | 项目群聊会话；缺省时幂等 ensure |
 | `message_id` | 否 | **调用方提供的派发代次身份**。PM 扫描器首试前落盘、重试重放同一 id → chat 行按 `meta.message_id` 去重、信箱预算按同 id 去重（每代次各占一份）。缺省 → Gateway 现铸（每次调用一行，无重试幂等） |
 
@@ -606,11 +606,11 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 必然吃满这 5s，混版舰队每次派发都付这笔时延。调用方预算：本端点最坏耗时为唤醒上限 `INTENT_DEFAULT`（30s）
 加回执等待 `INTENT_ACCEPT`，PM 客户端对 `dispatch_task` 单独设 40s 请求超时——不得用默认短超时截断它，
 否则首笔发布仍在服务端进行时客户端已用同一 `message_id` 重投，造成重复投递。本端点是唯一等待回执的
-调用方——通用 `/api/intents` 只记录事实、不等待，agent 间投递不因此增加延迟。
+调用方——通用 `/api/intents` 只记录事实、不等待，bot 间投递不因此增加延迟。
 
 #### 4.16.2 `POST /api/intents/task-close`
 
-任务进入终态（Done / Rejected / Cancelled）时结束目标 agent 对该任务的逻辑执行上下文。请求体 `{project_id, task_id, target_agent}`（任一为空 → 400；需内部服务 token）；Gateway 把 `conv:task:{project}:{task}` 路由键转发给目标 Runtime 的 `/intent-context/close`。幂等，Runtime 不可达时如实报告不重试（下次派发自愈死映射）。响应 `{ "status": "closed | skipped | failed", "key": "conv:task:…", "reason" | "error": … }`（`skipped` = agent 未在运行，无需关闭）。
+任务进入终态（Done / Rejected / Cancelled）时结束目标 bot 对该任务的逻辑执行上下文。请求体 `{project_id, task_id, target_agent}`（任一为空 → 400；需内部服务 token）；Gateway 把 `conv:task:{project}:{task}` 路由键转发给目标 Runtime 的 `/intent-context/close`。幂等，Runtime 不可达时如实报告不重试（下次派发自愈死映射）。响应 `{ "status": "closed | skipped | failed", "key": "conv:task:…", "reason" | "error": … }`（`skipped` = bot 未在运行，无需关闭）。
 
 #### 4.16.3 PM 任务资源新增字段（acowork-pm REST，字段真源在设计 27 §5.4.2）
 
@@ -692,7 +692,7 @@ token 又会让前端为它编造一行。
 - **`unreachable` ≠ 进行中**。把 outage 渲染成"还在跑"，等于让一个已经停掉的节点改写"发生了什么"。
   块显示进行中的唯一 durable 判据是实时投影报 `terminal=false`；缓存里不可能出现 `terminal=false`（见下）。
 - **三道权限墙**：① 引用行是否可见 = chat 参与者，由 acowork-user 用与转录同一条隐藏 404 规则裁决
-  （非参与者 → 本端点 404，不是 403，也不绕开它去回源）；② 回源用的是 agent 反代同一套 scope 注入
+  （非参与者 → 本端点 404，不是 403，也不绕开它去回源）；② 回源用的是 bot 反代同一套 scope 注入
   （`x-user-id` + 由 token 派生的 chat 成员集合，**永不信任请求头里的 chat 范围**），Runtime 侧仍跑
   `authorize_read`（[§5.7](#57-轮次投影读取adr-106-d4)）；③ **绑定守卫**——Runtime 在每份投影上盖该执行
   会话自己的 `chat_session_id`（取自磁盘上的会话 meta，不受请求头影响），Gateway 只呈现、只缓存绑定
@@ -762,17 +762,17 @@ Gateway 不解析 Runtime 响应的 body，所有读写都 verbatim 透传。这
 **workspace config / session state 的权威所有者**，Gateway 仅充当反代。（记忆不在此列：
 ADR-101 之后它是 `acowork-memory` 的私有数据，见 [§5.4](#54-记忆-memory)。）
 
-### 5.1 Agent 运行时配置
+### 5.1 Bot 运行时配置
 
 | 方法 | 路径 | 用途 | Runtime 路径 |
 |---|---|---|---|
-| GET | `/api/agents/{id}/config` | 读取 Agent 合并后配置 | `/agents/{id}/config` |
-| PUT | `/api/agents/{id}/config` | 更新 Agent 配置（max_output_tokens、temperature、prompt、avatar…） | `/agents/{id}/config` |
+| GET | `/api/agents/{id}/config` | 读取 Bot 合并后配置 | `/agents/{id}/config` |
+| PUT | `/api/agents/{id}/config` | 更新 Bot 配置（max_output_tokens、temperature、prompt、avatar…） | `/agents/{id}/config` |
 | GET | `/api/agents/{id}/tools` | 读取内置工具启用列表 | `/agents/{id}/tools` |
 | GET | `/api/agents/{id}/builtin-tools` | 读取 builtin-tools 启用列表 | `/agents/{id}/builtin-tools` |
 | PUT | `/api/agents/{id}/builtin-tools` | 写入 builtin-tools 启用列表 | `/agents/{id}/builtin-tools` |
 | GET | `/api/agents/{id}/status` | Runtime 视角的状态（累计 token、loop 状态等） | `/agents/{id}/status` |
-| GET | `/api/agents/{id}/mcp-servers` | 读取 Agent 的 MCP 服务配置 | `/agents/{id}/mcp-servers` |
+| GET | `/api/agents/{id}/mcp-servers` | 读取 Bot 的 MCP 服务配置 | `/agents/{id}/mcp-servers` |
 | PUT | `/api/agents/{id}/mcp-servers` | 写入 MCP 服务配置 | `/agents/{id}/mcp-servers` |
 | GET | `/api/agents/{id}/providers` | 读取 Runtime 端的 Provider 列表（MQTT 同步后的实际数据） | `/agents/{id}/providers` |
 
@@ -852,7 +852,7 @@ Gateway 必须鉴权，Runtime 必须校验 owner。ADR-076 §决策 4 把**所�
 > ——前端在 `can_write === false` 时根本不发 `POST .../open`（见 §5.2 的只读会话说明）。
 > 若让观众激活，就会造出一个"观众无权关（`close` 是写授权，旁观者不能拆掉 owner 的会话）、
 > owner 也不知道被谁占着"的常驻会话：生命周期失去责任人，而 Runtime 目前**没有** per-session
-> GC（`evict_idle_sessions` 无调用者，只有 agent 级自动休眠），回收它需要观察者引用计数。
+> GC（`evict_idle_sessions` 无调用者，只有 bot 级自动休眠），回收它需要观察者引用计数。
 >
 > **公开会话的只读表现**：非 owner 打开他人 public 会话时，`GET /sessions` 下发的
 > `can_write: false` 驱动前端禁用输入框与模型 / 工作区 / 可见性开关，并在 `openSession` /
@@ -878,7 +878,7 @@ Gateway 必须鉴权，Runtime 必须校验 owner。ADR-076 §决策 4 把**所�
 | POST | `/api/agents/{id}/sessions/{sid}/answer` | 回答 `ask_user_question`（原 mqtt `question_answer`） | `/sessions/{sid}/answer` | owner |
 | POST | `/api/agents/{id}/sessions/{sid}/cancel-tool` | 取消单个在跑工具（原 mqtt `cancel_tool`，ADR-045） | `/sessions/{sid}/cancel-tool` | owner |
 | POST | `/api/agents/{id}/sessions/{sid}/compress` | 上下文压缩（原 mqtt `compress_action`；`compact_context` 是重复命令，一并删除） | `/sessions/{sid}/compress` | owner |
-| GET | `/api/agents/{id}/sessions/{sid}/tool-policy` | 读本会话的工具收窄（`null` = 跟随 Agent 层；ADR-109，**非** MQTT 迁移项） | `/sessions/{sid}/tool-policy` | 读授权 |
+| GET | `/api/agents/{id}/sessions/{sid}/tool-policy` | 读本会话的工具收窄（`null` = 跟随 Bot 层；ADR-109，**非** MQTT 迁移项） | `/sessions/{sid}/tool-policy` | 读授权 |
 | PUT | `/api/agents/{id}/sessions/{sid}/tool-policy` | 写本会话的工具收窄（整体替换；ADR-109，**非** MQTT 迁移项） | `/sessions/{sid}/tool-policy` | 写授权 |
 
 **动作请求体**（字段与 Runtime handler 一一对应；除注明外均可省略）：
@@ -947,7 +947,7 @@ Gateway 必须鉴权，Runtime 必须校验 owner。ADR-076 §决策 4 把**所�
 - **无主会话**（`user_id` 为空）：按标志分两种。
   - `None` / `"public"` = 公开（ADR-076 之前的数据，或 `local` 模式）。这既是 opt-out 而非 opt-in 的理由
     ——升级不能把历史会话追溯隐藏——也是 `local` 模式零改动的保证。
-  - `"private"` = **无人认领**：除 admin 外不可读、不可写。agent 冷启动时自动创建的那个会话就是这种
+  - `"private"` = **无人认领**：除 admin 外不可读、不可写。bot 冷启动时自动创建的那个会话就是这种
     （它诞生在任何账号开口之前，没有 owner 可以归属），标为私有以免被当成"全公司共享会话"交给每个账号。
 
 `PUT /sessions/{sid}/visibility` 对**无主**会话只认 admin（`403`）：谁能被允许"重新共享"一个没有主人的会话，比"谁能改它"更窄。
@@ -976,16 +976,16 @@ Tauri 的命令名映射表也一并删除 —— 也就是说这不是"发出�
 
 #### 5.6.3 工具收窄：per-session 覆盖 per-agent
 
-工具开关有两层，**方向是单向的**：Agent 层（`agent-tools.json` / `agent-mcp.json`，右侧设置面板编辑）
-决定这个 Agent 有哪些内置工具、哪些 MCP server / tool 可用；会话层只能**从这层里拿掉**，不能加回来。
-理由是可组合性：若能加宽，同一个 Agent 的会话就会各自持有工具集，Agent 级的审批/风险规则与
+工具开关有两层，**方向是单向的**：Bot 层（`agent-tools.json` / `agent-mcp.json`，右侧设置面板编辑）
+决定这个 Bot 有哪些内置工具、哪些 MCP server / tool 可用；会话层只能**从这层里拿掉**，不能加回来。
+理由是可组合性：若能加宽，同一个 Bot 的会话就会各自持有工具集，Bot 级的审批/风险规则与
 `agent-mcp.json` 的连接生命周期（server 未启用时其 tool 根本没有 wrapper）都会失效。
 
 - **新会话默认继承**：Meta 的 `tool_policy` 列为 `NULL`，任何工具开关一次都没动过就一直是 `NULL`——
   "只有改过才写"是数据模型层面的事实，不是前端的约定。
 - **两层互不影响**：per-session 的改动只作用于**这一个** session（含它后续每一轮），与 per-agent 的
   配置值互不覆盖；而 per-agent 的值继续是**下一个新建 session 的默认值**。所以右侧设置面板与 `+` 菜单
-  同时显示不同的值是正常的——面板描述 Agent 层，会话层只在它之下做减法。
+  同时显示不同的值是正常的——面板描述 Bot 层，会话层只在它之下做减法。
 - **写整份策略，不做逐项 toggle**：请求体是完整替换，重放同一请求不会叠加；这也让 UI 的乐观更新
   与服务端回显一一对应。
 - **三组拒绝列表各自独立重置**：把 MCP server 恢复默认不会连带把用户关掉的内置工具打开。
@@ -1123,8 +1123,8 @@ RAG 不属记忆面，仍由 Runtime 持有：
 | 方法 | 路径 | 调用方 | 服务路径 |
 |---|---|---|---|
 | GET | `/api/memory/search?instance_id={id}` | Desktop 全局搜索 memory tab | `/memory/search` |
-| POST | `/api/memory/mcp` | Agent Runtime（MCP 工具调用） | `/mcp` |
-| POST | `/api/memory/admin/bootstrap?instance_id={id}` | Agent Runtime 首启动引导（写入入口 D） | `/admin/bootstrap` |
+| POST | `/api/memory/mcp` | Bot Runtime（MCP 工具调用） | `/mcp` |
+| POST | `/api/memory/admin/bootstrap?instance_id={id}` | Bot Runtime 首启动引导（写入入口 D） | `/admin/bootstrap` |
 | POST | `/api/memory/admin/import?instance_id={id}` | **仅 Node**：遗留库一次性交接（ADR-101 决策 10） | `/admin/import` |
 
 映射与闸门规则：
@@ -1167,7 +1167,7 @@ RAG 不属记忆面，仍由 Runtime 持有：
 
 ### 5.6 包级 LLM Prompt 覆盖 (Prompts)
 
-> **ADR-063**：agent 包可声明 9 个 LLM prompt override 文件（`prompts/<name>.md`），由
+> **ADR-063**：bot 包可声明 9 个 LLM prompt override 文件（`prompts/<name>.md`），由
 > Runtime 在 Phase A（`agent_init`）一次性加载到 `AgentBootContext`，Phase B（`session_init`）
 > 注入到 `AgentCore`，运行时调用点通过 `Arc<RwLock<Option<String>>>` accessor 读取。
 > Debug 面板可列出/编辑/保存/重载 — 重载端点走 `/debug/{*rest}` wildcard，由 R7（ADR-048 §D8）
@@ -1268,7 +1268,7 @@ RAG 不属记忆面，仍由 Runtime 持有：
 > [`core/acowork-runtime/src/http/server.rs`](../../../core/acowork-runtime/src/http/server.rs)，
 > Gateway 侧仍是 [`core/acowork-gateway/src/http/proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs)
 > 的透明反代。**没有独立端点**：第二级要回答的是"这个人在这个 chat 里能把一句话投给哪些执行
-> 会话"，它与"这个 agent 的会话列表"是同一个问题的两次问法——再造一个端点只会得到两份会各自
+> 会话"，它与"这个 bot 的会话列表"是同一个问题的两次问法——再造一个端点只会得到两份会各自
 > 漂移的答案。
 
 | 方法 | Runtime 路径 | 用途 | 权限 |
@@ -1280,8 +1280,8 @@ RAG 不属记忆面，仍由 Runtime 持有：
 约定：
 
 - **过滤就是权限**：权限集合直接复用 Router 的候选规则（1:1 只列绑定本 chat +
-  本人手起；群只列"我发起的"；跨 kind 互斥；agent 发起的会话其 `initiator` 是实例 UUID，永远不等于人的账号 id，
-  所以 agent↔agent 的运行不会出现在人的列表里）。
+  本人手起；群只列"我发起的"；跨 kind 互斥；bot 发起的会话其 `initiator` 是实例 UUID，永远不等于人的账号 id，
+  所以 bot↔bot 的运行不会出现在人的列表里）。
   让 picker 自己算一遍，就等于让一个界面端出 router 本会拒绝的会话。
 - **过滤在分页之前**：`total_count` / `total_pages` 只数本 chat 可寻址的行，所以**分页就是窗口**——
   原候选端点上的 20 条上限与 7 天新鲜度判定随端点一起删除，人往回翻多远就翻多远；排序仍是
@@ -1306,7 +1306,7 @@ RAG 不属记忆面，仍由 Runtime 持有：
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `agent_instance_id` | 是 | 必须是本消息的投递目标之一（材料随人所点的 agent 走，从不递给旁观者） |
+| `agent_instance_id` | 是 | 必须是本消息的投递目标之一（材料随人所点的 bot 走，从不递给旁观者） |
 | `session_id` | 是 | picker 候选列表给出的执行会话 id；服务端按 Runtime 字符集（`[A-Za-z0-9_-]`，≤ 128 字节）复校 |
 | `round_id` | 否 | 仅寻址卡应答的重投递回带（原行已钉好）；缺省 = Gateway 现在钉。**带 `round_id` 的 echo 可与卡应答的 `target_sessions` 并存**（它是「同一句已写话的事实回声」，非新投递指令） |
 | `terminal` | 否 | 与 `round_id` 一起回带，标记被钉轮是否已终态 |
@@ -1316,7 +1316,7 @@ RAG 不属记忆面，仍由 Runtime 持有：
 
 纪律（**行不落库优先**）：
 
-- `refs` 超过 5 条（`MAX_CHAT_REFS`）→ 400；ref 的 agent 非本消息目标、空 / 路径形 `session_id`、空 `round_id`、**fresh** ref 的同一 agent 既 `target_sessions` 投递又带 `refs`、重复 `(agent, session)` → 400。**唯「投递与引用同一 agent」的矛盾只判 fresh**：预钉 echo（带 `round_id`，即卡应答的重投递）可与 `target_sessions` 并存，因为它是已写句子的回声，不是新投递指令。`force_new_for` + `refs` **不矛盾**：新任务 + 引用某轮是一句连贯指令（引用不像地址，它不决定这句话去哪）。
+- `refs` 超过 5 条（`MAX_CHAT_REFS`）→ 400；ref 的 bot 非本消息目标、空 / 路径形 `session_id`、空 `round_id`、**fresh** ref 的同一 bot 既 `target_sessions` 投递又带 `refs`、重复 `(bot, session)` → 400。**唯「投递与引用同一 bot」的矛盾只判 fresh**：预钉 echo（带 `round_id`，即卡应答的重投递）可与 `target_sessions` 并存，因为它是已写句子的回声，不是新投递指令。`force_new_for` + `refs` **不矛盾**：新任务 + 引用某轮是一句连贯指令（引用不像地址，它不决定这句话去哪）。
 - 钉轮读失败：**行不落库**、前端保草稿。Runtime 答 `404`（会话不存在 / 不可读）→ `400`；Runtime / 节点不可达等其余 → `502`；侧表 `latest: null`（无轮可引）→ `400`。
 - **带 `refs` 的消息跳过级别 3 续投分支**（引用已是明确材料，不再让模型猜归属）。
 - **命名歧义须知**：`meta.refs`（chat 材料坐标，本节）、`context_refs`（ADR-107 参照 part 通道）、chat-block `refs`（D4 块投影读取的 `instance|session|r:round` 三元组）是三个不同层的东西，实现与文档中不得互混。
@@ -1333,7 +1333,7 @@ RAG 不属记忆面，仍由 Runtime 持有：
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/workspace-files/{agent_id}/{workspace_id}/{*path}` | workspace 任意文件直链，按 `workspace_id` 解析绝对路径 |
-| GET | `/ws-files/{agent_id}/{*path}` | Agent home 直链（无 workspace_id） |
+| GET | `/ws-files/{agent_id}/{*path}` | Bot home 直链（无 workspace_id） |
 
 > 两个路径名是历史命名，保留不变。
 
@@ -1390,8 +1390,8 @@ RAG 不属记忆面，仍由 Runtime 持有：
 | 400 | 参数校验失败、content 过长、id 格式不合法 |
 | 401 | Bearer token 缺失或错误 |
 | 403 | 对端 IP 不在 `[security].allowed_node_ips`（白名单拦截，§4.1.1）；或 Node token 校验不匹配（`X-Error-Origin: node`） |
-| 404 | Agent / 资源不存在 |
-| 409 | 状态冲突：Agent 未运行、未安装 |
+| 404 | Bot / 资源不存在 |
+| 409 | 状态冲突：Bot 未运行、未安装 |
 | 500 | Gateway 内部错误 |
 | 502 / 503 | MQTT / 反向代理通道不可用，Runtime 未连接（**反代端点专属**） |
 | 504 | Gateway → Runtime 请求超时 |
@@ -1400,7 +1400,7 @@ RAG 不属记忆面，仍由 Runtime 持有：
 
 ## 9. 典型请求示例
 
-### 9.1 安装 Agent（Gateway 原生）
+### 9.1 安装 Bot（Gateway 原生）
 
 ```http
 POST /api/agents/install HTTP/1.1
@@ -1421,7 +1421,7 @@ Content-Disposition: form-data; name="node_id"
 
 缺 `node_id` → `400`；目标节点不在线 / 控制面未 `NodeReady` → 由 `ensure_node_ready()` 返回结构化 `dependency_not_ready`。
 
-### 9.2 启动 Agent 并发送消息（HTTP）
+### 9.2 启动 Bot 并发送消息（HTTP）
 
 ```http
 POST /api/agents/{id}/start HTTP/1.1
@@ -1609,7 +1609,7 @@ embedding provider 未初始化、或 distiller 被禁用）· `500` 跑失败 �
 
 ### 9.5.2 遗留记忆库交接（仅 Node → 记忆服务）
 
-ADR-101 决策 10：ADR-101 之前每个 Agent 工作区里的 `{workspace}/memory/private.sqlite`
+ADR-101 决策 10：ADR-101 之前每个 Bot 工作区里的 `{workspace}/memory/private.sqlite`
 由 **`acowork-node` 单方面**交给服务——Node 是 node-local 文件系统的拥有者（ADR-055），
 Runtime 与 Gateway 都不参与。
 
@@ -1774,7 +1774,7 @@ if body["instance_id"] != cache.bootstrap_instance_id().unwrap_or("") {
 
 ## 10. 注意事项
 
-1. **Gateway 不持久化业务数据**：Skill、Agent 运行时配置、Session 状态等真实数据
+1. **Gateway 不持久化业务数据**：Skill、Bot 运行时配置、Session 状态等真实数据
    存于 Runtime 本地文件 / SQLite，记忆则存于独立进程 `acowork-memory` 的每实例库
    （ADR-101）；Gateway 通过 HTTP 反向代理拉取快照或透传请求。
 2. **反代端点要求后端在线**：Runtime 未注册 / 已退出时返回 503；MQTT 通道

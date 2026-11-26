@@ -38,7 +38,7 @@
 
 ## 2. Data Flow and Communication
 
-### 2.1 Agent Startup Flow (Data Perspective)
+### 2.1 Bot Startup Flow (Data Perspective)
 
 ```
 Gateway CLI: "start com.example.weather"
@@ -56,7 +56,7 @@ Gateway CLI: "start com.example.weather"
                --workspace, --identity (JSON), --dev-mode
 ```
 
-### 2.2 Agent Main Loop (Data Perspective)
+### 2.2 Bot Main Loop (Data Perspective)
 
 ```
 Agent Runtime process startup
@@ -114,11 +114,11 @@ Calendar Agent ← GatewayResponse::IntentReceived
 
 | Binary | Source Crate | Description |
 |--------|--------------|-------------|
-| `agent-runtime` | acowork-runtime | Agent unified execution engine |
+| `agent-runtime` | acowork-runtime | Bot unified execution engine |
 | `acowork-gateway` | acowork-gateway | Gateway daemon |
 | `acowork-keygen` | acowork-sign | Key pair generation |
-| `acowork-sign` | acowork-sign | .agent package sign |
-| `acowork-verify` | acowork-sign | .agent package verify |
+| `acowork-sign` | acowork-sign | .bot package sign |
+| `acowork-verify` | acowork-sign | .bot package verify |
 | `acowork` | (CLI wrapper) | Unified CLI entry (aggregating subcommands) |
 
 **Unified CLI Design** (Phase 5, Phase 1 uses independent binaries):
@@ -149,7 +149,7 @@ acowork verify weather.agent
 | Unit tests | each crate `src/` `#[cfg(test)]` | Each trait implementation has tests |
 | Component tests | `tests/` per crate | Single-crate integration tests |
 | Integration tests | workspace root `tests/` | Cross-crate tests: Gateway + Runtime interaction |
-| System tests | workspace root `tests/` | Complete flow: install Agent → start → conversation → tool call → stop |
+| System tests | workspace root `tests/` | Complete flow: install Bot → start → conversation → tool call → stop |
 | Live tests | manual | End-to-end tests connecting to real LLM API |
 
 ---

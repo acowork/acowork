@@ -103,7 +103,7 @@ impl Vault {
 | `failover` | 优先使用 index 0，失败后切 index 1 | 主备模式 |
 | `least_recent` | 选择最近最少使用的 Key | 避免单个 Key 频繁触发限流 |
 
-**Key 健康检查：** Agent Runtime 上报用量时附带错误信息（如 429/401）。Gateway 更新 meta.json 中的 `error_count` 和 `rate_limited_until`。Key 分发时跳过 `status = "suspended"` 或仍在 rate limit 冷却期的 Key。
+**Key 健康检查：** Bot Runtime 上报用量时附带错误信息（如 429/401）。Gateway 更新 meta.json 中的 `error_count` 和 `rate_limited_until`。Key 分发时跳过 `status = "suspended"` 或仍在 rate limit 冷却期的 Key。
 
 **Vault API 扩展：**
 
@@ -125,7 +125,7 @@ impl Vault {
 
 ---
 
-## acowork-sign — .agent 包签名/验签
+## acowork-sign — .bot 包签名/验签
 
 **定位**：独立的签名工具链，提供 `acowork-keygen`、`acowork-sign`、`acowork-verify` 三个命令。
 

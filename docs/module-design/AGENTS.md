@@ -13,7 +13,7 @@ module-design/
 ├── zh/                       # 中文规格文档（源语言）
 │   ├── 00-overview.md        # Workspace layout, Cargo.toml deps, crate list
 │   ├── 01-core.md            # acowork-core: shared types, protocol, traits
-│   ├── 02-runtime.md         # acowork-runtime: Agent Runtime binary
+│   ├── 02-runtime.md         # acowork-runtime: Bot Runtime binary
 │   ├── 03-gateway.md         # acowork-gateway: IPC gateway, lifecycle mgmt
 │   ├── 04-sqlite.md          # acowork-sqlite: graph DB + HNSW + BM25
 │   ├── 05-vault-sign.md      # acowork-vault + acowork-sign: secrets, signing

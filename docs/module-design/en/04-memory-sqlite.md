@@ -1,4 +1,4 @@
-# acowork-memory + acowork-sqlite — Agent Private Memory Engine and Memory Service
+# acowork-memory + acowork-sqlite — Bot Private Memory Engine and Memory Service
 
 **Position**: Storage + retrieval + offline distillation of Agent-private Memory **plus the standalone service process**, described across two crates.
 
@@ -25,7 +25,7 @@
 | Lifecycle                  | Startup O(1) (no WAL replay, no BM25 rebuild) — ADR-082 §3                       |
 | Process shape              | **Standalone binary** (ADR-101): one axum router serving both REST (panel + admin) and MCP (`POST /mcp`); spawn / port-file / restart owned by the Gateway supervisor |
 | Schema evolution           | `PRAGMA user_version` + idempotent migration steps — ADR-082 D2                |
-| Isolation                  | One DB per **Agent instance**: `{data_dir}/instances/{instance_id}/memory.db`, the id being the ADR-073 immutable install-time UUID; a request without a usable id is a 4xx — there is no cross-instance code path |
+| Isolation                  | One DB per **Bot instance**: `{data_dir}/instances/{instance_id}/memory.db`, the id being the ADR-073 immutable install-time UUID; a request without a usable id is a 4xx — there is no cross-instance code path |
 
 ---
 
@@ -243,7 +243,7 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 | 10 | `sessions.intent_key` / `intent_closed` | ADR-106 D11 (the intent context a session owns, plus its terminal mark) |
 | 11 | `chat_token_usage.history_tokens` | Design 27 (router projected-history occupancy, the only figure comparable to the budget) |
 | 12 | `sessions.aware_users` | ADR-076 §Decision 4 rev. (read-only aware accounts, seeded by the Gateway for agent-to-agent intents) |
-| 13 | `sessions.tool_policy` (JSON, `NULL` = inherit the agent layer) | ADR-109 (per-session builtin-tool / MCP narrowing) |
+| 13 | `sessions.tool_policy` (JSON, `NULL` = inherit the bot layer) | ADR-109 (per-session builtin-tool / MCP narrowing) |
 
 v3 stores **sum + count**, not a folded mean: each figure divides by its own sample count. A call can be measurable for TTFT only (the Provider reported no completion count), and a shared denominator would systematically inflate the speed mean.
 
@@ -276,7 +276,7 @@ Why `open_dim_agnostic` exists: subsystems sharing the workspace `.sqlite` file 
 ### 5.2 Concurrency model
 
 - Single `Connection` with outer `Mutex`.
-- ADR-082 workload premise: **one agent per DB, zero query concurrency**; serial access is sufficient and simpler.
+- ADR-082 workload premise: **one bot per DB, zero query concurrency**; serial access is sufficient and simpler.
 - ADR-101 keeps the shape but raises the requester count: one service process serves every instance,
   so different instances run truly in parallel (one `Arc<SqliteStore>` each, held in
   `service/state.rs`'s `RwLock<HashMap<…>>`), while panel reads, MCP calls and the distill loop hitting

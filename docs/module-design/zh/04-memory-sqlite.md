@@ -1,6 +1,6 @@
-# acowork-memory + acowork-sqlite — Agent 私有记忆引擎与记忆服务
+# acowork-memory + acowork-sqlite — Bot 私有记忆引擎与记忆服务
 
-**定位**：Agent 私有 Memory 的存储 + 检索 + 离线蒸馏 + **独立服务进程** 双 crate 描述。
+**定位**：Bot 私有 Memory 的存储 + 检索 + 离线蒸馏 + **独立服务进程** 双 crate 描述。
 
 - `acowork-memory`：记忆 trait / 类型 / 离线蒸馏 / 检索质量指标 **加上** SQLite 存储引擎（`src/sqlite/`）**加上** `acowork-memory` 服务进程（`src/main.rs` + `src/service/`，ADR-101）。
 - `acowork-sqlite`：仅保留仍属 Runtime 的两个旁路子系统——会话向量索引 `ConversationStore`（ADR-081）与 `SqliteSessionMetaStore`（ADR-082 §4 step 3）；两者都挂在已打开的 `SqliteStore` 上，并 re-export 该类型。
@@ -25,7 +25,7 @@
 | 生命周期          | 启动 O(1)（无 WAL replay、无 BM25 rebuild），详见 ADR-082 §3                         |
 | 进程形态           | **独立二进制**（ADR-101）：axum 一路由同时供 REST（面板 + admin）与 MCP（`POST /mcp`）；由 Gateway supervisor spawn / 写 port-file / 重启 |
 | Schema 演进       | `PRAGMA user_version` + 幂等迁移步，详见 ADR-082 D2                                  |
-| 隔离              | 按 **Agent 实例** 一库：`{data_dir}/instances/{instance_id}/memory.db`，id 是 ADR-073 的安装期不可变 UUID；请求不带可用 id 即 4xx，不存在跨实例路径 |
+| 隔离              | 按 **Bot 实例** 一库：`{data_dir}/instances/{instance_id}/memory.db`，id 是 ADR-073 的安装期不可变 UUID；请求不带可用 id 即 4xx，不存在跨实例路径 |
 
 ---
 
@@ -240,7 +240,7 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 | 10 | `sessions.intent_key` / `intent_closed` | ADR-106 D11（会话持有的 intent 上下文与其终态标记） |
 | 11 | `chat_token_usage.history_tokens` | 设计 27（router 的投影历史占用，唯一可与预算比较的数） |
 | 12 | `sessions.aware_users` | ADR-076 §决策 4 rev.（只读知情者，由 Gateway 为 agent-to-agent intent 注入） |
-| 13 | `sessions.tool_policy`（JSON，`NULL` = 继承 Agent 层） | ADR-109（per-session 内置工具 / MCP 收窄） |
+| 13 | `sessions.tool_policy`（JSON，`NULL` = 继承 Bot 层） | ADR-109（per-session 内置工具 / MCP 收窄） |
 
 v3 存 **sum + count** 而非折叠好的均值：两个指标各自统计自己的样本数。一次调用可能只测得出 TTFT（Provider 未上报 completion 数），共用一个分母会把速度均值系统性抬高。
 
@@ -271,7 +271,7 @@ SqliteStore::open_dim_agnostic(path: impl AsRef<Path>) -> Result<Self>
 ### 5.2 并发模型
 
 - 单 `Connection`，外层 `Mutex` 保护。
-- ADR-082 工作负载前提：**一 agent 一库，零查询并发**；串行访问充分且简单。
+- ADR-082 工作负载前提：**一 bot 一库，零查询并发**；串行访问充分且简单。
 - ADR-101 保留了这层形状，但把请求方数量抬高了：一个服务进程要带所有实例，所以**不同实例之间真正
   并行**（各自一个 `Arc<SqliteStore>`，存在 `service/state.rs` 的 `RwLock<HashMap<…>>` 里），而打在
   **同一**实例上的面板读、MCP 调用与蒸馏循环在该 store 的 mutex 上串行。一库一连接的选择是故意不改的

@@ -1,6 +1,6 @@
 ﻿# acowork-gateway — Gateway
 
-**定位**：常驻系统级进程，管理 Agent 生命周期、Intent 路由、密钥分发、预算协调。**不代理 Agent 业务逻辑**。
+**定位**：常驻系统级进程，管理 Bot 生命周期、Intent 路由、密钥分发、预算协调。**不代理 Bot 业务逻辑**。
 
 ```
 crates/acowork-gateway/

@@ -7,13 +7,13 @@
 
 ## 1. Overview
 
-ACowork defines a standard HTTP query protocol. After an enterprise RAG service adapts to this protocol, it can serve as an extended retrieval channel for Agents. **ACowork does not implement a RAG engine** nor provide adapters for individual RAG implementations; instead, it requires that the enterprise side ensures its service is compatible with this protocol.
+ACowork defines a standard HTTP query protocol. After an enterprise RAG service adapts to this protocol, it can serve as an extended retrieval channel for Bots. **ACowork does not implement a RAG engine** nor provide adapters for individual RAG implementations; instead, it requires that the enterprise side ensures its service is compatible with this protocol.
 
 ### Core Principles
 
 - **Pure Integration, No Hosting**: ACowork acts as an HTTP client and does not host RAG data.
-- **Configuration-Driven Opt-In**: RAG is enabled only when the Agent manifest declares it.
-- **Graceful Degradation**: When RAG is unreachable, return empty results without blocking Agent execution.
+- **Configuration-Driven Opt-In**: RAG is enabled only when the Bot manifest declares it.
+- **Graceful Degradation**: When RAG is unreachable, return empty results without blocking Bot execution.
 - **Security First**: Endpoint must be HTTPS; authentication is managed via Vault.
 
 ---
@@ -260,7 +260,7 @@ timeout_secs = 10                       # Query timeout (seconds)
 
 ### 5.2 Required Permission Declarations
 
-An Agent using a RAG tool must declare the following permissions:
+A Bot using a RAG tool must declare the following permissions:
 
 ```toml
 [[permissions]]
@@ -438,7 +438,7 @@ Results from the automatic channel are injected as "background context" into the
 | HTTPS Mandatory      | RAG endpoint must use HTTPS; HTTP is rejected by permission checks          |
 | Dual Permission Check | Must hold both `rag:query` and `network:<endpoint>` permissions            |
 | Vault Authentication | Credentials are not exposed in plaintext in manifest or environment         |
-| Timeout Limit        | Default 10s, configurable; timeout does not block Agent                    |
+| Timeout Limit        | Default 10s, configurable; timeout does not block Bot                    |
 | Network Whitelist    | RAG endpoint must be within the network whitelist declared in manifest      |
 
 ---

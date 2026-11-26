@@ -7,7 +7,7 @@
 >
 > Audience: Desktop App frontend, CLI tools, second-party integrators, debugging scripts.
 >
-> **Evolution History**: Earlier Gateway ↔ Agent Runtime used gRPC, and chat streaming events were pushed via WebSocket; starting from [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md), converged to a dual-protocol architecture of MQTT pub/sub + HTTP reverse proxy. gRPC / WebSocket protocol documentation has been retired, and the code has been removed.
+> **Evolution History**: Earlier Gateway ↔ Bot Runtime used gRPC, and chat streaming events were pushed via WebSocket; starting from [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md), converged to a dual-protocol architecture of MQTT pub/sub + HTTP reverse proxy. gRPC / WebSocket protocol documentation has been retired, and the code has been removed.
 
 ---
 
@@ -145,8 +145,8 @@ HTTP Status Code Semantics:
 | 200 / 204 | Success |
 | 400 | Request parameter error |
 | 401 | Unauthorized (when auth enabled) |
-| 404 | Agent / resource not found |
-| 409 | State conflict (e.g. Agent not running) |
+| 404 | Bot / resource not found |
+| 409 | State conflict (e.g. Bot not running) |
 | 500 / 502 / 503 | Server error, Runtime not connected |
 | 504 | Gateway → Runtime reverse proxy timeout |
 
@@ -171,14 +171,14 @@ Gateway writes the following to `<data_dir>/` after startup:
 
 | What you want to do | Reference |
 |---------------------|-----------|
-| List/Install/Start Agent | [http.md §Agent Management](./http.md#2-agent-management) |
+| List/Install/Start Bot | [http.md §Bot Management](./http.md#2-agent-management) |
 | Initiate chat (HTTP) | [http.md §Chat and Sessions](./http.md#3-chat-and-sessions) |
 | Subscribe to streaming events (MQTT) | [mqtt.md §Topic Tree and Event Types](./mqtt.md) |
 | Understand Runtime ↔ Gateway communication (MQTT topics, reverse proxy) | [mqtt.md](./mqtt.md) |
 | Cancel single long tool / view tool execution progress (ADR-045) | [mqtt.md §9.4](./mqtt.md#94-single-tool-cancellation-adr-045) + [ADR-045](../../adr/zh/ADR-045-tool-progress-and-cancel.md) |
 | Manage Provider/MCP/Search | [http.md §LLM Provider and Models](./http.md#5-llm-provider-and-models) / [http.md §MCP Catalog](./http.md#6-mcp-catalog) |
 | Operate Memory | [http.md §Memory](./http.md#7-memory) |
-| Debug/Restart Agent / LSP | [http.md §Debug and Development Tools](./http.md#13-debug-and-development-tools) |
+| Debug/Restart Bot / LSP | [http.md §Debug and Development Tools](./http.md#13-debug-and-development-tools) |
 | Understand MQTT evolution history (why gRPC/WebSocket retired) | [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) |
 
 ---

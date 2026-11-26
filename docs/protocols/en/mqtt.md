@@ -129,7 +129,7 @@ acowork/global/
                                # Gateway republishes this topic; Runtime receives it immediately.
 ```
 
-**Desktop-side signal topic (not part of the table above)**: `acowork/desktop/inventory` — the Gateway publishes it on every mutation of its aggregated `installed_agents` table (Node install/uninstall, a Node replaying its retained inventory on reconnect, `DELETE /api/agents/{id}`). Payload = millisecond timestamp, **not retained**. The Desktop refetches `GET /api/agents` on each signal. It deliberately does not live under `acowork/global/`: every Runtime decodes each `acowork/global/#` payload as a protobuf `DataEnvelope`, so a non-envelope payload there would make every Runtime log a decode failure. This signal is addressed to the Desktop, not to agents.
+**Desktop-side signal topic (not part of the table above)**: `acowork/desktop/inventory` — the Gateway publishes it on every mutation of its aggregated `installed_agents` table (Node install/uninstall, a Node replaying its retained inventory on reconnect, `DELETE /api/agents/{id}`). Payload = millisecond timestamp, **not retained**. The Desktop refetches `GET /api/agents` on each signal. It deliberately does not live under `acowork/global/`: every Runtime decodes each `acowork/global/#` payload as a protobuf `DataEnvelope`, so a non-envelope payload there would make every Runtime log a decode failure. This signal is addressed to the Desktop, not to bots.
 
 **Why are secrets published together in `acowork/global/*` topics?** This is Runtime's **only** secret retrieval path—Runtime starts with only a `SUB acowork/global/#`, and all secrets are delivered in one retained payload:
 
@@ -214,7 +214,7 @@ After Runtime obtains the available resources from §3.1.1, **which resources th
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 Agent Data Sources (Runtime Authority)
+### 3.2 Bot Data Sources (Runtime Authority)
 
 ```
 acowork/agents/{agent_id}/
@@ -372,15 +372,15 @@ acowork/users/{user_id}/
 9. **Three-tier separation of global resources**:
    - **Layer 1 - Full raw list** (raw configurations user manages in Desktop Settings): HTTP only, no MQTT. Desktop Settings fetches and renders forms; modification submissions go over HTTP POST.
    - **Layer 2 - Ready availability** (resources verified by Gateway health-check): MQTT pub/sub, topic `acowork/global/{kind}` (single topic, Retained). **Not agent-distinguished**; all Runtimes share the same, because "resource ready" is a global fact.
-   - **Layer 3 - Runtime per-agent persisted selections** (`agent_mcp.json`): local files; Desktop views via HTTP pull of agent config, not MQTT.
-   - **Why can't Layer 2 be placed under `agents/{id}/`**: All agents see exactly the same available resources; placing under per-agent topics would cause redundant data; all Runtimes just `SUB acowork/global/#`.
-10. **Global resource raw list vs availability vs agent selection must not be confused**:
+   - **Layer 3 - Runtime per-agent persisted selections** (`agent_mcp.json`): local files; Desktop views via HTTP pull of bot config, not MQTT.
+   - **Why can't Layer 2 be placed under `agents/{id}/`**: All bots see exactly the same available resources; placing under per-agent topics would cause redundant data; all Runtimes just `SUB acowork/global/#`.
+10. **Global resource raw list vs availability vs bot selection must not be confused**:
     - Raw list = user-managed, HTTP only
     - Availability = Gateway-verified runtime truth, MQTT pub/sub (globally shared)
-    - Agent selection = Runtime local persistence, HTTP pull config suffices
-    The earlier mistake of putting "Gateway-computed per-agent subsets" into `agents/{id}/resource_cache` was wrong—Gateway should not be aware of the agent dimension; resource availability is a global dimension.
+    - Bot selection = Runtime local persistence, HTTP pull config suffices
+    The earlier mistake of putting "Gateway-computed per-agent subsets" into `agents/{id}/resource_cache` was wrong—Gateway should not be aware of the bot dimension; resource availability is a global dimension.
 
-### 3.6 Node Control Plane (Node Agent Data Source, ADR-055)
+### 3.6 Node Control Plane (Node Service Data Source, ADR-055)
 
 ```
 acowork/nodes/{node_id}/
@@ -732,7 +732,7 @@ When Runtime abnormally disconnects (including `kill -9`, crash, network loss), 
 |--------|-------------------|-----------|
 | **Gateway Publisher** | `gateway:publisher` | (Only PUBLISHes `acowork/global/#` Retained; does not SUBSCRIBE business topics) |
 | **Gateway Subscriber** | `gateway:subscriber` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready` |
-| **Runtime** | `agent:{agent_id}` | `acowork/global/#`<br/>`acowork/agents/{id}/sessions/control/#` |
+| **Runtime** | `bot:{agent_id}` | `acowork/global/#`<br/>`acowork/agents/{id}/sessions/control/#` |
 | **Desktop (Tauri Rust) — always subscribed** | `user:{user_id}:desktop:{pid}` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready`<br/>`acowork/agents/+/meta`<br/>`acowork/agents/+/config`<br/>`acowork/agents/+/sessions/created`<br/>`acowork/agents/+/sessions/deleted`<br/>`acowork/global/#` (optional, for Settings page)<br/>`acowork/users/+/chat/changed` (§3.4 — the filter table is compile-time and re-subscribed on every CONNACK, so the frontend does the `user_id` filter) |
 | **Mobile (WebView) — session channel** | `user:{sub}:mobile:{device_uuid}` | the foreground session only (design doc 25 §8.1) |
 | **Mobile (WebView) — background channel** | `user:{sub}:mobile:{device_uuid}-presence` | `acowork/agents/+/status`<br/>`acowork/users/{me}/chat/changed` (**one SUBSCRIBE packet** with presence, matched on the exact topic; §3.4) |
@@ -763,8 +763,8 @@ Each data resource chooses its channel based on its properties, **not by busines
 | **Global resource availability** (Gateway health-checked ready list) | `acowork/global/{kind}` (Retained, QoS 1) | — |
 | **Runtime per-agent resource activation selection** (agent_mcp.json) | ❌ No (local files, not broadcast data) | `GET /api/agents/{id}` → config field |
 | **Session provider/model/embedding selection** (per-session) | Already in `sessions/{sid}/meta` | `GET /api/agents/{id}/sessions/{sid}/state` |
-| **Agent status** (status + meta) | `status` Retained+LWT (online/offline) + `meta` Retained (single topic) | `GET /api/agents/{id}` detail |
-| **Agent config** (Runtime current effective agent_config.json, merged manifest defaults) | `config` Retained (single topic, Runtime PUBLISHes itself) | — (Runtime loads locally on startup; Desktop changes via `PUT /api/agents/{id}/config`) |
+| **Bot status** (status + meta) | `status` Retained+LWT (online/offline) + `meta` Retained (single topic) | `GET /api/agents/{id}` detail |
+| **Bot config** (Runtime current effective agent_config.json, merged manifest defaults) | `config` Retained (single topic, Runtime PUBLISHes itself) | — (Runtime loads locally on startup; Desktop changes via `PUT /api/agents/{id}/config`) |
 | **Session list** | ❌ No (frequent changes, only queried at operation time) | ✅ `GET /api/agents/{id}/sessions` (full list, sole channel) |
 | **Session list increment notifications** | `sessions/created` + `sessions/deleted` (sid in payload; triggered by `sessions/control/create_session` / `sessions/control/delete_session`, Runtime PUBLISHes after execution) | — |
 | **Session meta** (usage/state) | `meta` Retained (single topic, payload always contains latest value) | `GET /api/agents/{id}/sessions/{sid}/state` (fallback) |
@@ -813,18 +813,18 @@ Need to wait for explicit success/failure from the other side?
 |---------------|-------|------|--------------|----------------------------------|
 | Provider list (full) | Gateway | KB | ❌ (static full, no MQTT) | `GET /api/global/providers` |
 | MCP list (full) | Gateway | KB | ❌ | `GET /api/global/mcps` |
-| LSP relay endpoint (node-local, ADR-055 §6.7) | Node | B | `acowork/nodes/{node_id}/lsps` (R, QoS 1) | `GET /api/agents/{id}/lsp-endpoint` (Gateway resolves agent → node) |
+| LSP relay endpoint (node-local, ADR-055 §6.7) | Node | B | `acowork/nodes/{node_id}/lsps` (R, QoS 1) | `GET /api/agents/{id}/lsp-endpoint` (Gateway resolves bot → node) |
 | Embedding model list (full) | Gateway | B-KB | ❌ | `GET /api/global/embedding_models` |
 | Provider available (Gateway health-checked) | Gateway | KB | `acowork/global/providers` (R, QoS 1) | — |
 | MCP available | Gateway | KB | `acowork/global/mcps` (R, QoS 1) | — |
 | Embedding model available | Gateway | B-KB | `acowork/global/embedding_models` (R, QoS 1) | — |
 | Active user profile (ADR-042) | Gateway | B | `acowork/global/user_profile` (R, QoS 1) | — (Runtime waits for retained snapshot, 5s timeout fallback to None) |
-| Agent MCP selection (`agent_mcp.json`) | Runtime (local) | B-KB | Included in `agents/{id}/config` retained (`active_mcp_servers`) | — (Desktop SUB retained) |
+| Bot MCP selection (`agent_mcp.json`) | Runtime (local) | B-KB | Included in `agents/{id}/config` retained (`active_mcp_servers`) | — (Desktop SUB retained) |
 | Session provider/model selection (`session_meta`) | Runtime (local) | B | `agents/{id}/sessions/{sid}/meta` (R) | — (Desktop SUB retained when entering session) |
-| Agent status (online) | Runtime | B | `agents/{id}/status` (LWT+Retained) | `GET /api/agents/{id}/status` |
-| Agent ready (HTTP server bound, Phase A–C complete) | Runtime | B | `agents/{id}/ready` (R, QoS 1) | `GET /api/agents/{id}/ready` |
-| Agent meta | Runtime | KB | `agents/{id}/meta` (R, single topic) | `GET /api/agents/{id}` |
-| Agent config (Runtime workspace agent_config.json merged defaults, incl. MCP) | Runtime (local) | KB | `agents/{id}/config` (R, single topic, Runtime PUBLISHes itself) | — (Desktop SUB retained; writes via `PUT /api/agents/{id}/config` → Gateway MQTT control) |
+| Bot status (online) | Runtime | B | `agents/{id}/status` (LWT+Retained) | `GET /api/agents/{id}/status` |
+| Bot ready (HTTP server bound, Phase A–C complete) | Runtime | B | `agents/{id}/ready` (R, QoS 1) | `GET /api/agents/{id}/ready` |
+| Bot meta | Runtime | KB | `agents/{id}/meta` (R, single topic) | `GET /api/agents/{id}` |
+| Bot config (Runtime workspace agent_config.json merged defaults, incl. MCP) | Runtime (local) | KB | `agents/{id}/config` (R, single topic, Runtime PUBLISHes itself) | — (Desktop SUB retained; writes via `PUT /api/agents/{id}/config` → Gateway MQTT control) |
 | Session list | Runtime | variable | ❌ only `created` / `deleted` increment notifications | ✅ `GET /api/agents/{id}/sessions` (Gateway reverse proxy to Runtime HTTP) |
 | Session messages increments | Runtime | KB | `agents/{id}/sessions/{sid}/messages/*` (QoS 0) | — |
 | Session messages full | Runtime | MB+ | ❌ | ✅ `GET /api/agents/{id}/sessions/{sid}/messages` (Gateway reverse proxy) |
@@ -881,7 +881,7 @@ Desktop ──HTTP──▶ Gateway (:19876) ──HTTP reverse proxy──▶ R
 
 | Scenario | Uses MQTT Retained | Uses HTTP Reverse Proxy |
 |----------|-------------------|-------------------------|
-│ Agent config (incl. MCP)     | ✅ `agents/{id}/config` | ❌ (no HTTP GET needed) |
+│ Bot config (incl. MCP)     | ✅ `agents/{id}/config` | ❌ (no HTTP GET needed) |
 | Session meta | ✅ `agents/{id}/sessions/{sid}/meta` | ❌ |
 | Session list (full) | ❌ (only `created`/`deleted` increments) | ✅ `GET .../sessions` |
 | Message list (full) | ❌ (data MB+) | ✅ `GET .../messages` |
@@ -917,7 +917,7 @@ let conn_opts = ConnectOptions::new()
 client.connect(conn_opts).await?;
 ```
 
-**Purpose**: When Runtime process is `kill -9`'d / crashes / network disconnects, Broker automatically publishes `offline` with retained flag after keep-alive timeout. Desktop subscribing to `acowork/agents/+/status` immediately learns Agent is offline; **no "ghost online" state exists**.
+**Purpose**: When Runtime process is `kill -9`'d / crashes / network disconnects, Broker automatically publishes `offline` with retained flag after keep-alive timeout. Desktop subscribing to `acowork/agents/+/status` immediately learns Bot is offline; **no "ghost online" state exists**.
 
 ### 8.2 Retained Message
 
@@ -942,7 +942,7 @@ client.publish(
 
 **Applicable Scenarios**:
 - `agents/{id}/status` (online/offline, with LWT)
-- `agents/{id}/meta` (full agent meta)
+- `agents/{id}/meta` (full bot meta)
 - `agents/{id}/config` (full config)
 - `acowork/global/{kind}` (Gateway health-checked global resource availability, serving both snapshot and increment semantics)
 - `agents/{id}/sessions/{sid}/meta` (full session meta)
@@ -972,9 +972,9 @@ client.publish(
 | Gateway Publisher | `gateway:publisher` | Uniquely identifies Gateway's MQTT client (only PUBLISHes `acowork/global/#` Retained) |
 | User Service | `user:service` | Publisher of the standalone `acowork-user` process (PUBLISHes `acowork/user/profiles/changed` and `acowork/users/{uid}/chat/changed`, both QoS 1 non-retained doorbells); CONNECT password = the Gateway publisher token (injected by the user supervisor via `--mqtt-password`, ADR-084 § Decision 4b) |
 | Doc Service | `doc:service` | Publisher of the standalone `acowork-doc` process (only PUBLISHes `acowork/doc/tree/changed`); CONNECT password = the Gateway publisher token (injected by the doc supervisor via `--mqtt-password`, ADR-084 § Decision 4b) |
-| Runtime | `agent:{agent_id}` | Business entity, one per Runtime; from Phase 5a onward, CONNECT password = host Node's node_token (see §8.7) |
+| Runtime | `bot:{agent_id}` | Business entity, one per Runtime; from Phase 5a onward, CONNECT password = host Node's node_token (see §8.7) |
 | Desktop | `user:{user_id}:desktop:{pid}` | Distinguishes in multi-user scenarios (`{pid}` = process PID, for multiple desktop instances per user); from Phase 5a onward, CONNECT password = `http_token` (see §8.7) |
-| Node Agent | `node:{node_id}` | Node identity (ADR-055 §6.2); CONNECT password = node_token, or valid enrollment token on first access (see §8.7) |
+| Node Service | `node:{node_id}` | Node identity (ADR-055 §6.2); CONNECT password = node_token, or valid enrollment token on first access (see §8.7) |
 
 ### 8.6 Session Expiry & Clean Start
 
@@ -994,7 +994,7 @@ Default `mqtt.auth_enabled = false` (anonymous, keeping single-machine status); 
 | client_id | Allow Condition (password) |
 |-----------|---------------------------|
 | `node:{node_id}` | == that node's issued node_token; or == a valid and unconsumed enrollment token (first-access path) |
-| `agent:{agent_id}` | == **any** registered node_token (first-tier simplification: does not validate agent→node ownership, noted in ADR-055) |
+| `bot:{agent_id}` | == **any** registered node_token (first-tier simplification: does not validate bot→node ownership, noted in ADR-055) |
 | `gateway:publisher` | == Gateway internal publisher token (generated at startup) |
 | `user:service` | == Gateway internal publisher token (injected by the user supervisor via `--mqtt-password`, ADR-084 § Decision 4b) |
 | `doc:service` | == Gateway internal publisher token (injected by the doc supervisor via `--mqtt-password`, ADR-084 § Decision 4b) |
@@ -1006,7 +1006,7 @@ Other rules:
 - Credential comparison is constant-time (`constant_time_eq`); enrollment tokens only store sha256 hash (`{data_dir}/enrollment_tokens.json`), one-time consumption.
 - Long-term credentials issued to Nodes are stored in plaintext in `{data_dir}/node_tokens.json` (node_id → {token, created_at})—this is the trust anchor for node credentials, with protection level equivalent to `http_token`. After Gateway restarts, already-registered nodes auto-reconnect with node_token (persistent validation).
 - **Topic-level ACL deviation**: rumqttd 0.20 has no per-topic ACL capability; Phase 5a only implements CONNECT-layer authentication; mosquitto switch evaluation is slated for Phase 5b (ADR-055 §6.8).
-- **HTTP channel authentication**: Node pulling packages (`GET /api/packages/{id}/download`) and Node inbound reverse-proxy validation use the `X-ACowork-Node-Token` header (see [http.md](./http.md)); Gateway outbound reverse-proxy requests automatically inject this header (resolved by agent → host Node).
+- **HTTP channel authentication**: Node pulling packages (`GET /api/packages/{id}/download`) and Node inbound reverse-proxy validation use the `X-ACowork-Node-Token` header (see [http.md](./http.md)); Gateway outbound reverse-proxy requests automatically inject this header (resolved by bot → host Node).
 
 **One-click Access Flow** (after authentication enabled):
 
@@ -1116,7 +1116,7 @@ The topic tree **does not** use user_id prefixes (to avoid topic explosion and c
 1. **Topics do not carry user_id**: `agents/{id}/sessions/{sid}/messages/...` is visible to all authorized desktop clients
 2. **client_id expresses user**: `user:{uid}:desktop:{pid}` format
 3. **ACL restricts**: `user:{uid}:*` desktops can only SUBSCRIBE to agents/sessions they are authorized for
-4. **Gateway maintains user → agent authorization** (from HTTP `GET /api/auth/acl`), dynamically generates ACL rules and writes to rumqttd
+4. **Gateway maintains user → bot authorization** (from HTTP `GET /api/auth/acl`), dynamically generates ACL rules and writes to rumqttd
 
 ### 10.2 rumqttd ACL Configuration Example
 
@@ -1239,8 +1239,8 @@ graph TB
 1. **Desktop should not connect to MQTT Broker directly from the frontend**: Browser JS cannot use native TCP; unified use of Tauri Rust backend with `rumqttc` direct connection is more reliable and secure.
 2. **MQTT payload ≤ 100KB threshold**: Single message exceeding this threshold must go over HTTP (via Gateway reverse proxy to the backend HTTP — the Runtime, or the memory service since ADR-101); exceeding `max_packet_size` (10MB) causes Broker to disconnect directly. Retained messages occupy Broker memory; full large data (message lists, memory graphs) should not go over MQTT retained.
 3. **Ordering guarantee**: MQTT guarantees order within the same topic (RFC). Session messages all go under `agents/{id}/sessions/{sid}/messages/*` sub-topics; order is naturally guaranteed within the same sub-topic; no ordering guarantee between different sub-topics (chunk / tool_call don't need strict ordering).
-4. **Multi-user ACL**: Single-user phase uses most permissive ACL (all desktops subscribe to all agents); multi-user phase dynamically generates ACL rules by user → agent authorization.
-5. **Gateway single point**: Current architecture already has Gateway as a single point (agent subprocess management, local filesystem access); MQTT does not change this.
+4. **Multi-user ACL**: Single-user phase uses most permissive ACL (all desktops subscribe to all bots); multi-user phase dynamically generates ACL rules by user → bot authorization.
+5. **Gateway single point**: Current architecture already has Gateway as a single point (bot subprocess management, local filesystem access); MQTT does not change this.
 6. **Message loss detection**: QoS 0 streaming events—losing one frame is covered by the next; QoS 1 state changes are corrected by retained messages + HTTP `GET` pull snapshots.
 7. **LWT and retained status share the same topic**: `agents/{id}/status` serves both as retained message conveying current state and as Will Message target topic. Broker republishes LWT payload with retained flag on TCP disconnect.
 8. **Envelope mode extension**: When adding new data resources, extend `DataEnvelope.payload` oneof only; existing messages are not broken. Topic paths correspond one-to-one with oneof fields.

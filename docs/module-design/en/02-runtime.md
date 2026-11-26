@@ -1,6 +1,6 @@
-# acowork-runtime — Agent Runtime
+# acowork-runtime — Bot Runtime
 
-**Position**: Unified binary that loads .agent package and executes Agent logic. Each Agent is an independent process.
+**Position**: Unified binary that loads .bot package and executes Bot logic. Each Bot is an independent process.
 
 ```
 crates/acowork-runtime/
@@ -161,7 +161,7 @@ crates/acowork-runtime/
 
 ### `agent/loop_.rs` — Main Loop
 
-Main loop is the core scheduling unit of Agent Runtime, its design key points:
+Main loop is the core scheduling unit of Bot Runtime, its design key points:
 
 ```
 Main loop flow:
@@ -212,7 +212,7 @@ pub enum InboundMessage {
 }
 ```
 
-Key design differences (compared to single-process Agent loop):
+Key design differences (compared to single-process Bot loop):
 - Add DevMode step control layer
 - Permission check executed before tool dispatch (step ⑤→⑤'), not at security policy layer; Approval Gate as separate step ⑤' serial wait
 - **New** `inbound_tx/rx` message queue, supports injecting messages between loop iterations
@@ -224,8 +224,8 @@ Key design differences (compared to single-process Agent loop):
 
 ACowork-AI **Tool System Design Principles**:
 
-1. **Runtime provides complete tool pool** (~77 core tools), but not every Agent can use all tools
-2. **Manifest declaration-driven activation**: `.agent` package's `tools` and `permissions` fields determine which tools are available to the Agent
+1. **Runtime provides complete tool pool** (~77 core tools), but not every Bot can use all tools
+2. **Manifest declaration-driven activation**: `.bot` package's `tools` and `permissions` fields determine which tools are available to the Bot
 3. **Tools organized in directories by category**: builtin / schedule / integration / agent / browser / dev / skill / mcp / wasm / sop (`memory/` was removed by ADR-101 — memory tools come from the hosted MCP now)
 4. **Security wrapper composition**: Adopt `RateLimitedTool` + `PathGuardedTool` decorator pattern, achieve composable security policies with rate limiting and path validation
 
@@ -251,7 +251,7 @@ fn build_tool_registry(manifest: &AgentManifest, all_tools: Vec<Arc<dyn Tool>>) 
 | Activation mechanism | manifest `tools[]` + `permissions[]` declaration-driven |
 | Intent tools | New `intent_send` / `intent_receive` (cross-Agent communication) |
 | Identity tools | New `identity_query` (query user identity) |
-| Agent collaboration | `delegate` can cross-process (via Gateway Intent) |
+| Bot collaboration | `delegate` can cross-process (via Gateway Intent) |
 | Third-party integration | manifest declaration + runtime configuration dual control |
 
 **Tool classification reference (complete design space, actual activation depends on manifest declaration)**:
@@ -260,11 +260,11 @@ fn build_tool_registry(manifest: &AgentManifest, all_tools: Vec<Arc<dyn Tool>>) 
 
 | Category | ACowork Directory | Tool Count | Phase 1 Implemented |
 |----------|-------------------|------------|---------------------|
-| Core Builtin | `builtin/` | 17 | ✅ 13 (weather/git/pdf/screenshot/image series moved to WASM or Agent built-in) |
+| Core Builtin | `builtin/` | 17 | ✅ 13 (weather/git/pdf/screenshot/image series moved to WASM or Bot built-in) |
 | Memory | ~~`memory/`~~ | 0 | ❌ Removed from the Runtime by ADR-101: `memory_store` / `memory_recall` are served by the Gateway-hosted memory MCP |
 | Scheduled tasks | `schedule/` | 7 | ❌ Phase 2 |
-| Third-party integration | `integration/` | 8 | ❌ Provided by independent Agents |
-| Agent collaboration | `agent/` | 6 | ✅ intent_send/receive implemented, others Phase 2 |
+| Third-party integration | `integration/` | 8 | ❌ Provided by independent Bots |
+| Bot collaboration | `agent/` | 6 | ✅ intent_send/receive implemented, others Phase 2 |
 | Browser | `browser/` | 3 | ❌ Phase 2+ |
 | Developer | `dev/` | 4 | ❌ Phase 2+ |
 | Skill dynamic | `skill/` | 2 | ✅ Phase 1 |
@@ -273,7 +273,7 @@ fn build_tool_registry(manifest: &AgentManifest, all_tools: Vec<Arc<dyn Tool>>) 
 | SOP flow | `sop/` | 5 | ❌ Phase 2+ |
 | Other tools | root level | ~14 | ❌ Phase 2+ |
 
-**Phase 1 Tool Strategy**: Built-in tools only platform infrastructure level, SaaS integration provided by independent Agents (not built-in). See [12-tool-system.md](../design/en/12-tool-system.md).
+**Phase 1 Tool Strategy**: Built-in tools only platform infrastructure level, SaaS integration provided by independent Bots (not built-in). See [12-tool-system.md](../design/en/12-tool-system.md).
 
 ### `ipc/transport.rs` — Transport Layer Abstraction
 

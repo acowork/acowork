@@ -38,7 +38,7 @@
 
 ## 2. 数据流与通信
 
-### 2.1 Agent 启动流程（数据视角）
+### 2.1 Bot 启动流程（数据视角）
 
 ```
 Gateway CLI: "start com.example.weather"
@@ -56,7 +56,7 @@ Gateway CLI: "start com.example.weather"
                --workspace, --identity (JSON), --dev-mode
 ```
 
-### 2.2 Agent 主循环（数据视角）
+### 2.2 Bot 主循环（数据视角）
 
 ```
 Agent Runtime 进程启动
@@ -78,7 +78,7 @@ Agent Runtime 进程启动
          └─ IPC Client: UsageReport (异步)
 ```
 
-### 2.3 Intent 跨 Agent 通信
+### 2.3 Intent 跨 Bot 通信
 
 ```
 天气 Agent → IPC Client → GatewayRequest::IntentSend
@@ -114,11 +114,11 @@ Gateway IntentRouter:
 
 | 二进制 | 来源 Crate | 说明 |
 |-------|-----------|------|
-| `agent-runtime` | acowork-runtime | Agent 统一执行引擎 |
+| `agent-runtime` | acowork-runtime | Bot 统一执行引擎 |
 | `acowork-gateway` | acowork-gateway | Gateway 守护进程 |
 | `acowork-keygen` | acowork-sign | 密钥对生成 |
-| `acowork-sign` | acowork-sign | .agent 包签名 |
-| `acowork-verify` | acowork-sign | .agent 包验签 |
+| `acowork-sign` | acowork-sign | .bot 包签名 |
+| `acowork-verify` | acowork-sign | .bot 包验签 |
 | `acowork` | (CLI wrapper) | 统一 CLI 入口（聚合子命令） |
 
 **统一 CLI 设计**（Phase 5 实现，Phase 1 先用独立二进制）：
@@ -149,7 +149,7 @@ acowork verify weather.agent
 | 单元测试 | 各 crate `src/` 内 `#[cfg(test)]` | 每个 trait 实现都有测试 |
 | 组件测试 | `tests/` per crate | 单 crate 内集成测试 |
 | 集成测试 | workspace 根 `tests/` | 跨 crate 测试：Gateway + Runtime 交互 |
-| 系统测试 | workspace 根 `tests/` | 完整流程：安装 Agent → 启动 → 对话 → 工具调用 → 停止 |
+| 系统测试 | workspace 根 `tests/` | 完整流程：安装 Bot → 启动 → 对话 → 工具调用 → 停止 |
 | Live 测试 | 手动 | 连接真实 LLM API 的端到端测试 |
 
 ---

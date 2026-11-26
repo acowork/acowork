@@ -1,25 +1,25 @@
-# PRD：ACowork Agent Hub（官网 Agent 下载页）
+# PRD：ACowork Bot Hub（官网 Bot 下载页）
 
 | 项 | 内容 |
 | --- | --- |
 | 状态 | v1 已实现并上线；展示层与注册中心已迁至 `ACoworkAgentHub`（本文档 §11/§12 的 `ACoworkWebSite/agents/*` 清单保留为历史记录） |
 | 作者 | Product |
 | 日期 | 2026-06 |
-| 涉及仓库 | `ACowork`（agent 源与打包）、`ACoworkAgentHub`（注册中心、签名发布、hub.acowork.ai）、`ACoworkWebSite`（导航入口） |
-| 关联 | Roadmap Phase 7「remote `.agent` registry / Agent store」（Planning）；`dev/common/build-agent.sh`；`agents/agent-packages/` |
+| 涉及仓库 | `ACowork`（bot 源与打包）、`ACoworkAgentHub`（注册中心、签名发布、hub.acowork.ai）、`ACoworkWebSite`（导航入口） |
+| 关联 | Roadmap Phase 7「remote `.agent` registry / Bot store」（Planning）；`dev/common/build-agent.sh`；`agents/agent-packages/` |
 | 非目标声明 | 本文档不覆盖 skills 目录、付费分发、在线试用 |
 
-> **当前实现（2026-11）**：D1–D10 的产品决策仍然成立，但落地位置变了。官网那套静态页（`ACoworkWebSite/agents/*` + `dev/common/sync-agent-hub.py` + `dev/agent-hub/hub.test.js`）已被 `ACoworkAgentHub` 仓库取代：该仓库自己持有 agent 源目录、CI 打包签名、`index.json` 与站点，§11/§12 中指向 `ACoworkWebSite` 的行因此成为历史记录，保留不改写。
+> **当前实现（2026-11）**：D1–D10 的产品决策仍然成立，但落地位置变了。官网那套静态页（`ACoworkWebSite/agents/*` + `dev/common/sync-agent-hub.py` + `dev/agent-hub/hub.test.js`）已被 `ACoworkAgentHub` 仓库取代：该仓库自己持有 bot 源目录、CI 打包签名、`index.json` 与站点，§11/§12 中指向 `ACoworkWebSite` 的行因此成为历史记录，保留不改写。
 >
-> **平台 agent 的真源是 `ACowork/agents/<name>-agent/`**，Hub 的 `agents/official/**` 是`tools/sync-official.py` 生成的镜像（逐字节拷贝，并在 `hub.json.mirror.source_commit` 记录所镜像的提交）。跨仓同步机制与两条检查（硬：镜像是否等于它声称的提交；软：master 是否已前进）见 `ACoworkAgentHub/CONTRIBUTING.md` 与 `docs/publishing.md`。
+> **平台 bot 的真源是 `ACowork/agents/<name>-agent/`**，Hub 的 `agents/official/**` 是`tools/sync-official.py` 生成的镜像（逐字节拷贝，并在 `hub.json.mirror.source_commit` 记录所镜像的提交）。跨仓同步机制与两条检查（硬：镜像是否等于它声称的提交；软：master 是否已前进）见 `ACoworkAgentHub/CONTRIBUTING.md` 与 `docs/publishing.md`。
 
 ---
 
 ## 1. 问题定义
 
-**用户侧**：ACowork 处于 alpha，官方已经写好 7 个可直接用的 agent（Product / PM / QA / Architect / Senior Engineer / Docs / Ponytail），并且已经产出了签好名的 `.agent` 包。但今天**没有任何地方能让一个人看到"ACowork 有哪些现成 agent、各自能干什么、要什么权限、怎么装"**。想用的唯一路径是知道 `agents/agent-packages/` 这个目录的存在——这是一个只有源码读者才知道的路径。
+**用户侧**：ACowork 处于 alpha，官方已经写好 7 个可直接用的 bot（Product / PM / QA / Architect / Senior Engineer / Docs / Ponytail），并且已经产出了签好名的 `.bot` 包。但今天**没有任何地方能让一个人看到"ACowork 有哪些现成 bot、各自能干什么、要什么权限、怎么装"**。想用的唯一路径是知道 `agents/agent-packages/` 这个目录的存在——这是一个只有源码读者才知道的路径。
 
-**平台侧**：Agent 是 ACowork 的核心分发单元（等价于 Chrome 的扩展、VS Code 的插件），但它的分发目前完全依赖 git clone。生态能不能起来，取决于第三方作者有没有一个"发布有地方去、用户有地方找"的锚点。
+**平台侧**：Bot 是 ACowork 的核心分发单元（等价于 Chrome 的扩展、VS Code 的插件），但它的分发目前完全依赖 git clone。生态能不能起来，取决于第三方作者有没有一个"发布有地方去、用户有地方找"的锚点。
 
 **不做的代价**：alpha 用户装机后面对空运行时，转化流失在"我不知道接下来该干什么"；Phase 7 的 registry 缺少一个已经存在的数据契约和展示层。
 
@@ -33,8 +33,8 @@
 
 | # | 目标 | 衡量 |
 | --- | --- | --- |
-| G1 | 让 alpha 用户在 60 秒内找到一个 agent 并拿到本地可导入的 `.agent` 文件 | 下载点击 → 后续 App 内导入成功（需 App 埋点，v1 为已知缺口） |
-| G2 | 让 agent 的能力与**权限**变得可决策 | 权限徽章在卡片层可见率 100% |
+| G1 | 让 alpha 用户在 60 秒内找到一个 bot 并拿到本地可导入的 `.bot` 文件 | 下载点击 → 后续 App 内导入成功（需 App 埋点，v1 为已知缺口） |
+| G2 | 让 bot 的能力与**权限**变得可决策 | 权限徽章在卡片层可见率 100% |
 | G3 | 给第三方作者一个明确的发布路径 | 合并的外部 PR 数 |
 | G4 | 建立 Phase 7 registry 的**数据契约**（`agents.json` schema），网页与未来 App 共用 | schema 被 Desktop App 直接消费，无需改造 |
 
@@ -42,7 +42,7 @@
 
 评分 / 评论 / 安装计数 / 个性化推荐 / 付费与订阅 / 自动更新 / 浏览器内安装 / 用户账号 / 网页上传表单 / 服务端搜索 / skills 独立目录。
 
-**skills 处理方式**：作为 agent 详情内的清单展示（数据来自包内 `skills/*/SKILL.md`），不建独立目录。理由：7 个 agent 已经不足以填满"商店"叙事，同时开两个目录会把稀薄感翻倍。
+**skills 处理方式**：作为 bot 详情内的清单展示（数据来自包内 `skills/*/SKILL.md`），不建独立目录。理由：7 个 bot 已经不足以填满"商店"叙事，同时开两个目录会把稀薄感翻倍。
 
 ---
 
@@ -51,9 +51,9 @@
 | 角色 | 场景 | v1 满足度 |
 | --- | --- | --- |
 | 评估者 | 装完 ACowork，想知道"能拿来干什么" | ✅ 完整 |
-| 实践者 | 有明确需求（"我要个做 PRD 的 agent"），要找最接近的包 | ✅ 搜索 + 角色筛选 |
-| 谨慎者 | 担心 agent 在自己机器上干什么 | ✅ 权限外露 + 校验和；⚠️ 但安装侧签名强制校验尚未落地（R10，见 §10） |
-| 第三方作者 | 想发布自己调的 agent | ⚠️ 仅 PR 路径，无自助上传 |
+| 实践者 | 有明确需求（"我要个做 PRD 的 bot"），要找最接近的包 | ✅ 搜索 + 角色筛选 |
+| 谨慎者 | 担心 bot 在自己机器上干什么 | ✅ 权限外露 + 校验和；⚠️ 但安装侧签名强制校验尚未落地（R10，见 §10） |
+| 第三方作者 | 想发布自己调的 bot | ⚠️ 仅 PR 路径，无自助上传 |
 | 竞品研究者 | 看生态规模 | ❌ 只有 7 个，这是事实，不做粉饰 |
 
 ---
@@ -70,7 +70,7 @@
 
 ### D2：上传走 GitHub PR，不做网页表单
 
-**决定**：页面上的 "Submit an agent" 按钮跳转到 registry 的 PR 模板，不建任何上传接口。
+**决定**：页面上的 "Submit a bot" 按钮跳转到 registry 的 PR 模板，不建任何上传接口。
 
 **理由**：网页上传会一次性引入**鉴权、审核队列、恶意包处置、滥用与配额、备份**五条战线。而 PR 流程用 GitHub 免费提供了同一套能力：作者身份（GitHub 账号）、审核（review + CI）、版本历史（git）、失败回滚（revert）。对一个 alpha 阶段的开源项目，这不是妥协，是更正确的机制。
 
@@ -88,7 +88,7 @@
 | GitHub Releases | 差 | 0 | 强（天然 tag） | 无 |
 | R2 公网桶 | 中 | 需实测配额口径 | 中 | 无 |
 
-单包 70–170KB，Pages 单文件上限 25MiB、站点文件上限 20,000，短期无风险。选同源的唯一动机是**下载必须能成功**——一个下载按钮点不开的商店比没有商店更伤。git 历史膨胀的代价在 agent 数 >20 或单包 >5MB 时触发迁移（§11）。
+单包 70–170KB，Pages 单文件上限 25MiB、站点文件上限 20,000，短期无风险。选同源的唯一动机是**下载必须能成功**——一个下载按钮点不开的商店比没有商店更伤。git 历史膨胀的代价在 bot 数 >20 或单包 >5MB 时触发迁移（§11）。
 
 **假设（需验证）**：站点已绑定自定义域名。若仍用 `*.pages.dev`，国内不稳定，D3 的选型收益不成立——列为上线前置项 P0。
 
@@ -96,17 +96,17 @@
 
 **决定**：`agents.json` 由脚本从 `agents/*/manifest.toml` 解析生成。
 
-**理由**：手抄第二份元数据 = 制造第一份必然过期的文档。manifest 是 agent 的唯一真相源，Hub 只是它的一个投影。这条同时保证了未来 Desktop App 的 registry 与网页看到的是同一份数据。
+**理由**：手抄第二份元数据 = 制造第一份必然过期的文档。manifest 是 bot 的唯一真相源，Hub 只是它的一个投影。这条同时保证了未来 Desktop App 的 registry 与网页看到的是同一份数据。
 
 ### D5：文案叫 Library，不叫 Store
 
-**决定**：页面标题 "Agent Library"，副标题说明 alpha 状态与 PR 投稿路径；不出现 Store / Marketplace / 应用商店。
+**决定**：页面标题 "Bot Library"，副标题说明 alpha 状态与 PR 投稿路径；不出现 Store / Marketplace / 应用商店。
 
 **理由**：7 个包 + 无评分 + 无评论 + 无一键安装 = 不是商店。命名超出实际能力会直接消耗信任，而 alpha 阶段最稀缺的就是信任。
 
 ### D5b：不设"官方 / 社区"等级标签（2026-10-29 修订）
 
-**决定**：卡片与详情**不出现** Official / Community 徽章，也不出现"官方 agent""第三方来源""未经审计"这类分级措辞。数据契约删除 `tier` 字段（`schema_version` 1 → 2）。取代它的是**逐个 agent 如实展示 `author`**（来自 manifest 的事实字段）。默认排序由"官方优先"改为**按 display name 字母序**，不再保留 `Featured` 选项。
+**决定**：卡片与详情**不出现** Official / Community 徽章，也不出现"官方 bot""第三方来源""未经审计"这类分级措辞。数据契约删除 `tier` 字段（`schema_version` 1 → 2）。取代它的是**逐个 bot 如实展示 `author`**（来自 manifest 的事实字段）。默认排序由"官方优先"改为**按 display name 字母序**，不再保留 `Featured` 选项。
 
 **理由**：
 
@@ -138,14 +138,14 @@
 
 | ID | 需求 | 验收标准 |
 | --- | --- | --- |
-| R1 | Agent 卡片网格 | 7 个 agent 全部渲染；卡片含头像、`display_name`、`role`、`description`、能力标签、权限徽章、版本号；头像缺失时回落到首字母占位且不破坏布局 |
+| R1 | Bot 卡片网格 | 7 个 bot 全部渲染；卡片含头像、`display_name`、`role`、`description`、能力标签、权限徽章、版本号；头像缺失时回落到首字母占位且不破坏布局 |
 | R2 | 客户端搜索 | 匹配 `name`/`display_name`/`role`/`description`/capability/skill 名；输入即时响应（本地 7 条 <50ms）；大小写不敏感；支持多词 AND；无结果时显示空态 + "清除搜索" |
 | R3 | 分类筛选与排序 | 至少按角色族筛选；筛选/搜索状态写入 URL query，刷新与分享后保持一致；显示"共 N 个"结果计数 |
 | R4 | 详情视图 | 点击卡片展开详情：完整 description、capabilities（名称+描述）、skills 清单、`version`、`runtime_version`、`author`、`agent_id`、权限列表、包大小与 SHA-256 |
 | R5 | **权限外露** | `permissions`（含 Shell / FilesystemWrite / Network）在**卡片层**可见，不得仅存在于详情内；高危权限（Shell、FilesystemWrite）使用警示色 |
-| R6 | 不做等级标签 | 页面**不得**出现 Official / Community 徽章或"官方/社区""未经审计"措辞；每个 agent 卡片与详情如实显示 manifest 的 `author`；`agents.json` 不含 `tier` 字段 |
+| R6 | 不做等级标签 | 页面**不得**出现 Official / Community 徽章或"官方/社区""未经审计"措辞；每个 bot 卡片与详情如实显示 manifest 的 `author`；`agents.json` 不含 `tier` 字段 |
 | R7 | 下载与安装说明 | 下载按钮指向同源 `.agent`；页面明示"下载后在 Desktop App 中导入"；**不得**出现任何"一键安装/自动安装"表述（App 侧无 deep link 协议，已核实） |
-| R8 | 投稿入口 | "Submit an agent" → registry PR 模板；页内说明需 `manifest.toml` + 签名（`build-agent.sh`） |
+| R8 | 投稿入口 | "Submit a bot" → registry PR 模板；页内说明需 `manifest.toml` + 签名（`build-agent.sh`） |
 | R9 | 站点保持零构建 | 不引入 `functions/`、`wrangler.toml`、npm 依赖；同步逻辑用 bash/python；`package.json` 不出现 |
 | R10 | 主题与可访问性 | 复用 `styles.css` 变量，浅色/深色两套均可读（`prefers-color-scheme`）；键盘可完成"搜索→筛选→展开详情→下载"全链路；焦点可见；`aria-live` 播报结果数 |
 | R11 | 数据新鲜度 | 脚本幂等；manifest 变更后重跑即更新；生成文件带 `generated_at` 与来源 commit；缺包或解析失败**报错退出**而非静默跳过 |
@@ -188,7 +188,7 @@
 
 > **`schema_version` 2 的变更**：删除 `tier` 字段（D5b）。消费方读到 `tier` 不应再做任何等级展示；读到缺失字段也不应报错——它本就不属于契约。
 >
-> **`author` 是事实，不是评价**：它直接来自 manifest，描述"谁写的"，不描述"可不可信"。展示 author 允许、也期望不同 agent 的 author 不同——那是信息，不是分级。
+> **`author` 是事实，不是评价**：它直接来自 manifest，描述"谁写的"，不描述"可不可信"。展示 author 允许、也期望不同 bot 的 author 不同——那是信息，不是分级。
 
 ---
 
@@ -227,7 +227,7 @@
 | 阶段 | 内容 | 出口条件 |
 | --- | --- | --- |
 | P0 前置 | 确认自定义域名已绑定；确认国内可正常打开 | 移动端蜂窝网络实测通过 |
-| P1 内测 | 页面 + 7 个 agent，导航栏入口，无投稿按钮 | 本地静态服务全链路可用；R1–R7、R9–R11 通过 |
+| P1 内测 | 页面 + 7 个 bot，导航栏入口，无投稿按钮 | 本地静态服务全链路可用；R1–R7、R9–R11 通过 |
 | P2 公开 | 加投稿入口 + PR 模板；官网导航暴露 | 文档库/README 交叉引用；无 404 |
 | P3 复盘 | 看 §8 指标 | 决定是否走 §11 升级路径 |
 
@@ -239,8 +239,8 @@
 
 | 风险 | 等级 | 处置 |
 | --- | --- | --- |
-| **装了带 Shell+Network 权限的第三方 agent = 把用户机器交给别人的 prompt**；而 `install/mod.rs` 尚未强制签名校验 | **高** | 缓解：权限外露（R5）+ 逐个 agent 如实显示 `author`（D5b）+ 校验和（R4）。**注意：D5b 取消了 Community 标识这一层预警，风险敞口比原先大**——用户看到的是一个自洽的 agent 卡片，而非"这个来源和别的不同"的提示。根治仍是安装侧签名强制校验落地（开放问题 Q1，需 Core 团队答复）；在信任链落地前，第三方向 Registry 投稿需**人工审核**，这是当前唯一的闸门 |
-| 7 个包撑不起"商店"叙事，反而显空 | 中 | D5 命名降级；首页只放"agent 库"而非"生态" |
+| **装了带 Shell+Network 权限的第三方 bot = 把用户机器交给别人的 prompt**；而 `install/mod.rs` 尚未强制签名校验 | **高** | 缓解：权限外露（R5）+ 逐个 bot 如实显示 `author`（D5b）+ 校验和（R4）。**注意：D5b 取消了 Community 标识这一层预警，风险敞口比原先大**——用户看到的是一个自洽的 bot 卡片，而非"这个来源和别的不同"的提示。根治仍是安装侧签名强制校验落地（开放问题 Q1，需 Core 团队答复）；在信任链落地前，第三方向 Registry 投稿需**人工审核**，这是当前唯一的闸门 |
+| 7 个包撑不起"商店"叙事，反而显空 | 中 | D5 命名降级；首页只放"bot 库"而非"生态" |
 | 国内 `*.pages.dev` 打不开 | 中 | P0 前置项，未解决则不上线 |
 | 跨仓库同步靠人工，会忘记重跑 | 低 | **已闭环**：`ACoworkAgentHub/tools/sync-official.py` 单向生成镜像并记录上游提交；`dev/common/sync-hub-mirror.sh` 一条命令产出 Hub 镜像 PR；`validate.yml`/`publish.yml` 两条检查——镜像与所声称提交不符即红（生成区被手改），master 前进只出提示不阻塞 |
 | Pages Functions 能力未实测（10ms CPU/请求等） | 低（v1 不依赖） | 升级前做一次 spike |
@@ -258,7 +258,7 @@
 
 | 触发条件 | 动作 |
 | --- | --- |
-| agent 数 > 20 或单包 > 5MB | 二进制迁出站点仓库 → R2 桶或 GitHub Releases，Hub 改为外链 |
+| bot 数 > 20 或单包 > 5MB | 二进制迁出站点仓库 → R2 桶或 GitHub Releases，Hub 改为外链 |
 | 出现非 ACowork Team 的包被下载 | **必须**先补：安装侧签名强制校验 + 审核流程 + 包内容扫描 |
 | Desktop App 需在线拉列表 | 上 Pages Functions `/api/agents`（KV/D1 存 `agents.json`），网页与 App 共用同一契约（D4 已为此铺路） |
 | 需要真实安装计数 | 埋点走 Function 或 Pages 分析事件，不在静态站猜 |
@@ -277,6 +277,6 @@
 | `agents/downloads/*.agent` | ACoworkWebSite | 7 个签名包 |
 | `agents/avatars/*` | ACoworkWebSite | 头像 |
 | `styles.css`（`ah-*` 段） | ACoworkWebSite | 复用变量，双主题 |
-| `index.html`（导航） | ACoworkWebSite | Agents 入口 |
+| `index.html`（导航） | ACoworkWebSite | Bots 入口 |
 | `dev/common/sync-agent-hub.py` | ACowork | manifest → JSON + 拷包 + 头像 + 内嵌快照（幂等、失败即退出） |
 | `dev/agent-hub/hub.test.js` | ACowork | 功能测试：jsdom + 真实 Chrome headless，覆盖渲染/搜索/分面/排序/深链/详情/空态/错误态/XSS/file:// 与 http:// 双协议 |

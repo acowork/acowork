@@ -35,7 +35,7 @@
 **复制**成新行，不是被改写）。
 
 > ADR-106 之后的现状（影响撤销 P4–P6 那一批的回滚）：`interaction_request` 不再有生产者（D8 / D14：
-> 行留盘、只在渲染层隐藏）；agent↔agent 的 Intent 不再往 chat 写任何行（D12），`agent_message` 只剩
+> 行留盘、只在渲染层隐藏）；bot↔bot 的 Intent 不再往 chat 写任何行（D12），`agent_message` 只剩
 > Chat Router 的纯文本自答。执行侧的 `{sid}.jsonl.rounds` 与 chat 侧 `rounds.sqlite` 都是
 > **可重建的本地索引**（D4 / D5）——删掉或留着都不影响存量行，所以它们不算数据回滚面。
 
@@ -88,8 +88,8 @@ env CARGO_TARGET_DIR=<独立目录> cargo test -p acowork-gateway --test chat_se
 **演练步骤**：
 
 1. 拨杠杆、重启 Gateway。
-2. Desktop 打开 Agent 页 → 期望：会话照常可用，界面是旧执行会话视图，无红屏无死转圈。
-3. 恢复杠杆 → 期望：Agent 页回到 Chat session 视图，历史消息（含降级期间的写入）完整可见
+2. Desktop 打开 Bot 页 → 期望：会话照常可用，界面是旧执行会话视图，无红屏无死转圈。
+3. 恢复杠杆 → 期望：Bot 页回到 Chat session 视图，历史消息（含降级期间的写入）完整可见
    ——降级期间 Runtime 的写回走的是 Runtime→user service 的内部通道，不经过这条代理。
 
 ### 移动端
@@ -100,7 +100,7 @@ env CARGO_TARGET_DIR=<独立目录> cargo test -p acowork-gateway --test chat_se
 不动任何协议与数据。ADR-086 §6.4 的原话：这个决策错了也不产生需要清理的迁移。旧版 APK 的
 入口指向执行会话视图（`chat/detail`），后端两条面都还在，直接可用。
 
-**演练步骤**：装旧 APK → 打开 Agent → 期望落在执行会话视图、能收发；`历史` 语义的入口本来就在旧版主页面上。
+**演练步骤**：装旧 APK → 打开 Bot → 期望落在执行会话视图、能收发；`历史` 语义的入口本来就在旧版主页面上。
 
 ---
 
@@ -155,7 +155,7 @@ cp "{data}/chat-sessions/$SID/files/"* "$OUT/files/" 2>/dev/null || true
 1. 停 Gateway；`git revert` 6.2 提交；重建 `acowork-user`。
 2. （可选）跑导出配方。
 3. 起 Gateway → 旧构建登录两个账号 → 期望：人类↔人类会话可读（若跑了导出）或为空（未导出），
-   Agent 会话不受影响（它本来就在 `chat-sessions/`）。
+   Bot 会话不受影响（它本来就在 `chat-sessions/`）。
 4. `git revert --no-commit <revert-of-6.2>` 恢复新构建 → 重启 → 期望：日志出现
    `legacy chat layout migrated (Wave 6.2)`（若做过导出）或无迁移行；历史完整。
 

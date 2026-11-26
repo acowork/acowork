@@ -7,13 +7,13 @@
 
 ## 1. 概述
 
-ACowork 定义了一套标准 HTTP 查询协议，企业 RAG 服务适配此协议后即可作为 Agent 的扩展检索通道。ACowork **不实现 RAG 引擎**，不为各家 RAG 实现 adapter，而是要求企业侧确保其服务兼容本协议。
+ACowork 定义了一套标准 HTTP 查询协议，企业 RAG 服务适配此协议后即可作为 Bot 的扩展检索通道。ACowork **不实现 RAG 引擎**，不为各家 RAG 实现 adapter，而是要求企业侧确保其服务兼容本协议。
 
 ### 核心原则
 
 - **纯对接，不托管**：ACowork 是 HTTP 客户端，不托管 RAG 数据
-- **配置驱动 Opt-In**：仅当 Agent manifest 声明 RAG 时才启用
-- **优雅降级**：RAG 不可达时返回空结果，不阻塞 Agent 执行
+- **配置驱动 Opt-In**：仅当 Bot manifest 声明 RAG 时才启用
+- **优雅降级**：RAG 不可达时返回空结果，不阻塞 Bot 执行
 - **安全优先**：endpoint 必须为 HTTPS，认证走 Vault 管理
 
 ---
@@ -260,7 +260,7 @@ timeout_secs = 10                       # 查询超时（秒）
 
 ### 5.2 必需权限声明
 
-使用 RAG 工具的 Agent 必须声明以下权限：
+使用 RAG 工具的 Bot 必须声明以下权限：
 
 ```toml
 [[permissions]]
@@ -438,7 +438,7 @@ LLM 主动调用 RAG 工具，用于针对性深入查询：
 | HTTPS 强制 | RAG endpoint 必须使用 HTTPS，HTTP 被权限校验拒绝      |
 | 双权限校验 | 必须同时持有 `rag:query` 和 `network:<endpoint>` 权限 |
 | Vault 认证 | 认证信息不在 manifest 或环境中明文暴露                |
-| 超时上限   | 默认 10s，可配置，超时不阻塞 Agent                    |
+| 超时上限   | 默认 10s，可配置，超时不阻塞 Bot                    |
 | 网络白名单 | RAG endpoint 必须在 manifest 声明的 network 白名单内  |
 
 ---

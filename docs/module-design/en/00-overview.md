@@ -8,7 +8,7 @@
 
 ### 1.1 Workspace Splitting Principles
 
-1. **Binary boundary = Crate boundary**: Gateway and Agent Runtime are different processes, must have independent crates
+1. **Binary boundary = Crate boundary**: Gateway and Bot Runtime are different processes, must have independent crates
 2. **Shared types in independent crate**: Protocol messages, manifest structures and other types used by multiple crates, placed in `acowork-core`
 3. **Heavy dependency isolation**: WASM runtime (wasmtime), ONNX Runtime and other heavy dependencies, encapsulated in independent crates for conditional compilation and cross-compilation
 4. **Testability**: Each crate can be tested independently, doesn't depend on other crates' runtimes
@@ -118,7 +118,7 @@ acowork-sign = { path = "crates/acowork-sign" }
 
 > **Detailed design per Crate** in sub-documents:
 > - [01-core.md](01-core.md) — acowork-core: shared types and protocols
-> - [02-runtime.md](02-runtime.md) — acowork-runtime: Agent Runtime
+> - [02-runtime.md](02-runtime.md) — acowork-runtime: Bot Runtime
 > - [03-gateway.md](03-gateway.md) — acowork-gateway: Gateway
 > - [04-sqlite.md](04-sqlite.md) — acowork-sqlite: SQLite graph DB engine
 > - [05-vault-sign.md](05-vault-sign.md) — acowork-vault + acowork-sign

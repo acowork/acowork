@@ -10,7 +10,7 @@
 
 当前 ACowork 只有**框架自动拦截**的用户交互（`ApprovalGate` 安全审批），缺少 **LLM 主动向用户提问**的机制。
 
-Agent 在以下场景需要主动问用户：
+Bot 在以下场景需要主动问用户：
 - "你想用 A 方案还是 B 方案？"
 - "请输入你的 API key"
 - "这个配置项填什么？"
@@ -23,7 +23,7 @@ Agent 在以下场景需要主动问用户：
 3. **复用现有 `SessionStatus` 状态机** — 与 `ApprovalGate` 共享 `WaitingApproval` 态
 4. **前端原生渲染** — Desktop App 直接内联展示 question card
 5. **超时 & 取消** — 用户可超时不答或显式取消
-6. **超时由 agent config 决定，不由 LLM 决定** — `approval_timeout_secs`（用户偏好）是等待用户回答的唯一来源；LLM 不能在 tool call 里覆盖
+6. **超时由 bot config 决定，不由 LLM 决定** — `approval_timeout_secs`（用户偏好）是等待用户回答的唯一来源；LLM 不能在 tool call 里覆盖
 
 ---
 
@@ -126,7 +126,7 @@ Agent 在以下场景需要主动问用户：
 ```
 
 > **注意**: `timeout_seconds` **不是** tool 的入参。等待超时由 runtime 从
-> agent config 的 `approval_timeout_secs`（用户在 Settings 设置）派生，
+> bot config 的 `approval_timeout_secs`（用户在 Settings 设置）派生，
 > LLM 不应在 tool call 中传超时。详见 §6。
 
 ### 4.2 ChunkEvent 变体（Runtime → Gateway）
@@ -707,8 +707,8 @@ case 'ask_answer':
 1. **并发 question** — 如果 LLM 在一次 tool call 中调用了多个 `ask_user_question`（理论上不应该，但 LLM 不可预测），多个 question 同时阻塞怎么处理？
    - **方案**: 不支持批量。LLM 每次 loop iteration 最多一个 `ask_user_question` 调用。如果返回多个 tool call，第一个 question 阻塞后，其他被跳过。
 
-2. **子 Agent 调用** — 如果子 Agent（通过 Task tool 调用）也想问用户？
-   - **方案**: 本项目架构只有单一 Runtime，没有子 Agent 问题。后续如果需要，参考 Spring AI 的"子 Agent 不可用"限制。
+2. **子 Bot 调用** — 如果子 Bot（通过 Task tool 调用）也想问用户？
+   - **方案**: 本项目架构只有单一 Runtime，没有子 Bot 问题。后续如果需要，参考 Spring AI 的"子 Bot 不可用"限制。
 
 3. **Always/记住我** — 类似 ApprovalGate 的 `AlwaysAllow` 模式？
    - **方案**: Phase 1 不做。AskQuestion 是 LLM 主动决策，不适合自动批准。
@@ -743,19 +743,19 @@ case 'ask_answer':
 
 ### 12.3 设计决定
 
-**`timeout_seconds` 不再是 tool 入参**，是 agent runtime 的**调度决策**：
+**`timeout_seconds` 不再是 tool 入参**，是 bot runtime 的**调度决策**：
 
 | 字段 | 决策者 | 来源 |
 |---|---|---|
-| `approval_timeout_secs` | 用户 | Settings → agent config → `agent_core.approval_timeout_secs` |
+| `approval_timeout_secs` | 用户 | Settings → bot config → `agent_core.approval_timeout_secs` |
 | `ChunkEvent::AskQuestion.timeout_seconds` | runtime | 上面那行的值，runtime 填入 WS payload 给前端显示倒计时 |
 
 LLM 在 tool call 中即使传了 `timeout_seconds`，runtime 也会**静默忽略**（验证测试见 `test_validate_params_ignores_legacy_timeout_seconds`）。
 
 ### 12.4 为什么不让 LLM 控制
 
-- **LLM 不知道用户偏好** —— LLM 看不到 agent config，瞎填小值
-- **超时本质是调度策略** —— "等多久"是 agent 的事，不是问题内容的一部分
+- **LLM 不知道用户偏好** —— LLM 看不到 bot config，瞎填小值
+- **超时本质是调度策略** —— "等多久"是 bot 的事，不是问题内容的一部分
 - **违反用户主权** —— 用户的 Settings 设置应该被尊重
 - **前端倒计时含义不清** —— 之前前端拿到的 timeout 是 LLM 决定的，用户根本不知道
 

@@ -7,7 +7,7 @@
 >
 > 适用读者：Desktop App 前端、CLI 工具、二方集成方、调试脚本。
 >
-> **演进史**：早期 Gateway ↔ Agent Runtime 之间使用 gRPC，聊天流式事件通过 WebSocket 推送；自 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) 起收敛为 MQTT pub/sub + HTTP 反向代理的二元架构。gRPC / WebSocket 协议文档已下架，代码也已下线。
+> **演进史**：早期 Gateway ↔ Bot Runtime 之间使用 gRPC，聊天流式事件通过 WebSocket 推送；自 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) 起收敛为 MQTT pub/sub + HTTP 反向代理的二元架构。gRPC / WebSocket 协议文档已下架，代码也已下线。
 
 ---
 
@@ -145,8 +145,8 @@ HTTP 状态码语义：
 | 200 / 204 | 成功 |
 | 400 | 请求参数错误 |
 | 401 | 未授权（启用 auth 时） |
-| 404 | Agent / 资源不存在 |
-| 409 | 状态冲突（如 Agent 未运行） |
+| 404 | Bot / 资源不存在 |
+| 409 | 状态冲突（如 Bot 未运行） |
 | 500 / 502 / 503 | 服务端错误、Runtime 未连接 |
 | 504 | Gateway → Runtime 反向代理超时 |
 
@@ -171,14 +171,14 @@ Gateway 启动后会在 `<data_dir>/` 下写入：
 
 | 想做的事 | 查阅 |
 |----------|------|
-| 列出/安装/启动 Agent | [http.md §Agent 管理](./http.md#二agent-管理) |
+| 列出/安装/启动 Bot | [http.md §Bot 管理](./http.md#二agent-管理) |
 | 发起聊天（HTTP） | [http.md §Chat 与会话](./http.md#三chat-与会话) |
 | 订阅流式事件（MQTT） | [mqtt.md §Topic 树与事件类型](./mqtt.md) |
 | 了解 Runtime ↔ Gateway 通信（MQTT 主题、反向代理） | [mqtt.md](./mqtt.md) |
 | 取消单个长工具 / 查看工具执行进度（ADR-045） | [mqtt.md §9.4](./mqtt.md#94-单工具取消adr-045) + [ADR-045](../../adr/zh/ADR-045-tool-progress-and-cancel.md) |
 | 管理 Provider/MCP/Search | [http.md §LLM Provider 与 Models](./http.md#五llm-provider-与-models) / [http.md §MCP 目录](./http.md#六mcp-目录) |
 | 操作 Memory | [http.md §记忆](./http.md#七记忆) |
-| 调试/重启 Agent / LSP | [http.md §调试与开发工具](./http.md#十三调试与开发工具) |
+| 调试/重启 Bot / LSP | [http.md §调试与开发工具](./http.md#十三调试与开发工具) |
 | 理解 MQTT 演进史（gRPC/WebSocket 为何退役） | [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) |
 
 ---

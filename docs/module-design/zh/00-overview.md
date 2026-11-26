@@ -8,7 +8,7 @@
 
 ### 1.1 Workspace 拆分原则
 
-1. **二进制边界 = Crate 边界**：Gateway 和 Agent Runtime 是不同进程，必须有独立 crate
+1. **二进制边界 = Crate 边界**：Gateway 和 Bot Runtime 是不同进程，必须有独立 crate
 2. **共享类型独立 crate**：协议消息、manifest 结构等被多个 crate 使用的类型，放入 `acowork-core`
 3. **重型依赖隔离**：WASM 运行时（`wasmtime`）、ONNX Runtime（`acowork-embed`）等重型依赖，封装在独立 crate 中以便条件编译和交叉编译
 4. **可测试性**：每个 crate 可独立测试，不依赖其他 crate 的运行时
@@ -119,7 +119,7 @@ acowork-sign = { path = "crates/acowork-sign" }
 
 > **各 Crate 详细设计**见子文档：
 > - [01-core.md](01-core.md) — acowork-core：共享类型与协议
-> - [02-runtime.md](02-runtime.md) — acowork-runtime：Agent Runtime
+> - [02-runtime.md](02-runtime.md) — acowork-runtime：Bot Runtime
 > - [03-gateway.md](03-gateway.md) — acowork-gateway：Gateway
 > - [04-sqlite.md](04-sqlite.md) — acowork-sqlite：SQLite 记忆层 图数据库引擎
 > - [05-vault-sign.md](05-vault-sign.md) — acowork-vault + acowork-sign

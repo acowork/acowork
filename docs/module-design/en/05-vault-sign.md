@@ -103,7 +103,7 @@ Currently Phase 1 supports only one API Key per provider. Phase 2 will extend to
 | `failover` | Prefer index 0, switch to index 1 on failure | Active-standby mode |
 | `least_recent` | Select least recently used Key | Avoid frequent rate limiting on single Key |
 
-**Key health check**: Agent Runtime reports usage with error info (e.g. 429/401). Gateway updates `error_count` and `rate_limited_until` in meta.json. Key distribution skips Keys with `status = "suspended"` or still in rate limit cooldown.
+**Key health check**: Bot Runtime reports usage with error info (e.g. 429/401). Gateway updates `error_count` and `rate_limited_until` in meta.json. Key distribution skips Keys with `status = "suspended"` or still in rate limit cooldown.
 
 **Vault API extensions:**
 
@@ -125,7 +125,7 @@ impl Vault {
 
 ---
 
-## acowork-sign — .agent Package Sign/Verify
+## acowork-sign — .bot Package Sign/Verify
 
 **Position**: Independent signing toolchain, provides `acowork-keygen`, `acowork-sign`, `acowork-verify` three commands.
 

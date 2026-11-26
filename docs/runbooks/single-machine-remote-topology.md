@@ -25,7 +25,7 @@ graph LR
 | Node | 用户手启（前台 daemon） | proxy 听 `0.0.0.0` | :19900 / :19878 | `start` |
 | Desktop | `npm run tauri dev` | Tauri 内 | 传输方式（Direct / Relay）+ 地址（**Gateway 行为与配置一致**，见 §4.2） |
 
-**模拟要点：Gateway 与 Node 都手动启动**。Gateway 默认会 spawn 一个以本机机器名命名的 Node Agent（如 `nytb`，ADR-055 §6.11），本模拟要单独起 Node，用 `--no-spawn-local-node` 关掉（见 §2）。Desktop 对非本机地址不 spawn，对本机地址 probe-then-spawn（见 §4.2）——但不管哪种，**下面 Gateway/Node 的命令完全一样**。
+**模拟要点：Gateway 与 Node 都手动启动**。Gateway 默认会 spawn 一个以本机机器名命名的 Node Service（如 `nytb`，ADR-055 §6.11），本模拟要单独起 Node，用 `--no-spawn-local-node` 关掉（见 §2）。Desktop 对非本机地址不 spawn，对本机地址 probe-then-spawn（见 §4.2）——但不管哪种，**下面 Gateway/Node 的命令完全一样**。
 
 ---
 
@@ -48,7 +48,7 @@ graph LR
 
 ## 2. 控制 Gateway 是否自动 spawn local node
 
-Gateway 默认 `--daemon` 启动会按 ADR-055 §6.11 自动 spawn 一个 Node Agent（node_id = 首次启动生成的 UUID，node_name = 本机机器名 slug，如 `nytb`；占 `:19900`/`:19878`）。**单实例调试 / 容器 / 多节点验证等场景需要关掉**，三种方式等价：
+Gateway 默认 `--daemon` 启动会按 ADR-055 §6.11 自动 spawn 一个 Node Service（node_id = 首次启动生成的 UUID，node_name = 本机机器名 slug，如 `nytb`；占 `:19900`/`:19878`）。**单实例调试 / 容器 / 多节点验证等场景需要关掉**，三种方式等价：
 
 | 层 | 写法 | 默认 |
 |---|---|---|
@@ -359,7 +359,7 @@ Desktop MQTT client 通过 Gateway `/api/status` 拿到 broker host:port 自动�
 2. `acowork-gateway nodes list` → 列出 `sim-node-1`，**没有** `local`
 3. `acowork-node status` → `connected`
 4. Desktop 设置页 → Test Connection → `connected`
-5. Desktop 选 `sim-node-1` 作为目标节点，安装一个 example agent
+5. Desktop 选 `sim-node-1` 作为目标节点，安装一个 example bot
 6. 触发 Chat → Runtime 进程出现在 Node 上（用 `agents list` 在 Node 侧查）
 
 ---

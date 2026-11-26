@@ -50,7 +50,7 @@ CLI 签的 token 没有交互登录对象，绑定「最早创建的 admin」（
 
 ### A. Desktop 引导（推荐）
 
-任何提示「没有可用的节点」的地方都有这条路——**首启引导**与 **Agent 库**（`NoNodeBanner`）。展开
+任何提示「没有可用的节点」的地方都有这条路——**首启引导**与 **Bot 库**（`NoNodeBanner`）。展开
 **「在其他机器上启动 Node」**（*Start a node on another machine*），Desktop 会：
 
 1. 用当前账号调 `POST /api/nodes/enrollment-tokens` 签一个一次性 token；
@@ -59,7 +59,7 @@ CLI 签的 token 没有交互登录对象，绑定「最早创建的 admin」（
 主机地址那一栏要你自己改成**那台机器可达**的地址（Desktop 不知道对端网络，填 `127.0.0.1` 会给出提示）。
 token 一次性、1 小时过期；过期就关掉再展开引导，签一个新的——**不要复用**。
 
-> 本机路径（设置 → 网关 → 「启动本机 Node」，或 Agent 列表那条横幅）不显示 token：Desktop 签好后直接走
+> 本机路径（设置 → 网关 → 「启动本机 Node」，或 Bot 列表那条横幅）不显示 token：Desktop 签好后直接走
 > argv 交给孩子进程。远程引导是唯一把 token 呈现给人复制的场合——它不落日志、不落配置文件。
 > 另外「自动恢复本机 Node」那条静默路径**只续用已有 enrollment，绝不做首次 enrollment**
 > （首次会绑账号并留一个常驻 daemon，必须显式动作）。
@@ -157,7 +157,7 @@ ssh newbox1 'acowork-node start --gateway gw.lan:19875 --token "$1"' _ "$TOK"
 curl -s -H "Authorization: Bearer $ACCESS" http://gw.lan:19876/api/nodes | jq '[.[] | {node_id, online}]'
 ```
 
-Desktop 侧：节点树（设置 → 网关）出现该机器（名字是机器名 slug，ADR-075），Agent 列表的按节点分组里也能看到它。
+Desktop 侧：节点树（设置 → 网关）出现该机器（名字是机器名 slug，ADR-075），Bot 列表的按节点分组里也能看到它。
 日志：`{HOME_DIR}\.acowork\acowork-node\` 下的 node 日志出现 enrollment 成功 + `node_token` 落盘；
 Gateway 日志在 `{HOME_DIR}\.acowork\acowork-gateway\data\logs`。
 

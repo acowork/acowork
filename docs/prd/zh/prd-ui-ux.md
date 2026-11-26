@@ -5,7 +5,7 @@
 > 关联实施计划：S1 用户模式任务定义（归档于 `docs/_internal/archive/plan/zh/plan-p5.md`，本地查阅）
 >
 > **v2.0 修订说明**：本文档 v1.0 描述的布局（顶部标题栏带 Gateway 指示器、左侧导航栏 Chat/Models/Skills/Settings、右侧系统托盘动态状态、Models 独立视图、Vault/Providers 设置 Tab 等）与当前代码实现严重脱节。v2.0 依据 `apps/acowork-desktop` 实际代码逐节重写，以代码为准。
-> 主要差异：导航栏实为 5 个视图（Chat/Projects/Docs/Harness/Settings）+ 顶部头像；Gateway 状态移到底部状态栏；系统托盘仅含 Quit 菜单；无独立 Models 视图（Provider 管理在 Harness 视图）；Settings 为 Profile/General/Appearance/Gateway 四个 Tab（Nodes 不是独立 Tab，是 Gateway Tab 内的节点树区块）；聊天区为「Agent 列表 + 会话 + 可选文件编辑器 + 结果面板 + 右侧 40px 工具条」。
+> 主要差异：导航栏实为 5 个视图（Chat/Projects/Docs/Harness/Settings）+ 顶部头像；Gateway 状态移到底部状态栏；系统托盘仅含 Quit 菜单；无独立 Models 视图（Provider 管理在 Harness 视图）；Settings 为 Profile/General/Appearance/Gateway 四个 Tab（Nodes 不是独立 Tab，是 Gateway Tab 内的节点树区块）；聊天区为「Bot 列表 + 会话 + 可选文件编辑器 + 结果面板 + 右侧 40px 工具条」。
 
 ---
 
@@ -93,7 +93,7 @@
 
 | 面板 | 默认 | 最小 | 最大 | 持久化 key |
 |------|------|------|------|-----------|
-| Agent 列表（侧栏） | 240px | 100px（拖至 <100 折叠为 64px 仅头像） | 400px | `acowork-sidebar-width` |
+| Bot 列表（侧栏） | 240px | 100px（拖至 <100 折叠为 64px 仅头像） | 400px | `acowork-sidebar-width` |
 | 结果面板（右侧） | 340px | 200px | 600px | `acowork-right-width` |
 | 文件编辑器 | 450px | 200px | 无固定上限（动态：窗口宽度 − 侧栏 − 结果面板 − 聊天最小宽度 338px） | `acowork-file-width` |
 
@@ -170,7 +170,7 @@
 
 **关闭窗口 = 隐藏到托盘**：`CloseRequested` 事件拦截（窗口可见时）→ `window.hide()` + `prevent_close()`，应用驻留托盘；仅托盘 Quit 菜单（或系统退出）真正结束进程。这使托盘承担**窗口恢复入口 + 常驻宿主**双重角色。
 
-**注意**：文档 v1.0 中描述的 "Show Dashboard / Agent Chat / Status / Start Gateway" 等动态菜单项与彩色状态图标**均未实现**。
+**注意**：文档 v1.0 中描述的 "Show Dashboard / Bot Chat / Status / Start Gateway" 等动态菜单项与彩色状态图标**均未实现**。
 
 ### 3.4 底部状态栏（`AppLayout.tsx` 内联，高 24px）
 
@@ -179,7 +179,7 @@
 | 元素 | 说明 |
 |------|------|
 | 状态药丸 | `error`（红）/ `warning`（琥珀）/ `info`（灰），点击复制全文；hover Tooltip 显示完整内容 |
-| Agent + 上下文药丸 | 选中 Agent 运行中且结果面板折叠/非 Status Tab 时显示：`Agent: {名称}` + `Context: {usage}% | {tokens}/{窗口}`（≥90% 高亮）。`{窗口}` = 该会话生效窗口（per-session 覆盖存在时为其覆盖值，否则 per-agent 链解析值，ADR-074） |
+| Bot + 上下文药丸 | 选中 Bot 运行中且结果面板折叠/非 Status Tab 时显示：`Bot: {名称}` + `Context: {usage}% | {tokens}/{窗口}`（≥90% 高亮）。`{窗口}` = 该会话生效窗口（per-session 覆盖存在时为其覆盖值，否则 per-agent 链解析值，ADR-074） |
 | MQTT 调试控件 | `MqttDebugControls`（开发者用，显示 MQTT 连接状态） |
 | 文件状态簇 | 文件编辑器打开时，绝对定位在文件面板下方，显示光标位置 / LSP 状态等 |
 
@@ -236,17 +236,17 @@
 6. `ResultsPanel`（`!resultsCollapsed` 时渲染，可折叠、可调宽）
 7. `RightNavBar`（40px，工具条）
 
-### 4.2 Agent 列表（`AgentList.tsx`，默认 240px）
+### 4.2 Bot 列表（`AgentList.tsx`，默认 240px）
 
 #### 数据源
 
 | 数据 | 来源 | 刷新时机 |
 |------|------|---------|
-| Agent 列表 | Zustand `agentStore.agents`（内部调用 Tauri `list_agents` 命令） | 初始加载 + 安装/卸载/克隆/创建后 + 每 30s 轮询 |
-| 会话标题 | `fetchLatestSession(id)`（运行中的 Agent 异步拉取最新会话标题） | Agent 变为 running 且标题未缓存时 |
+| Bot 列表 | Zustand `agentStore.agents`（内部调用 Tauri `list_agents` 命令） | 初始加载 + 安装/卸载/克隆/创建后 + 每 30s 轮询 |
+| 会话标题 | `fetchLatestSession(id)`（运行中的 Bot 异步拉取最新会话标题） | Bot 变为 running 且标题未缓存时 |
 | 会话活动点 | `chatStore.agentStates` 各会话 `sessionStatus` 非 idle | 实时（MQTT 事件驱动） |
 
-#### Agent 条目
+#### Bot 条目
 
 ```
 ┌────────────────────────────────────────────┐
@@ -268,21 +268,21 @@
 
 | 操作 | 触发 | 行为 |
 |------|------|------|
-| 单击 | 左键 | 选中 Agent，ChatPanel 加载其会话 |
-| 双击 | 左键×2 | 停止的 Agent 直接启动（`startAgentAndSyncUI`） |
+| 单击 | 左键 | 选中 Bot，ChatPanel 加载其会话 |
+| 双击 | 左键×2 | 停止的 Bot 直接启动（`startAgentAndSyncUI`） |
 | 右键 | 右键 | 弹出上下文菜单（见下） |
 
 **右键上下文菜单**（条件渲染）：
 
 | 菜单项 | 条件 | 行为 |
 |--------|------|------|
-| ▶ Start | `!running` | 启动（去重：同一 Agent 防止连点重复触发） |
+| ▶ Start | `!running` | 启动（去重：同一 Bot 防止连点重复触发） |
 | ▶ Start in Debug | `!running` | 以 DevMode 启动（`startAgentAndSyncUI(id, true)`） |
 | ⏹ Stop | `running` | 确认后停止 |
 | Details | 始终 | 打开 `AgentDetailDialog` |
 | Clone | 始终 | 打开 `CloneDialog`，成功后自动选中克隆体 |
-| Publish | 始终 | 打开 `PublishWizard`（导出 .agent 包） |
-| 🗑 Uninstall | 所有 Agent（含 System Agent，ADR-077 取消其特权） | 确认后卸载 |
+| Publish | 始终 | 打开 `PublishWizard`（导出 .bot 包） |
+| 🗑 Uninstall | 所有 Bot（含 System Bot，ADR-077 取消其特权） | 确认后卸载 |
 
 **Stop / Uninstall / 危险操作确认对话框**：统一 `ConfirmDialog` 组件，`destructive` 红色样式，Esc 关闭，取消为默认焦点。
 
@@ -296,8 +296,8 @@
 ```
 
 - 多节点场景：安装前先 `fetchNodes()` 解析在线节点；>1 个在线节点时菜单切换为**节点选择器**（ADR-055 §6.13.3）
-- 安装中按钮显示加载态，成功后 Toast + 自动选中新 Agent
-- `com.acowork.system` 是随 Gateway 分发的默认 Agent，与普通 Agent 一样走安装/启动/卸载流程（ADR-077）
+- 安装中按钮显示加载态，成功后 Toast + 自动选中新 Bot
+- `com.acowork.system` 是随 Gateway 分发的默认 Bot，与普通 Bot 一样走安装/启动/卸载流程（ADR-077）
 
 ### 4.3 Chat Panel（`ChatPanel.tsx`，弹性宽度）
 
@@ -305,7 +305,7 @@
 
 | 区域 | 内容 |
 |------|------|
-| 会话 Tab 条（`SessionTabBar`） | 多会话标签切换（当前 Agent 的 `openSessionIds`），每个 Tab 含标题 + 关闭按钮；含 "新建会话" 入口 |
+| 会话 Tab 条（`SessionTabBar`） | 多会话标签切换（当前 Bot 的 `openSessionIds`），每个 Tab 含标题 + 关闭按钮；含 "新建会话" 入口 |
 | 工具栏 | **模型选择**（Layers 图标，弹层列模型 + 能力标记 + "Add Model"）、**推理强度**（Brain 图标，Auto/Off/Low/Medium/High）、**Workspace**（文件夹图标）、**Skills**（拼图/技能）、**上传**（文件/图片，50MiB 上限前置校验）、**发送/停止** 等 |
 | 消息流 | 虚拟化列表（`VirtualMessageList`），滚动快照恢复 |
 | 输入区 | 多行 `textarea`（Enter 发送 / Shift+Enter 换行 / IME 组合 300ms 防误发），附 发送/停止 按钮与上下文菜单 |
@@ -316,9 +316,9 @@
 
 | 状态 | 占位 |
 |------|------|
-| 未选择 Agent / 无会话 | "选择一个 Agent 开始对话"（居中图标 + 文案） |
-| Agent 已停止 | "启动 Agent" 按钮（居中，点击启动） |
-| Agent 运行中但未 ready | "Connecting to agent..." 提示（MQTT 未连接时） |
+| 未选择 Bot / 无会话 | "选择一个 Bot 开始对话"（居中图标 + 文案） |
+| Bot 已停止 | "启动 Bot" 按钮（居中，点击启动） |
+| Bot 运行中但未 ready | "Connecting to bot..." 提示（MQTT 未连接时） |
 
 #### 4.3.3 消息流与消息类型
 
@@ -334,9 +334,9 @@
 | `system` | 系统消息（会话创建/清理等，小字居中） |
 | `compaction` | 上下文压缩卡片（`CompactionCard`） |
 
-附加消息组件：`AskQuestionCard`（Agent 向用户提问）、`RetryWaitBanner`、`DebugPausedBanner`、`ExploreBlock`（探索/搜索）、`StreamingSourceBlock`、`ThinkBlock`。
+附加消息组件：`AskQuestionCard`（Bot 向用户提问）、`RetryWaitBanner`、`DebugPausedBanner`、`ExploreBlock`（探索/搜索）、`StreamingSourceBlock`、`ThinkBlock`。
 
-**附件**：用户可粘贴/上传文件、图片（`UserWithAttachmentsBubble`），顶部 `AttachedContextChips` 显示已挂载上下文；Agent 引用文件显示 `DocumentChip`。
+**附件**：用户可粘贴/上传文件、图片（`UserWithAttachmentsBubble`），顶部 `AttachedContextChips` 显示已挂载上下文；Bot 引用文件显示 `DocumentChip`。
 
 #### 4.3.4 流式输出
 
@@ -356,7 +356,7 @@ MQTT 连接状态由 Rust `rumqttc` eventloop 维护并推送 `mqtt-status` 事�
 | 停止 | 必须点击 Stop 按钮（Enter 不触发停止，避免误触） |
 | IME 防护 | `onCompositionEnd` 后 300ms 内的 Enter 视为输入法确认，不发送 |
 | 多行 | `max-h-48` 内滚动 |
-| 禁用条件 | Gateway 未连接 / Agent 未运行 / MQTT 断开时禁用，placeholder 相应变化 |
+| 禁用条件 | Gateway 未连接 / Bot 未运行 / MQTT 断开时禁用，placeholder 相应变化 |
 | 粘贴 | 粘贴图片/文件自动上传（50MiB 上限前置校验） |
 | 右键菜单 | 自定义复制/粘贴菜单（Tauri WebView 无原生菜单） |
 
@@ -366,28 +366,28 @@ MQTT 连接状态由 Rust `rumqttc` eventloop 维护并推送 `mqtt-status` 事�
 
 | Tab | 图标 | 显示条件 | 内容 |
 |-----|------|---------|------|
-| Workspace | 文件夹 | Agent 运行中 | `WorkspaceExplorer`（文件树 / 浏览 / 定位） |
-| Status | 仪表盘 | 始终 | Agent 运行状态、Token 统计、模型/Provider、会话统计（见下） |
-| Memory | 数据库 | Agent 运行中 | `MemoryPanel`（记忆管理） |
-| Debug | 虫 | Agent 运行中 | `DebugPanel`（DevMode 调试，见 §4.4.2） |
-| Setup | 齿轮 | Agent 运行中 | `AgentSetupTab`（Agent 配置；内置工具 / MCP / 提示词与技能三张卡片在此，见 §4.4.3） |
+| Workspace | 文件夹 | Bot 运行中 | `WorkspaceExplorer`（文件树 / 浏览 / 定位） |
+| Status | 仪表盘 | 始终 | Bot 运行状态、Token 统计、模型/Provider、会话统计（见下） |
+| Memory | 数据库 | Bot 运行中 | `MemoryPanel`（记忆管理） |
+| Debug | 虫 | Bot 运行中 | `DebugPanel`（DevMode 调试，见 §4.4.2） |
+| Setup | 齿轮 | Bot 运行中 | `AgentSetupTab`（Bot 配置；内置工具 / MCP / 提示词与技能三张卡片在此，见 §4.4.3） |
 
 **交互规则**：
 - 点击已激活 Tab 的工具条按钮 → 折叠面板；再点 → 展开
-- Agent 停止时，Workspace/Memory/Debug/Setup 按钮隐藏，面板自动跳回 Status（见 `AppLayout` 生命周期 effect）
+- Bot 停止时，Workspace/Memory/Debug/Setup 按钮隐藏，面板自动跳回 Status（见 `AppLayout` 生命周期 effect）
 - 右侧栏共 **5 个 Tab**：原「工具」Tab 已下线，其内置工具 / MCP 卡片并入 Setup Tab；Debug 的提示词与技能卡片也迁至 Setup Tab
-- Agent 进入调试模式时自动切到 Debug Tab
+- Bot 进入调试模式时自动切到 Debug Tab
 - 顶部标题栏显示当前 Tab 名称，左侧为拖拽调宽手柄
 
 #### 4.4.1 Status Tab
 
-显示当前会话/Agent 统计：Token 用量（`tokenUsage`）、上下文占用（`contextUsage`，含 ADR-028 历史累计兜底）、迭代次数、模型/Provider、推理强度、温度、会话数、压缩状态等。上下文数字行支持 **per-session 上下文窗口覆盖**（ADR-074）：编辑入口在 `ContextUsageIcon` 弹层内，常用档位 32K/64K/96K/128K/200K + K 单位数字输入 + "恢复为 agent 默认（继承）"；设定值超过模型窗口时实际生效取 `min(设定值, 模型窗口)` 并就地提示。
+显示当前会话/Agent 统计：Token 用量（`tokenUsage`）、上下文占用（`contextUsage`，含 ADR-028 历史累计兜底）、迭代次数、模型/Provider、推理强度、温度、会话数、压缩状态等。上下文数字行支持 **per-session 上下文窗口覆盖**（ADR-074）：编辑入口在 `ContextUsageIcon` 弹层内，常用档位 32K/64K/96K/128K/200K + K 单位数字输入 + "恢复为 bot 默认（继承）"；设定值超过模型窗口时实际生效取 `min(设定值, 模型窗口)` 并就地提示。
 
 #### 4.4.2 Debug Tab（DevMode）
 
 | 状态 | 呈现 |
 |------|------|
-| Agent 未运行 | "无 Agent 处于调试模式" 空态 |
+| Bot 未运行 | "无 Bot 处于调试模式" 空态 |
 | 运行中但 DevMode 关闭 | "Enable Debug" 按钮（`enable_agent_debug` 运行时开启，免重启） |
 | DevMode 开启 + 远程 Gateway | "调试在远程模式不可用"（ADR-048 D6：调试 RPC 依赖本地 MQTT） |
 | DevMode 开启 + 本地 + 未连接 | "调试连接已断开" |
@@ -395,23 +395,23 @@ MQTT 连接状态由 Rust `rumqttc` eventloop 维护并推送 `mqtt-status` 事�
 
 #### 4.4.3 Setup Tab 卡片
 
-Setup Tab 是全 Agent 级配置的唯一入口，7 张 level-1 折叠卡片自上而下：
+Setup Tab 是全 Bot 级配置的唯一入口，7 张 level-1 折叠卡片自上而下：
 
 | # | 卡片 | 内容 |
 |---|------|------|
-| 1 | Agent Info | 头像（ADR-017 服务端）、显示名 |
+| 1 | Bot Info | 头像（ADR-017 服务端）、显示名 |
 | 2 | Session Parameters | 会话语言、最大迭代/会话数、Shell 审批、压缩比阈值 |
 | 3 | Model Parameters | 最大输出 Token、上下文窗口、温度 |
 | 4 | Chat Session 路由 | 路由模型 / 超时 / 历史预算（ADR-099） |
-| 5 | 提示词与技能 | Agent 包 `prompts/` / `skills/` 浏览与编辑 + reload（原 Debug Tab 顶部卡片，ADR-063 §3.7） |
+| 5 | 提示词与技能 | Bot 包 `prompts/` / `skills/` 浏览与编辑 + reload（原 Debug Tab 顶部卡片，ADR-063 §3.7） |
 | 6 | 内置工具 | 内置工具开关（ADR-029，含 ADR-094 的 `load_skill`） |
 | 7 | MCP 服务器 | 服务器开关（ADR-069 / ADR-090），每个服务器展开为其工具列表 |
 
-另有 **1 张条件渲染的卡片**插在第 6 与第 7 张之间：**Agent 包建议的 MCP**（`McpRecommendationGroup`，ADR-104）。它只在包的 `manifest.toml` 声明了 `[[mcp_servers]]` 推荐时出现，装一条后该行落入下面的服务器开关列表，所以两者必须同屏。它不是这 7 张之一，也不参与"前 3 张"的位置推导。
+另有 **1 张条件渲染的卡片**插在第 6 与第 7 张之间：**Bot 包建议的 MCP**（`McpRecommendationGroup`，ADR-104）。它只在包的 `manifest.toml` 声明了 `[[mcp_servers]]` 推荐时出现，装一条后该行落入下面的服务器开关列表，所以两者必须同屏。它不是这 7 张之一，也不参与"前 3 张"的位置推导。
 
 默认只展开**前 3 张**卡片，其余默认折叠（顺序与默认值由 `agentSetupCards.ts` 一处定义）。卡片展开状态为组件本地状态，不做持久化。
 
-**已知例外**：建议的 MCP 卡片**默认展开**（组件自己的初值，未纳入规则）。它只在有推荐时才渲染，本身就是"这个 Agent 还缺东西"的提示，默认收起会让提示只剩一行标题；代价是这种情况下面板不再严格是"只有前 3 张展开"。理由与后续统一做法见 ADR-108 D3。
+**已知例外**：建议的 MCP 卡片**默认展开**（组件自己的初值，未纳入规则）。它只在有推荐时才渲染，本身就是"这个 Bot 还缺东西"的提示，默认收起会让提示只剩一行标题；代价是这种情况下面板不再严格是"只有前 3 张展开"。理由与后续统一做法见 ADR-108 D3。
 
 ### 4.5 文件编辑器（`FileEditorPanel.tsx`，可选）
 
@@ -449,8 +449,8 @@ Setup Tab 是全 Agent 级配置的唯一入口，7 张 level-1 折叠卡片自�
 | Profile | 用户身份：显示名、头像（上传/内置头像）、语言、时区、城市、职业 |
 | General | 日志：Gateway 日志级别、前端日志级别、日志文件大小/数量、删除日志；数据目录（只读，来自 `/api/config`）；关于；重置引导（Reset Onboarding） |
 | Appearance | 主题（light/dark/system）、强调色（`ACCENT_PRESETS` 色板）、内容宽度（40–100%）、字号（S–XXL）、窗口透明度（滑块 0–100%） |
-| Gateway | 网关连接（传输方式 RadioGroup：直连 / 中继）+ 单一服务器地址选择器、本地状态与 启动/停止/重启、已连接 Agents 列表（含模型信息、Debug 徽标） |
-| Nodes | 节点拓扑（`GET /api/nodes`）：node_id / 在线状态 / OS / 架构 / 版本 / hostname / Agent 数（只读表格） |
+| Gateway | 网关连接（传输方式 RadioGroup：直连 / 中继）+ 单一服务器地址选择器、本地状态与 启动/停止/重启、已连接 Bots 列表（含模型信息、Debug 徽标） |
+| Nodes | 节点拓扑（`GET /api/nodes`）：node_id / 在线状态 / OS / 架构 / 版本 / hostname / Bot 数（只读表格） |
 
 ### 6.1 Appearance 详细
 
@@ -467,7 +467,7 @@ Setup Tab 是全 Agent 级配置的唯一入口，7 张 level-1 折叠卡片自�
 - **运行模式**：local（Tauri 托管启动 Gateway 子进程）/ remote（连接用户配置 URL）
 - local：状态指示（Running/Starting/Stopped）、[Start]（外部启动时）/ [Restart] [Stop]（Tauri 托管时）、版本
 - remote：URL 输入（blur/Enter 保存）、[Apply]、状态指示、[Test Connection]
-- **Connected Agents**：列出 `/api/agents` 中 `running || connected` 的 Agent，每行显示名称、`provider/model`、Debug 徽标
+- **Connected Bots**：列出 `/api/agents` 中 `running || connected` 的 Bot，每行显示名称、`provider/model`、Debug 徽标
 
 ---
 
@@ -537,9 +537,9 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 - `requiredFilled = name && language && timezone`，未填时 [下一步] 禁用
 - 完成时调用 `createUser(...)`（fire-and-forget），同步本地 `userProfileStore`，无头像则随机分配内置头像
 
-### 7.6 Step 5: 安装第一个 Agent
+### 7.6 Step 5: 安装第一个 Bot
 
-**与 v1.0 差异**：推荐 Agent 列表为 **6 个内置角色**（非 v1.0 的 Weather/Calendar），且支持**批量多选安装**：
+**与 v1.0 差异**：推荐 Bot 列表为 **6 个内置角色**（非 v1.0 的 Weather/Calendar），且支持**批量多选安装**：
 
 | 资源名 | 名称 | 角色 | 描述 |
 |--------|------|------|------|
@@ -552,7 +552,7 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 
 - 每项为 checkbox 卡片（名称 · 角色 / 描述），默认全部勾选；提供 [全选]/[清空]
 - **[安装所选 (N)]**：`waitBootstrapReady()`（轮询 `/api/bootstrap` 至 READY）→ `runBounded(items, 3)` 并发 3 提交 `install_bundled_agent` → 每项 `wait_agent_installed` 轮询 → 每项状态徽标（pending/submitted/completed/failed，含 operation_id）
-- **[从文件安装]**：打开 `.agent` 文件选择，`install_agent` 命令
+- **[从文件安装]**：打开 `.bot` 文件选择，`install_agent` 命令
 - **[完成]**：无论是否安装都可用，设 `onboarding_completed`，进入主界面
 
 ---
@@ -574,15 +574,15 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 
 | 组件 | 加载态 |
 |------|--------|
-| Agent 列表首载 | 居中 Spinner（`animate-spin`） |
-| Agent 会话标题 | 第二行骨架屏（`animate-pulse` 矩形条） |
+| Bot 列表首载 | 居中 Spinner（`animate-spin`） |
+| Bot 会话标题 | 第二行骨架屏（`animate-pulse` 矩形条） |
 | 安装/启动 | 按钮变 loading / 禁用 + Toast 反馈 |
 | 面板数据 | Tab 内 `loading` 文案 |
 
 ### 8.3 网络/连接错误
 
 - Gateway `error` → 标题栏 `GatewayStatusChip`（§3.5）+ 底部状态栏红色药丸
-- MQTT 断开（Agent 运行中）→ 底部状态栏 warning 药丸（"Realtime connection lost, retrying..."），休眠中的 Agent 不提示（预期行为）
+- MQTT 断开（Bot 运行中）→ 底部状态栏 warning 药丸（"Realtime connection lost, retrying..."），休眠中的 Bot 不提示（预期行为）
 - 各异步操作失败 → Toast + 错误详情
 
 ---
@@ -595,7 +595,7 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 | 面板折叠/展开 | 宽度即时切换（无过渡动画） |
 | Toast | 从右滑入 + 淡入 / 淡出 |
 | 流式打字 | 无闪烁光标（块级渲染） |
-| Agent 状态变更 | 无颜色渐变（即时切换） |
+| Bot 状态变更 | 无颜色渐变（即时切换） |
 | 欢迎/启动 | SplashScreen 淡入（700ms translate+opacity）、LoadingDots 每 400ms |
 | 强调色切换 | 即时生效 |
 
@@ -624,16 +624,16 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 
 | 前端操作 | 命令 | 说明 |
 |---------|------|------|
-| 列出 Agent | `list_agents` | `agentStore.fetchAgents()` |
-| 安装 Agent | `install_agent` | `{ packagePath, devMode, nodeId }` |
-| 安装内置 Agent | `install_bundled_agent` | `{ resourceName, devMode }` → `OperationAck` |
+| 列出 Bot | `list_agents` | `agentStore.fetchAgents()` |
+| 安装 Bot | `install_agent` | `{ packagePath, devMode, nodeId }` |
+| 安装内置 Bot | `install_bundled_agent` | `{ resourceName, devMode }` → `OperationAck` |
 | 等待安装完成 | `wait_agent_installed` | `{ agentId, timeoutSecs }` |
-| 卸载 Agent | `uninstall_agent` | `{ agentId }` |
-| 启动 Agent | `start_agent` | `{ agentId, devMode }` |
-| 停止 Agent | `stop_agent` | `{ agentId }` |
+| 卸载 Bot | `uninstall_agent` | `{ agentId }` |
+| 启动 Bot | `start_agent` | `{ agentId, devMode }` |
+| 停止 Bot | `stop_agent` | `{ agentId }` |
 | 重启调试 | `restart_agent_in_debug` | `{ agentId }` |
-| 克隆 Agent | `clone_agent` | |
-| 创建 Agent | `create_agent` | |
+| 克隆 Bot | `clone_agent` | |
+| 创建 Bot | `create_agent` | |
 | 发布/导出 | `prepare_publish` / `build_publish` / `export_package` | |
 | Vault Key | `list_keys` / `add_key` / `remove_key` / `update_key` / `list_search_keys` / `add_search_key` | |
 | 调试 | `enable_agent_debug` / `disable_agent_debug` / `debug_rpc` | |
@@ -650,10 +650,10 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 | 引导状态 | GET | `/api/bootstrap` |
 | 配置 | GET/PUT | `/api/config` |
 | 节点 | GET | `/api/nodes` |
-| Agent 列表 | GET | `/api/agents` |
-| Agent 详情 | GET | `/api/agents/{id}` |
-| Agent 模型 | GET | `/api/agents/{id}/model` |
-| Agent 状态 | GET | `/api/agents/{id}/status` |
+| Bot 列表 | GET | `/api/agents` |
+| Bot 详情 | GET | `/api/agents/{id}` |
+| Bot 模型 | GET | `/api/agents/{id}/model` |
+| Bot 状态 | GET | `/api/agents/{id}/status` |
 | 删除日志 | DELETE | `/api/logs` |
 | 创建用户 | POST | `/api/users`（`createUser`） |
 | Provider | GET | `/api/providers` |
@@ -667,7 +667,7 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 |-------|------|
 | `settingsStore` | theme/osTheme/accentColor/fontSize/contentWidth/opacity/gatewayUrl/gatewayUrlHistory/lastGoodUrl/gatewayMode(推论)/relayActive/autoStartLocalNode/logLevel，持久化 localStorage |
 | `gatewayStore` | status/health/localState + checkHealth/startLocalGateway/stopLocalGateway/checkLocalStatus |
-| `agentStore` | agents(含 meta/profile/sessions/sessionTitle/tokenTotals)、selectedAgentId、fetchAgents/selectAgent/install/uninstall/start/stop/clone |
+| `agentStore` | bots(含 meta/profile/sessions/sessionTitle/tokenTotals)、selectedAgentId、fetchAgents/selectAgent/install/uninstall/start/stop/clone |
 | `chatStore` | agentStates → sessionStates（messages/tokenUsage/contextUsage/sessionStatus/model/provider/inputValue）、mqttConnected、MQTT 事件处理 |
 | `debugStore` | 调试会话状态、snapshots、connect/disconnect/resume/pause/step/stop/restart/rewind/reExecute/patchContext |
 | `layoutStore` | activePanelTab/resultsCollapsed/filePanelBounds |
@@ -687,7 +687,7 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 | 规则 | 实现 |
 |------|------|
 | 键盘导航 | 所有交互元素可通过 Tab 聚焦 |
-| ARIA 标签 | NavBar `role="navigation"`、Agent 列表 `role="list"/"listitem"`、拖拽手柄 `role="separator"`、输入框/按钮 `aria-label` |
+| ARIA 标签 | NavBar `role="navigation"`、Bot 列表 `role="list"/"listitem"`、拖拽手柄 `role="separator"`、输入框/按钮 `aria-label` |
 | 焦点指示器 | 可聚焦元素 `focus-visible:ring` |
 | 对比度 | 主要文本 zinc-700/zinc-900（浅）/ zinc-300（深），≥4.5:1 |
 | 工具提示 | `Tooltip` 组件（延迟、方向可控） |
