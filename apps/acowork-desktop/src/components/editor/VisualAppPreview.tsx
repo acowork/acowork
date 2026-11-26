@@ -11,11 +11,29 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { listApps, type AppDto } from "../../lib/apps-api";
 import { saveHostedAppFile } from "../../lib/workspaceFileSave";
 import { useWorkspaceFileBlob } from "../../hooks/useWorkspaceFileBlob";
-import { useFileEditorStore, type OpenFile } from "../../stores/fileEditorStore";
+import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { AppFrame } from "../apps/AppFrame";
 import { pickVisualApp, visualPreviewSearch } from "./visualCanvas";
 
-export function VisualAppPreview({ file }: { file: OpenFile }) {
+/**
+ * Everything this pane needs from the file it previews — the same triple the
+ * byte source and the app's `openFile` channel use. Deliberately not `OpenFile`:
+ * the doc library previews its imported files through the same component, and a
+ * document entry has no editor tab behind it.
+ */
+export interface VisualPreviewFile {
+    /** Editor tab id — only the save-bounce stamp needs it. Absent outside the
+     *  editor (doc library), where a write-back has nowhere to land anyway: an
+     *  imported file entry is read-only by design. */
+    id?: string;
+    agentId: string;
+    workspaceId: string;
+    relPath: string;
+    fileName: string;
+    previewSeq?: number;
+}
+
+export function VisualAppPreview({ file }: { file: VisualPreviewFile }) {
     const { t } = useTranslation();
     const [app, setApp] = useState<AppDto | null>(null);
     const [appError, setAppError] = useState<string | null>(null);
@@ -40,6 +58,10 @@ export function VisualAppPreview({ file }: { file: OpenFile }) {
      * Write-back (ADR-121): the app's Save lands on the workspace file the tab
      * was opened on; a Save As / Export asks the user where the new file goes.
      */
+    /** `undefined` outside the editor: an imported doc entry has no writable
+     *  workspace file behind it, so the app must not be offered a Save that
+     *  would 404. */
+    const editorTabId = file.id;
     const onSaveFile = useCallback(
         async ({ name, bytes, saveAs }: { name: string; bytes: Uint8Array; saveAs: boolean }) => {
             await saveHostedAppFile({
@@ -51,9 +73,9 @@ export function VisualAppPreview({ file }: { file: OpenFile }) {
             // Our own write bounces back as an fs event. Without this stamp the
             // tab reloads the blob, the app is handed the document again, and it
             // re-opens it on screen — the "save refreshes the whole app" bug.
-            useFileEditorStore.getState().noteHostedAppSave(file.id);
+            if (editorTabId) useFileEditorStore.getState().noteHostedAppSave(editorTabId);
         },
-        [file.agentId, file.workspaceId, file.relPath, file.id],
+        [file.agentId, file.workspaceId, file.relPath, editorTabId],
     );
 
     useEffect(() => {
@@ -137,7 +159,7 @@ export function VisualAppPreview({ file }: { file: OpenFile }) {
             app={app}
             search={visualPreviewSearch(app, file.relPath)}
             openFile={openFile}
-            onSaveFile={onSaveFile}
+            onSaveFile={editorTabId ? onSaveFile : undefined}
         />
     );
 }

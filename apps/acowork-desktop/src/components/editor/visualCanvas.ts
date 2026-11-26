@@ -10,7 +10,8 @@
  * built-in viewers; one that lists an image or vector format takes it over
  * from ImageViewer.
  */
-import type { AppDto } from "../../lib/apps-api";
+import { useEffect, useState } from "react";
+import { listApps, type AppDto } from "../../lib/apps-api";
 import type { ChatMessage } from "../../lib/types";
 import { HOSTED_PREVIEW_EXT_RE, NATIVE_CRAFT_EXTS, previewExtRe } from "./filePreview";
 
@@ -181,4 +182,32 @@ export function pickVisualApp(apps: AppDto[], fileName: string): AppDto | null {
     const owners = apps.filter((a) => appOwnsVisualExt(a, ext));
     owners.sort((a, b) => a.nav_order - b.nav_order || a.id.localeCompare(b.id));
     return owners[0] ?? null;
+}
+
+/**
+ * The installed apps, once per mount, `null` while loading.
+ *
+ * The two preview surfaces (workspace editor tab, doc-library pane) both ask
+ * "which app claims this file", and both need the same list to answer it —
+ * one loader so a second surface cannot end up with a different rule or a
+ * second `/apps` round-trip on every file switch.
+ */
+export function useHostedApps(): AppDto[] | null {
+    const [apps, setApps] = useState<AppDto[] | null>(null);
+    useEffect(() => {
+        let cancelled = false;
+        void listApps()
+            .then((list) => {
+                if (!cancelled) setApps(list);
+            })
+            // A failed list is "no app claims anything": the built-in viewers
+            // are always a correct answer, so this needs no error surface.
+            .catch(() => {
+                if (!cancelled) setApps([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+    return apps;
 }

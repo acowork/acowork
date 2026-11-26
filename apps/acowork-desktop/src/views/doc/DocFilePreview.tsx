@@ -9,9 +9,16 @@
  * `(agentId, workspaceId, relPath)` 三元组，`__doc__` 哨兵让 URL 构造器指向
  * `GET /api/doc/docs/{id}/file`。所以这里没有任何一个 viewer 需要被改动。
  *
+ * 「用哪个渲染器」也和工作区同一条规则、同一个顺序：先问装了的 craft app
+ * （wordcraft / deckcraft / gridcraft / pdfcraft 这类声明了 docx / xlsx / pptx
+ * / pdf 的），命中就挂 app 的 iframe（`VisualAppPreview`，与编辑器 tab 同一个
+ * 组件），没命中才回落到内置 viewer。`pickVisualApp` + `useHostedApps` 是两侧
+ * 共用的那份判定，所以侧边栏换个文件不会有一边用 app、一边用内置 viewer。
+ *
  * 唯一的差别是「加入对话」那一组手势：文档库条目没有工作区路径可交给 agent，
  * 所以在 ImageViewer 上禁用（带原因 tooltip），文档类 viewer 拿到空的 chat
- * hand-off —— 与工作区里一个没有 composer 的会话表现一致。
+ * hand-off —— 与工作区里一个没有 composer 的会话表现一致。app 的保存回写同理：
+ * 导入条目在服务端只读，所以不接 `onSaveFile`。
  */
 import { Suspense } from "react";
 import { Loader2 } from "lucide-react";
@@ -20,6 +27,8 @@ import { useWorkspaceFileBlob } from "../../hooks/useWorkspaceFileBlob";
 import { docFileRef } from "../../lib/workspaceFileBlob";
 import { renderDocumentViewer } from "../../components/editor/documentViewer";
 import { ImageViewer } from "../../components/editor/ImageViewer";
+import { VisualAppPreview } from "../../components/editor/VisualAppPreview";
+import { isHostedPreviewCandidate, pickVisualApp, useHostedApps } from "../../components/editor/visualCanvas";
 import type { DocMeta } from "../../lib/doc-types";
 
 /** 文档库预览没有工作区路径，所以图像 viewer 的对话手势不可用。 */
@@ -30,8 +39,28 @@ export function DocFilePreview({ doc }: { doc: DocMeta }) {
   const file = docFileRef(doc);
   const ext = (doc.ext ?? "").toLowerCase();
   const isImage = IMAGE_EXT_RE.test(ext);
+  // null while `/apps` is in flight. Same two gates the editor tab uses: hold
+  // the spinner only for formats an app could claim, then hand it the document.
+  const apps = useHostedApps();
+  const visualApp = apps ? pickVisualApp(apps, file.fileName) : null;
+  const waitForVisualApp = apps === null && isHostedPreviewCandidate(file.fileName);
   // 图片要 blob URL（canvas 裁剪 / <img src>）；文档类 viewer 自己拉字节。
   const imageBlob = useWorkspaceFileBlob(isImage ? file : null, { mode: "url" });
+
+  if (waitForVisualApp) return <Busy label={t("common.loading")} />;
+
+  if (visualApp) {
+    return (
+      <VisualAppPreview
+        file={{
+          agentId: file.agentId,
+          workspaceId: file.workspaceId,
+          relPath: file.relPath,
+          fileName: file.fileName,
+        }}
+      />
+    );
+  }
 
   if (isImage) {
     if (imageBlob.error) return <ErrorState message={imageBlob.error} />;

@@ -14,7 +14,6 @@ import {
   BookOpen,
   ChevronRight,
   FilePlus2,
-  FileText,
   Folder,
   FolderPlus,
   FolderOpen,
@@ -37,6 +36,8 @@ import { CAPSULE_PANE_CN } from "../../components/common/capsule";
 import { DOC_ROOT_DIR_ID } from "../../lib/doc-types";
 import type { DirMeta, DocMeta, LibraryMeta } from "../../lib/doc-types";
 import { LibraryIcon } from "./LibraryIcon";
+import { getFileIcon } from "../../components/workspace/FileTree/fileIcons";
+import { SetiIcon } from "../../components/common/SetiIcon";
 import { DocLibraryDialog } from "./DocLibraryDialog";
 import { DOC_IMPORT_ACCEPT } from "../../lib/doc-api";
 import { focusedDocDirId } from "./docFocusDir";
@@ -829,7 +830,12 @@ function DocRow({
           }}
           className="flex min-w-0 flex-1 items-center gap-1.5 py-0.5 text-left select-none"
         >
-          <FileText className="h-3.5 w-3.5 shrink-0 text-text-tertiary" aria-hidden />
+          {/* 和工作区同一张扩展名 → 图标表（Seti），所以 .pdf / .docx / .xlsx /
+              Markdown 在两侧长得一样；`ext` 为空的普通文档按 .md 取图标。 */}
+          <SetiIcon
+            name={getFileIcon(`${doc.name}.${doc.ext ?? "md"}`).name}
+            size={14}
+          />
           {/* 字重恒定，不靠 selected 切换 —— 否则同一棵树里目录恒 medium、
               文件只在选中时 medium，展开一层就忽粗忽细。选中态由行底色
               （accent/10 + accent 文字色）承担，见上方容器。 */}

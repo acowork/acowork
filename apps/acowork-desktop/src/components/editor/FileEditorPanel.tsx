@@ -40,8 +40,7 @@ import { usePreviewSessionStore } from "../../stores/previewSessionStore";
 import { WorkspaceHtmlPreview } from "./WorkspaceHtmlPreview";
 import { ImageViewer } from "./ImageViewer";
 import { VisualAppPreview } from "./VisualAppPreview";
-import { isHostedPreviewCandidate, pickVisualApp } from "./visualCanvas";
-import { listApps, type AppDto } from "../../lib/apps-api";
+import { isHostedPreviewCandidate, pickVisualApp, useHostedApps } from "./visualCanvas";
 import type { ImagePoint, ImageRect } from "./imageViewerGeometry";
 import { GitVirtualNav } from "./GitVirtualNav";
 import { CommitPicker } from "./CommitPicker";
@@ -202,20 +201,9 @@ export function FileEditorPanel({ width }: { width: number }) {
     useEffect(() => {
         setDiffEditor(null);
     }, [activeFileId]);
-    const [hostedApps, setHostedApps] = useState<AppDto[] | null>(null);
-    useEffect(() => {
-        let cancelled = false;
-        void listApps()
-            .then((apps) => {
-                if (!cancelled) setHostedApps(apps);
-            })
-            .catch(() => {
-                if (!cancelled) setHostedApps([]);
-            });
-        return () => {
-            cancelled = true;
-        };
-    }, []);
+    // Shared with the doc-library preview — one loader, one answer to
+    // "which app claims this extension".
+    const hostedApps = useHostedApps();
     // Monaco is loaded in the background (lib/monacoBootstrap.ts) so first
     // paint does not wait for it; gate <Editor> on it being ready. A failed
     // load must not leave an eternal spinner with no trace — monacoBootstrap
