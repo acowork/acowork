@@ -16,6 +16,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::commands::agent::{INSTALL_WAIT_SECS, submit_with_retry};
+use crate::commands::agent_library::UpgradeResult;
 use crate::gateway_client::{EnsureAck, OperationAck};
 use crate::hub_client::{self, HubIndex, LocalPackageInfo};
 use crate::state::AppState;
@@ -180,6 +181,56 @@ pub async fn install_from_hub(
         result.instance_id,
         started.elapsed().as_secs_f64(),
         result.already_present
+    );
+    Ok(result)
+}
+
+/// Download a Hub package and upgrade ONE existing instance with it.
+///
+/// The same integrity gate as [`install_from_hub`] — content-type checked,
+/// sha256 verified, manifest `agent_id` cross-checked against the catalog
+/// entry — because an upgrade replaces what the user is running. Everything
+/// after the download (stop → dispatch → wait → restart) is
+/// `agent_library::upgrade_instance`, shared with the Local tab: `/ensure`
+/// cannot do this job, it answers presence by package id and ignores the
+/// version, so a newer Hub build would silently no-op.
+#[tauri::command]
+pub async fn upgrade_from_hub(
+    state: State<'_, AppState>,
+    agent_id: String,
+    package_file: String,
+    sha256: String,
+    instance_id: String,
+) -> Result<UpgradeResult, String> {
+    const LABEL: &str = "HUB_UPGRADE";
+    let started = Instant::now();
+
+    let bytes = hub_client::download_package(&package_file)
+        .await
+        .map_err(|e| format!("[{LABEL}] {e}"))?;
+    hub_client::verify_sha256(&bytes, &sha256).map_err(|e| format!("[{LABEL}] {e}"))?;
+    // Same cross-check as the install path: the catalog entry must describe
+    // the bytes it points at, or an upgrade would quietly land another agent.
+    let manifest_id = crate::commands::agent::read_agent_id_from_package(&bytes)
+        .map_err(|e| format!("[{LABEL}] {e}"))?;
+    if manifest_id != agent_id {
+        return Err(format!(
+            "[{LABEL}] Catalog entry {agent_id} points at a package whose manifest says \
+             {manifest_id}; nothing was submitted"
+        ));
+    }
+    tracing::info!(
+        "[{LABEL}] downloaded {} bytes for {package_file} — checksum and manifest id ok",
+        bytes.len()
+    );
+
+    let result =
+        crate::commands::agent_library::upgrade_instance(&state, LABEL, &instance_id, &bytes)
+            .await?;
+    tracing::info!(
+        "[{LABEL}] {package_file} -> instance {} in {:.1}s",
+        result.instance_id,
+        started.elapsed().as_secs_f64()
     );
     Ok(result)
 }

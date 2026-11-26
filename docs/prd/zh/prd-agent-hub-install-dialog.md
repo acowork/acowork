@@ -93,26 +93,29 @@ ACowork 装机后的第一个真实问题不是"怎么用"，而是"能装什么
 
 本地安装是"我已经有文件"的路径，属于少数派；默认落在库上，才能承接"我不知道装什么"的多数派。Local tab 永远可用，Hub 不可达不影响它（§7）。
 
-### D2 主按钮走 `/api/agents/ensure`，「再装一个实例」走 `/api/agents/install`
+### D2 两个动作、两个按钮：`安装` 与 `升级`
 
-ADR-073 下**多实例合法**，`/install` 永远多落一个实例。用户在列表里重复点"安装"不应产生十个实例，所以主按钮必须是幂等的 `ensure`：
+ADR-073 下**多实例合法**，intent 因此只有三种，端点一一对应：
 
 | 端点 | 语义 | 用在 |
 | --- | --- | --- |
-| `POST /api/agents/ensure` | 目标节点上"确保存在"，最多一个实例（`resolve_ensure`，`core/acowork-gateway/src/http/agents.rs:1322`） | 卡片主按钮 |
-| `POST /api/agents/install` | 显式再装一个实例 | 卡片 `⋯` → 「再装一个实例」 |
+| `POST /api/agents/ensure` | 目标节点上"确保存在"，最多一个实例（`resolve_ensure`，`core/acowork-gateway/src/http/agents.rs:1344`） | 目标节点没有该包实例时的 `安装` |
+| `POST /api/agents/install` | 显式再装一个实例 | 已有实例后的 `安装`（文案「再装一个实例」） |
+| `POST /api/agents/{instance_id}/upgrade` | 覆盖已有实例的包内容，保留 `workspace/`（`agents.rs:1931` → node `upgrade_package`） | `升级` |
 
 `EnsureAck.already_present` 为真时不新增实例，直接用返回的 `instance_id` 选中。
 
-**主按钮的语义随目标节点已有的实例数走**：目标节点上还没有该包的实例时，主按钮是幂等的 `ensure`；已经有了（即"再装一个"），按钮改为非幂等的 `/install` 并如实显示「再装一个实例」——多实例是合法行为，按钮不能因为"已经装过"而变成死路。
+**`安装` 的语义随目标节点已有的实例数走**：没有实例时是幂等的 `ensure`；有实例时改为非幂等的 `/install` 并如实显示「再装一个实例」——多实例是合法行为，按钮不能因为"已经装过"而变成死路。**本次打开内经 `ensure` 装过的包例外**：其按钮保持 `ensure` 不变（REQ-005），否则第一次点击会被读成"没生效"，第二次点击就落第二个实例。
 
-但**本次打开内经 `ensure` 装过的包例外**：其主按钮保持 `ensure` 不变。对话框在成功后不自动关闭（REQ-013），用户可能在同一次打开里连点同一张卡片；按钮若在点击后立刻改文案改语义，第一次点击会被读成"没生效"，第二次点击就会落第二个实例——而"再装一个"是 `⋯` 菜单的显式职责（REQ-006），不该由主按钮的第二次点击触发。
+**`升级` 与 `安装` 并存，不合并成一个按钮**（REQ-035）：升级是"覆盖已有的"，安装是"再加一个"，语义不可互换。`升级` 只在目标节点上存在**版本更低**的实例时出现，且只作用于这些实例（REQ-036）。
 
-### D3 v1 不做任何"已安装 / 可升级"状态
+`/ensure` 不能顶替 `升级`：它按 `agent_id` 回答存在性，完全不看版本（`resolve_ensure` 同文件 `:1344`；node 侧闸门 `core/acowork-node/src/package/install_gate.rs:200`），所以新版本包点下去只会得到 `already_present`，磁盘一个字节都不变——这正是本版要修的缺陷。
 
-被否决的方案：客户端比对 `agent_id` + `version` 得出三态。否决原因：**版本是实例级的**（`core/acowork-node/src/package/upgrade.rs:97` 按 `instance_id` 记录版本变迁），同包不同实例可停在任意版本，包级"已装/未装"必然说错。改用服务端 `ensure` 回答存在性，客户端不算状态。
+### D3 不做包级状态；可升级判断按实例做
 
-边界（避免实现时拉扯）：允许「本节点已有 N 个实例」这类**纯信息文案**（数据是 `agentStore.agents` 已有的本地事实，见 REQ-018），不允许任何**驱动按钮态**的"已安装 / 可升级"判断或提示。
+v1 否决的是**包级**三态：客户端比对 `agent_id` + `version` 得出"已装/未装"，因为**版本是实例级的**（`core/acowork-node/src/package/upgrade.rs:36` 按 `instance_id` 记录版本变迁），同包不同实例可停在任意版本，包级判断必然说错。
+
+v0.3 起 `升级` 按钮需要判断，边界因此收窄为：**只允许按实例判断，不允许出现包级"已装/未装"**。数据全部来自本地事实 —— `agentStore.agents` 每个实例的 `version` + `node_id`，与候选版本（Hub 卡片 `version` / 本地行 `manifest.version`）逐实例比较（REQ-036，`lib/agentHub.ts` 的 `outdatedInstancesOnNode`）。仍不允许把 `ensure` 换成一个客户端算出来的存在性结论。
 
 ### D4 节点选择留在对话框内，不新开第二条安装路径
 
@@ -244,7 +247,7 @@ graph TD
 | F7 | `ExtensionsView` 是 Gateway extensions 的空壳，有独立 TODO | **不要**把 Bot 库塞进去，否则"扩展"与"bot"两个概念永久纠缠（`src/views/ExtensionsView.tsx` 头部注释） |
 | F8 | 安装成功后 `AgentStorage` 以 `instance_id` 为键 | 选中必须用 ack 的 `instance_id`，用 `agent_id` 会 404 或选错实例（ADR-073） |
 | F9 | Node 安装侧非 dev 模式强制验签 | Hub 包签名与主仓 `acowork-sign` v1 布局字节一致，可直接安装（`tools/signing.py` 有实测记录） |
-| F10 | `AgentManifest.version` 是自由 `String`（`core/acowork-core/src/manifest.rs:601`），无校验、无 `semver` crate | 本版只展示不比较。将来做升级时必须定义可解析性兜底，禁止字符串比较（`1.10.0` vs `1.9.0` 会判错）——留给 §11 的任务 |
+| F10 | `AgentManifest.version` 是自由 `String`（`core/acowork-core/src/manifest.rs:601`），无校验、无 `semver` crate | 本版只展示不比较。将来做升级时必须定义可解析性兜底，禁止字符串比较（`1.10.0` vs `1.9.0` 会判错）——**v0.3 已实现**：`compareVersions`（`apps/acowork-desktop/src/lib/agentHub.ts`）按点分段 numeric 比较，段缺失按 0；预发布/构建元数据不比序（`1.0.0-beta` 视作 `1.0.0`），见该函数的 `ponytail:` 注释 |
 | F11 | 拖放能力在本仓库**从未实现过**：`dragDropEnabled` 未配置、没有 `onDragDropEvent` 调用 | Tauri v2 默认开启窗口级 drag-drop 拦截，Windows 上可能吃掉 webview 的 HTML5 `drop` 事件。REQ-020 必须先做一次最小验证，不要按"HTML5 DnD 直接可用"排期 |
 
 新增文件建议（命名待实现时定）：
@@ -269,16 +272,16 @@ graph TD
 
 ---
 
-## 11. 不在本 PRD 范围（另开任务）
+## 11. 不在本 PRD 范围 / 已落地
 
-**「已安装」聚合 Tab + 版本比对 + 升级动作。** 拆出去的理由不是价值低，而是它自带一整块独立工程：
+**版本比对 + 升级动作 —— v0.3 已落地**（REQ-035–038）。四个前置阻塞点的解法：
 
-1. 桌面端**完全没有升级链路** —— `gateway_client.rs` / `commands/agent.rs` 无 upgrade；Gateway 侧 `POST /api/agents/{id}/upgrade`（`agents.rs:1902`）的 route 变量是 **`instance_id`**，且要重传整个包。
-2. **运行中的实例不能升级** —— `upgrade_package` 要求先停（`core/acowork-node/src/package/upgrade.rs:40`）。
-3. **逐实例、无批量事务** —— 升级是 fire-and-forget MQTT dispatch，N 个实例 N 次，部分失败必须逐个呈现。
-4. **版本比较策略未定义** —— 见 F10。
+1. **桌面端升级链路** —— 新增 `commands::agent_library::upgrade_instance`（共享给本地与 Hub 两条入口）、`upgrade_local_agent` / `upgrade_from_hub` 两条命令，`gateway_client::upgrade_agent` 打 `POST /api/agents/{instance_id}/upgrade`（route 变量是 `instance_id`，整包重传）。
+2. **运行中的实例不能升级** —— `upgrade_instance` 先按 Gateway 的 `alive` 判定停实例，升级后**按原状态启回**（`dev_mode` 沿用当时的 `debug_state`），不把用户的 bot 留在离线。
+3. **逐实例、无批量事务** —— 前端按实例循环，每个实例一次调用；失败即停并报出是哪个实例，不做"整批成功"的假象。
+4. **版本比较** —— 前端纯函数 `compareVersions`（numeric 分段，`1.10.0` > `1.9.0`；预发布标签按相等处理，见函数的 `ponytail:` 注释）。Rust 侧不重复实现：node 的 `upgrade_package` 本来就不看版本方向，只校验 `agent_id` 一致。
 
-该任务的输入已经具备：版本是实例级的、`data/index.json` 有 `version`、`agentStore.agents` 有每个实例的 `version` + `node_id`。
+仍需另开任务：**「已安装」聚合 Tab**（跨节点看"我装了什么"），本版只做了卡片/行上的升级动作。
 
 ---
 
@@ -381,8 +384,9 @@ flowchart LR
     B3["publish 向导 build"] -->|"复制产物"| B2
     B4["拖放 / 选择文件<br/>不落库"] --> L
     L --> R["末行：+ 添加 agent 文件"]
-    L -->|"主按钮"| E["ensure（幂等）"]
-    L -->|"⋯ 再装一个实例"| I["install（多实例合法）"]
+    L -->|"安装（无实例）"| E["ensure（幂等）"]
+    L -->|"安装（已有实例）"| I["install（多实例合法）"]
+    L -->|"升级（有旧版本实例）"| U["upgrade（逐实例，保留 workspace）"]
     O["打开对话框"] -->|"不 await"| P["后台预热 Hub index"]
     O --> L
 ```
@@ -396,8 +400,8 @@ flowchart LR
 | REQ-023 | Local 列表渲染库目录下全部 `*.agent`，按文件名升序 | P0 | 7 个内置包首屏全出；非 `.bot` 文件不出现 |
 | REQ-024 | 每行含：文件名、`agent_id`、`version`、`name`、大小、权限项数，`description` 两行截断 | P0 | 全部字段来自包内 `manifest.toml`，**不靠文件名猜身份** |
 | REQ-025 | 末行固定「+ 添加 bot 文件」，走现有选择文件路径 | P0 | 列表为空时仍可见、可点；选中后的行为与 v0.1 REQ-011 一致 |
-| REQ-026 | 行主按钮调 `ensure`（目标节点） | P0 | 连点两次不产生第二个实例；`already_present` 时选中已有实例并提示"已在本节点" |
-| REQ-027 | 行 `⋯` →「再装一个实例」调 `/install` | P0 | 实例数 +1；多实例合法，不报错 |
+| REQ-026 | 目标节点无该包实例时，行/卡片的 `安装` 调 `ensure` | P0 | 连点两次不产生第二个实例；`already_present` 时选中已有实例并提示"已在本节点" |
+| REQ-027 | 目标节点已有实例时，同一个 `安装` 调 `/install` | P0 | 实例数 +1；多实例合法，不报错 |
 | REQ-028 | 空目录（播种失败 / 被清空）显示空态 + 添加入口 + 原因 | P0 | 不出现空白页；原因用 IO 原文，不写猜测式文案；"重新播种"按钮 P1 |
 | REQ-029 | publish 向导 distribute 步骤把产物复制进库目录 | P1 | 复制成功后列表刷新一次即出现；同 `agent_id` 同 `version` 覆盖同名文件 |
 | REQ-030 | 同 `agent_id` 不同 `version` 的文件分别成行 | P0 | 禁止按 `agent_id` 去重（否则新发布的版本被旧文件藏掉） |
@@ -405,6 +409,10 @@ flowchart LR
 | REQ-032 | 列表刷新时机：打开对话框时、publish 复制后，各一次 | P0 | 不轮询，不引文件系统 watcher |
 | REQ-033 | `examples/` → `agents/`（已执行），功能性命中与现行文档同步 | P0 | 三个示例包测试通过（`example_manifests` / `example_packages` / `bootstrap_integration`）；打包资源映射指向 `agents/agent-packages` |
 | REQ-034 | 改名记录进 README / 本 PRD，ADR 正文不动 | P0 | 改动清单里 ADR 文件数为 0 |
+| REQ-035 | 目标节点上存在版本更低的实例时，`升级` 与 `安装` 两个按钮并存 | P0 | 升级为主色、安装为次要；不存在旧实例时只有 `安装`，不得出现"升级"死按钮；两者语义分别是"覆盖已有"与"再加一个" |
+| REQ-036 | 版本比较**逐实例**、numeric 分段 | P0 | `outdatedInstancesOnNode` 只选 `node_id` 与包 id 同时命中且 `version` 严格更低的实例；`1.10.0` 判为高于 `1.9.0`；条目版本不可读时不判可升级；不出现包级"已装/未装"文案 |
+| REQ-037 | 升级前先停、升级后按原状态启回 | P0 | 运行中的实例先 `stop` 再 `POST /agents/{id}/upgrade`；`workspace/`（会话、设置、实例名）保留；升级完原来在跑就启回，`debug_state=enabled` 的沿用 dev_mode |
+| REQ-038 | 升级逐实例执行，失败逐个呈现 | P0 | 一个包 N 个旧实例 = N 次调用；某次失败即停并报出该实例，不谎报整批成功；成功 toast 带 `from/to` 版本 |
 
 ### 14.4 状态与边界（补充 §7）
 

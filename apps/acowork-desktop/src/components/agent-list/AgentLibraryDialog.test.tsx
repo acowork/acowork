@@ -163,6 +163,16 @@ const LOCAL_ROW_BROKEN = {
   error: "Not a valid .bot package (ZIP): invalid Zip archive",
 };
 
+/** One installed instance as `agentStore.agents` holds it (meta-only). */
+function installedEntry(
+  agentId: string,
+  instanceId: string,
+  nodeId: string,
+  version = "1.0.0",
+) {
+  return { [instanceId]: { meta: { instance_id: instanceId, agent_id: agentId, node_id: nodeId, version } } };
+}
+
 function mockCatalog(agents: unknown[]) {
   h.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
     if (command === "fetch_hub_index") {
@@ -365,27 +375,19 @@ describe("hub install", () => {
     expect(screen.getByRole("dialog")).toBeTruthy();
   });
 
-  // REQ-006 / D2: the primary button is idempotent, so the extra-instance
-  // entry is the only way to create a second instance. Without coverage here
-  // a regression to `ensure: true` would silently remove that capability.
-  it("sends the card menu entry as a non-idempotent install", async () => {
-    await renderLibraryTab();
-    const triggers = await screen.findAllByRole("button", { name: "agentHub.moreActions" });
-    fireEvent.click(triggers[0]);
-    // The menu portals with `visibility: hidden` until a size measurement that
-    // never lands under jsdom, and role queries skip hidden subtrees — so the
-    // item is taken by its own class rather than by accessible name.
-    const item = await waitFor(() => {
-      const el = document.querySelector<HTMLButtonElement>(".context-menu-item");
-      if (!el) throw new Error("card menu did not render");
-      return el;
-    });
-    fireEvent.click(item);
+  // REQ-006 / D2: with an instance already on the node the 安装 button means
+  // "one more", and it has to say so — a regression to `ensure: true` would
+  // silently remove that capability.
+  it("sends the second-instance install as a non-idempotent install", async () => {
+    h.agent.agents = installedEntry("com.acowork.safe", "inst-old", "n1");
+    await renderLibraryTab({ initialNodeId: "n1" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.installAnother" }));
 
     await waitFor(() =>
       expect(h.invoke).toHaveBeenCalledWith(
         "install_from_hub",
-        expect.objectContaining({ ensure: false }),
+        expect.objectContaining({ agentId: "com.acowork.safe", ensure: false }),
       ),
     );
   });
@@ -444,10 +446,6 @@ describe("hub install", () => {
 // button. The moment the target node holds one instance, the click lands
 // another (ADR-073 multi-instance is legal) — and the button says so.
 describe("multi-instance routing", () => {
-  function installedEntry(agentId: string, instanceId: string, nodeId: string) {
-    return { [instanceId]: { meta: { agent_id: agentId, node_id: nodeId } } };
-  }
-
   it("sends ensure:false and relabels the button when the node already holds an instance", async () => {
     h.agent.nodes = [ONLINE_NODE];
     h.agent.agents = installedEntry("com.acowork.safe", "inst-old", "n1");
@@ -505,6 +503,92 @@ describe("multi-instance routing", () => {
       expect(calls.length).toBe(2);
       expect(calls[1][1]).toMatchObject({ agentId: "com.acowork.safe", ensure: true });
     });
+  });
+});
+
+// REQ-035–038: a package whose catalog/file version is NEWER than what the
+// target node runs offers 升级 beside 安装. `/ensure` cannot stand in for it —
+// it answers presence by package id, so the newer package would be a no-op.
+describe("upgrade routing (REQ-035–038)", () => {
+  it("offers 升级 beside 安装 and upgrades only the outdated instance", async () => {
+    h.agent.agents = {
+      ...installedEntry("com.acowork.safe", "inst-old", "n1", "0.9.0"),
+      ...installedEntry("com.acowork.safe", "inst-current", "n1", "1.0.0"),
+    };
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "fetch_hub_index") {
+        return { schema_version: 2, base_url: "https://hub.acowork.ai", agents: [SAFE_AGENT] };
+      }
+      if (command === "upgrade_from_hub") {
+        return {
+          instance_id: "inst-old",
+          from_version: "0.9.0",
+          to_version: "1.0.0",
+          restarted: false,
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    await renderLibraryTab({ initialNodeId: "n1" });
+
+    // Both actions are on screen — an upgrade replaces, an install adds.
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.upgrade" }));
+    expect(screen.getByRole("button", { name: "agentHub.installAnother" })).toBeDefined();
+
+    await waitFor(() =>
+      expect(h.invoke).toHaveBeenCalledWith(
+        "upgrade_from_hub",
+        expect.objectContaining({
+          agentId: "com.acowork.safe",
+          packageFile: "downloads/com.acowork.safe.agent",
+          instanceId: "inst-old",
+        }),
+      ),
+    );
+    // The current instance is not touched: one call, naming the old one.
+    const upgrades = h.invoke.mock.calls.filter(([command]) => command === "upgrade_from_hub");
+    expect(upgrades).toHaveLength(1);
+    expect(h.addToast).toHaveBeenCalledWith(expect.objectContaining({ type: "success" }));
+    // Never the idempotent install path — that is the no-op being fixed.
+    expect(h.invoke).not.toHaveBeenCalledWith("install_from_hub", expect.anything());
+  });
+
+  it("does not offer 升级 when every instance is already current", async () => {
+    h.agent.agents = installedEntry("com.acowork.safe", "inst-current", "n1", "1.0.0");
+    await renderLibraryTab({ initialNodeId: "n1" });
+
+    await screen.findByRole("button", { name: "agentHub.installAnother" });
+    expect(screen.queryByRole("button", { name: "agentHub.upgrade" })).toBeNull();
+  });
+
+  it("upgrades a library file onto the older instance on the node", async () => {
+    h.agent.agents = installedEntry("com.acowork.demo", "inst-old", "n1", "1.0.0");
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "fetch_hub_index") throw new Error("offline");
+      if (command === "list_local_agent_packages") return { rows: [LOCAL_ROW_V2], warning: null };
+      if (command === "upgrade_local_agent") {
+        return {
+          instance_id: "inst-old",
+          from_version: "1.0.0",
+          to_version: "1.1.0",
+          restarted: true,
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    renderOpen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.upgrade" }));
+
+    await waitFor(() =>
+      expect(h.invoke).toHaveBeenCalledWith(
+        "upgrade_local_agent",
+        expect.objectContaining({ packagePath: LOCAL_ROW_V2.path, instanceId: "inst-old" }),
+      ),
+    );
+    expect(h.addToast).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "agentHub.upgraded" }),
+    );
   });
 });
 
@@ -1041,19 +1125,13 @@ describe("local agent library (REQ-021..032)", () => {
     expect(h.agent.selectAgent).toHaveBeenCalledWith("inst-existing");
   });
 
-  // REQ-027: the row menu is the non-idempotent path — that is where a second
-  // instance is allowed to come from.
-  it("installs another instance from the row menu through /install", async () => {
+  // REQ-027: once the node holds this file's version, the row's 安装 button is
+  // the non-idempotent `/install` — that is where a second instance comes from.
+  it("installs another instance from the row through /install", async () => {
+    h.agent.agents = installedEntry("com.acowork.demo", "inst-old", "n1", LOCAL_ROW.version);
     mockLibrary([LOCAL_ROW]);
     const closed = renderOpen();
-    fireEvent.click(await screen.findByRole("button", { name: "agentHub.moreActions" }));
-
-    const item = await waitFor(() => {
-      const el = document.querySelector<HTMLButtonElement>(".context-menu-item");
-      if (!el) throw new Error("row menu did not render");
-      return el;
-    });
-    fireEvent.click(item);
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.installAnother" }));
 
     await waitFor(() => expect(h.agent.installAgent).toHaveBeenCalledWith(LOCAL_ROW.path, "n1"));
     expect(h.invoke).not.toHaveBeenCalledWith("ensure_local_agent", expect.anything());

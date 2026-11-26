@@ -160,6 +160,21 @@ pub struct LocalEnsureResult {
     pub already_present: bool,
 }
 
+/// Result of [`upgrade_local_agent`] and `commands::hub::upgrade_from_hub` —
+/// one instance replaced in place, the version transition it went through, and
+/// whether it was restarted afterwards.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UpgradeResult {
+    pub instance_id: String,
+    /// Version the instance carried before the upgrade.
+    pub from_version: String,
+    /// Version it carries now.
+    pub to_version: String,
+    /// `true` when the instance was running, so it was stopped for the swap
+    /// and started again afterwards (an upgrade must not leave it offline).
+    pub restarted: bool,
+}
+
 // ── Paths ──────────────────────────────────────────────────────────────────
 
 /// `app_local_data_dir()/agent-library`
@@ -673,6 +688,160 @@ pub async fn ensure_local_agent(
     })
 }
 
+/// Upgrade a library file onto ONE existing instance — the Local tab's
+/// "upgrade" action. `/ensure` cannot do this: it answers presence by package
+/// id and never looks at the version, so a newer file would be a no-op.
+///
+/// Same library confinement as [`ensure_local_agent`]: the webview may only
+/// hand back a path the list gave it.
+#[tauri::command]
+pub async fn upgrade_local_agent(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    package_path: String,
+    instance_id: String,
+) -> Result<UpgradeResult, String> {
+    const LABEL: &str = "LOCAL_UPGRADE";
+    let started = std::time::Instant::now();
+
+    let path = PathBuf::from(&package_path);
+    if !has_package_extension(&path) {
+        return Err(format!("Not an .agent package: {package_path}"));
+    }
+    let library = library_dir(&app)?;
+    if !is_inside(&path, &library) {
+        return Err(format!(
+            "{package_path} is not inside the local agent library ({})",
+            library.display()
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read {package_path}: {e}"))?;
+
+    let result = upgrade_instance(&state, LABEL, &instance_id, &bytes).await?;
+    tracing::info!(
+        "[{LABEL}] {package_path} -> instance {} in {:.1}s",
+        result.instance_id,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(result)
+}
+
+/// Replace ONE existing instance with `bytes` — shared by the Local tab and
+/// the Hub card, because the node side is identical for both.
+///
+/// Three steps in this order, and none of them is optional:
+///
+/// 1. **Stop it if it is running.** The node refuses to swap a live instance
+///    (`upgrade_package` → `AgentAlreadyRunning`). The verdict comes from the
+///    Gateway's own `alive` (a fresh read), never from a UI snapshot.
+/// 2. **Dispatch the upgrade** with the whole package; the Gateway spools it,
+///    checks the manifest's `agent_id` against the target and tells the node.
+/// 3. **Wait for the inventory to report a different version**, then start it
+///    again when it was running. Upgrading replaces package content and keeps
+///    `workspace/` — sessions and settings survive, but a stopped instance
+///    would not come back on its own.
+///
+/// There is no batch form: instances are upgraded one call at a time and a
+/// failure names the one that failed (PRD agent-hub-install-dialog §11).
+pub(crate) async fn upgrade_instance(
+    state: &AppState,
+    label: &str,
+    instance_id: &str,
+    bytes: &[u8],
+) -> Result<UpgradeResult, String> {
+    let before = {
+        let client = state.gateway.read().await;
+        client
+            .get_agent_detail(instance_id)
+            .await
+            .map_err(|e| format!("[{label}] cannot read instance {instance_id}: {e}"))?
+    };
+    let node_id = before
+        .node_id
+        .clone()
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| {
+            format!("[{label}] instance {instance_id} has no node in the Gateway inventory")
+        })?;
+    let was_running = running_for_upgrade(before.alive, &before.lifecycle);
+    // ADR-048: dev mode is a startup intent, so a restart after the swap has
+    // to carry the same one the agent is in right now.
+    let dev_mode = before.debug_state.as_deref() == Some("enabled");
+
+    if was_running {
+        let client = state.gateway.read().await;
+        client
+            .stop_agent(instance_id)
+            .await
+            .map_err(|e| format!("[{label}] stop before upgrade failed: {e}"))?;
+    }
+
+    let state_for_op = state;
+    let bytes_owned = bytes.to_vec();
+    let instance_for_op = instance_id.to_string();
+    let node_for_op = node_id.clone();
+    submit_with_retry(state, label, move || {
+        let state = state_for_op;
+        let bytes = bytes_owned.clone();
+        let instance_id = instance_for_op.clone();
+        let node_id = node_for_op.clone();
+        async move {
+            let client = state.gateway.read().await;
+            client.upgrade_agent(&instance_id, &bytes, &node_id).await
+        }
+    })
+    .await
+    .map_err(|e| format!("[{label}] upgrade dispatch failed: {e}"))?;
+
+    let after = {
+        let client = state.gateway.read().await;
+        client
+            .wait_for_agent_version_change(
+                instance_id,
+                &before.version,
+                std::time::Duration::from_secs(INSTALL_WAIT_SECS),
+            )
+            .await
+            .map_err(|e| {
+                format!(
+                    "[{label}] upgrade dispatched but instance {instance_id} did not settle: {e}"
+                )
+            })?
+    };
+
+    if was_running {
+        let client = state.gateway.read().await;
+        client.start_agent(instance_id, dev_mode).await.map_err(|e| {
+            format!(
+                "[{label}] upgraded v{} -> v{} but restarting it failed: {e}",
+                before.version, after.version
+            )
+        })?;
+    }
+
+    tracing::info!(
+        "[{label}] {instance_id} v{} -> v{} (restarted={was_running})",
+        before.version,
+        after.version
+    );
+    Ok(UpgradeResult {
+        instance_id: instance_id.to_string(),
+        from_version: before.version,
+        to_version: after.version,
+        restarted: was_running,
+    })
+}
+
+/// Whether the node will refuse the swap until this instance is stopped.
+///
+/// `alive` alone is not enough: a `starting` instance already has a process
+/// the node's `is_running` sees, so skipping the stop would fail the upgrade
+/// with `AgentAlreadyRunning`. `failed` / `offline` / `unspecified` mean no
+/// process is left to stop (and `/stop` would reject them as "not running").
+pub(crate) fn running_for_upgrade(alive: bool, lifecycle: &str) -> bool {
+    alive || matches!(lifecycle, "starting" | "http_ready" | "sessions_ready")
+}
+
 /// True when `path` is a file strictly below `root`.
 ///
 /// No `canonicalize`: the library path and the row path are both produced by
@@ -780,6 +949,19 @@ type = "FilesystemRead"
             .unwrap();
         zip.write_all(manifest.as_bytes()).unwrap();
         zip.finish().unwrap();
+    }
+
+    /// The upgrade's stop decision. Getting it wrong is visible to the user
+    /// either way: a skipped stop aborts the upgrade (`AgentAlreadyRunning`),
+    /// an over-eager one tries to stop an instance that is not running.
+    #[test]
+    fn upgrade_stops_exactly_the_instances_that_hold_a_process() {
+        assert!(running_for_upgrade(true, "sessions_ready"));
+        assert!(running_for_upgrade(false, "starting"));
+        assert!(running_for_upgrade(false, "http_ready"));
+        assert!(!running_for_upgrade(false, "offline"));
+        assert!(!running_for_upgrade(false, "failed"));
+        assert!(!running_for_upgrade(false, "unspecified"));
     }
 
     #[test]

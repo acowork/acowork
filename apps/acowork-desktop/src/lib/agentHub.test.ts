@@ -16,6 +16,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 import { invoke } from "@tauri-apps/api/core";
 import {
+  compareVersions,
   countInstancesOnNode,
   fetchHubIndex,
   formatSizeBytes,
@@ -25,6 +26,7 @@ import {
   hubChipsOf,
   hubDeprecationOf,
   localChipsOf,
+  outdatedInstancesOnNode,
   resetHubIndexCache,
   searchHubAgents,
   type HubAgent,
@@ -216,6 +218,59 @@ describe("countInstancesOnNode", () => {
 
   it("says nothing when no target node is resolved", () => {
     expect(countInstancesOnNode(entries, "a", null)).toBe(0);
+  });
+});
+
+describe("compareVersions", () => {
+  it("compares numerically per segment, not as text", () => {
+    expect(compareVersions("1.10.0", "1.9.0")).toBe(1);
+    expect(compareVersions("1.9.0", "1.10.0")).toBe(-1);
+    expect(compareVersions("2.0.0", "1.99.99")).toBe(1);
+  });
+
+  it("treats equal and padded versions as equal", () => {
+    expect(compareVersions("1.2.3", "1.2.3")).toBe(0);
+    expect(compareVersions("1.2", "1.2.0")).toBe(0);
+    expect(compareVersions("v1.2.3", "1.2.3")).toBe(0);
+  });
+
+  it("ignores pre-release suffixes (documented ceiling)", () => {
+    expect(compareVersions("1.0.0-beta", "1.0.0")).toBe(0);
+  });
+});
+
+describe("outdatedInstancesOnNode", () => {
+  const entries = [
+    { instance_id: "i1", agent_id: "a", node_id: "n1", version: "1.0.0" },
+    { instance_id: "i2", agent_id: "a", node_id: "n1", version: "1.2.0" },
+    { instance_id: "i3", agent_id: "a", node_id: "n2", version: "0.1.0" },
+    { instance_id: "i4", agent_id: "b", node_id: "n1", version: "0.1.0" },
+  ];
+
+  it("returns only the older instances of that package on that node", () => {
+    expect(outdatedInstancesOnNode(entries, "a", "n1", "1.2.0").map((e) => e.instance_id)).toEqual([
+      "i1",
+    ]);
+    expect(outdatedInstancesOnNode(entries, "a", "n2", "1.10.0").map((e) => e.instance_id)).toEqual([
+      "i3",
+    ]);
+  });
+
+  it("counts every instance below the candidate and none at or above it", () => {
+    expect(outdatedInstancesOnNode(entries, "a", "n1", "1.2.0")).toHaveLength(1);
+    expect(outdatedInstancesOnNode(entries, "a", "n1", "1.3.0")).toHaveLength(2);
+    expect(outdatedInstancesOnNode(entries, "a", "n1", "1.0.0")).toHaveLength(0);
+  });
+
+  it("claims nothing without a target node or a readable candidate version", () => {
+    expect(outdatedInstancesOnNode(entries, "a", null, "9.9.9")).toHaveLength(0);
+    expect(outdatedInstancesOnNode(entries, "a", "n1", null)).toHaveLength(0);
+    expect(outdatedInstancesOnNode(entries, "a", "n1", "")).toHaveLength(0);
+  });
+
+  it("never calls an instance outdated when its own version is unreadable", () => {
+    const unreadable = [{ instance_id: "i5", agent_id: "a", node_id: "n1", version: "" }];
+    expect(outdatedInstancesOnNode(unreadable, "a", "n1", "1.0.0")).toHaveLength(0);
   });
 });
 

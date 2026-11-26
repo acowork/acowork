@@ -150,6 +150,19 @@ export interface LocalAgentEnsureResult {
 }
 
 /**
+ * One instance replaced in place — mirror of `commands::agent_library::
+ * UpgradeResult`. `from_version` / `to_version` are what the Gateway inventory
+ * reported either side of the swap, and `restarted` says whether it was
+ * running, so it was stopped for it and started again afterwards.
+ */
+export interface AgentUpgradeResult {
+  instance_id: string;
+  from_version: string;
+  to_version: string;
+  restarted: boolean;
+}
+
+/**
  * Permissions the user must explicitly accept before anything is submitted
  * (REQ-007). The Hub's own `high_risk_permissions` list wins when it is
  * published; this set is the fallback for entries that omit it, so a package
@@ -326,6 +339,74 @@ export function countInstancesOnNode(
   return entries.filter((e) => e.agent_id === agentId && e.node_id === nodeId).length;
 }
 
+/** An installed instance as the dialog sees it: which package, where, which version. */
+export interface InstalledInstanceRef {
+  instance_id: string;
+  agent_id: string;
+  node_id?: string | null;
+  /** Free-form manifest version (PRD F10) — compare with `compareVersions`. */
+  version: string;
+}
+
+/**
+ * Compare two manifest versions numerically per dotted segment, so `1.10.0`
+ * sorts above `1.9.0` (PRD F10 forbids a plain string compare).
+ *
+ * `ponytail:` no pre-release / build-metadata ordering — `1.0.0-beta` reads
+ * as `1.0.0`. Every shipped package uses plain `x.y.z`, so the ceiling is
+ * untested-by-prod; take the `semver` package if a real pre-release shows up.
+ */
+export function compareVersions(a: string, b: string): number {
+  if (a === b) return 0;
+  const segments = (v: string) =>
+    v
+      .trim()
+      .replace(/^v/i, "")
+      .split(/[-+]/)[0]
+      .split(".");
+  const pa = segments(a);
+  const pb = segments(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? "0";
+    const y = pb[i] ?? "0";
+    if (x === y) continue;
+    const nx = Number(x);
+    const ny = Number(y);
+    if (Number.isFinite(nx) && Number.isFinite(ny)) return nx < ny ? -1 : 1;
+    return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Instances of `agentId` on the target node whose version is OLDER than
+ * `candidateVersion` — exactly the set an "upgrade" has to replace.
+ *
+ * Version is per instance (ADR-073: several instances of one package may sit
+ * at different versions on one node), so this is a per-instance answer, never
+ * a package-level "installed / upgradable" verdict. An unreadable candidate
+ * version (a Local row whose manifest failed to parse) yields nothing: a file
+ * that cannot name its version cannot claim to be newer.
+ */
+export function outdatedInstancesOnNode<T extends InstalledInstanceRef>(
+  entries: ReadonlyArray<T>,
+  agentId: string,
+  nodeId: string | null,
+  candidateVersion: string | null | undefined,
+): T[] {
+  if (!nodeId || !candidateVersion) return [];
+  return entries.filter(
+    (e) =>
+      e.agent_id === agentId &&
+      e.node_id === nodeId &&
+      // An entry that carries no readable version cannot be called outdated:
+      // `Number("")` is 0, so an empty string would sort below every real
+      // version and flip the button on a missing field.
+      e.version !== "" &&
+      compareVersions(e.version, candidateVersion) < 0,
+  );
+}
+
 // ── Catalog access (session cache + persistent seed) ─────────────────────
 //
 // One successful fetch is reused for the rest of the session (PRD §7 "本地
@@ -410,6 +491,28 @@ export function installFromHub(input: {
   });
 }
 
+/**
+ * Upgrade ONE existing instance with a Hub package — download + verify +
+ * `POST /api/agents/{instance_id}/upgrade`, stop/restart included (see
+ * `commands::hub::upgrade_from_hub`).
+ *
+ * Not expressible through `/ensure`: that endpoint answers presence by package
+ * id, so a newer build of an installed package is a silent no-op there.
+ */
+export function upgradeFromHub(input: {
+  agentId: string;
+  packageFile: string;
+  sha256: string;
+  instanceId: string;
+}): Promise<AgentUpgradeResult> {
+  return invoke<AgentUpgradeResult>("upgrade_from_hub", {
+    agentId: input.agentId,
+    packageFile: input.packageFile,
+    sha256: input.sha256,
+    instanceId: input.instanceId,
+  });
+}
+
 /** Local `.agent` file summary (extension + manifest id + size). */
 export function inspectLocalPackage(packagePath: string): Promise<LocalPackageInfo> {
   return invoke<LocalPackageInfo>("inspect_local_package", { packagePath });
@@ -441,6 +544,22 @@ export function ensureLocalAgent(input: {
   return invoke<LocalAgentEnsureResult>("ensure_local_agent", {
     packagePath: input.packagePath,
     nodeId: input.nodeId,
+  });
+}
+
+/**
+ * Upgrade ONE existing instance with a library file
+ * (`commands::agent_library::upgrade_local_agent`): stop if running, replace
+ * the package content (`workspace/` survives), wait for the new version, start
+ * it again.
+ */
+export function upgradeLocalAgent(input: {
+  packagePath: string;
+  instanceId: string;
+}): Promise<AgentUpgradeResult> {
+  return invoke<AgentUpgradeResult>("upgrade_local_agent", {
+    packagePath: input.packagePath,
+    instanceId: input.instanceId,
   });
 }
 

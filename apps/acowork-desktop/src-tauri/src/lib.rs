@@ -642,9 +642,11 @@ pub fn run() {
             // Local tab: the user's own agent files (PRD §14, REQ-021–032).
             commands::agent_library::list_local_agent_packages,
             commands::agent_library::ensure_local_agent,
+            commands::agent_library::upgrade_local_agent,
             commands::hub::fetch_hub_index,
             commands::hub::inspect_local_package,
             commands::hub::install_from_hub,
+            commands::hub::upgrade_from_hub,
             commands::agent::wait_agent_installed,
             commands::agent::uninstall_agent,
             commands::agent::start_agent,
