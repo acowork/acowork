@@ -33,6 +33,30 @@ Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
   },
 });
 
+// Viewport boxes for the row-inside-item anchor (../common/scrollAnchor): top
+// from data-rt, height from data-oh. jsdom reports a zero rect for everything,
+// and the anchor reads ONE quantity — `row.top - item.top`, the row's offset
+// inside its item — so the fake only has to be consistent with itself, not
+// with the pane's scroll position.
+Object.defineProperty(Element.prototype, "getBoundingClientRect", {
+  configurable: true,
+  value(this: HTMLElement) {
+    const top = this.dataset?.rt === undefined ? 0 : Number(this.dataset.rt);
+    const height = this.dataset?.oh === undefined ? 0 : Number(this.dataset.oh);
+    return {
+      top,
+      bottom: top + height,
+      height,
+      left: 0,
+      right: 0,
+      width: 0,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    } as DOMRect;
+  },
+});
+
 interface Item {
   id: string;
 }
@@ -47,6 +71,10 @@ function setup(
     rowHeight?: number;
     estimateSize?: (item: Item, index: number, width: number) => number;
     followBottom?: boolean;
+    /** Per-row wrapper attributes (height, and any anchor the test paints). */
+    rowAttrs?: (item: Item, index: number) => Record<string, string>;
+    /** Row content — a block-shaped item paints rows INSIDE itself. */
+    renderItem?: (item: Item, index: number) => React.ReactNode;
   } = {},
 ) {
   const container = document.createElement("div");
@@ -86,8 +114,10 @@ function setup(
       scrollContainerRef={{ current: container }}
       followBottom={follow}
       estimateSize={opts.estimateSize}
-      rowAttrs={() => ({ "data-oh": String(rowH), "data-testid": "row" })}
-      renderItem={() => <span>row</span>}
+      rowAttrs={
+        opts.rowAttrs ?? (() => ({ "data-oh": String(rowH), "data-testid": "row" }))
+      }
+      renderItem={opts.renderItem ?? (() => <span>row</span>)}
     />
   );
 
@@ -171,6 +201,59 @@ describe("VirtualRowList shell", () => {
     s.scroll(s.container.scrollTop);
     expect(s.mountedIndexes()).toContain(250);
     expect(s.handle.current!.scrollToKey(`${prefix}-99999`)).toBe(false);
+  });
+
+  it("scrollToKey centres a ROW inside a tall item, not the item (history jump)", () => {
+    // The transcript folds a whole execution session's rounds into ONE item
+    // (ADR-106 D3/D4), anchored at its oldest round. Item 5 stands for such a
+    // block: 1200px tall, holding round `b7` 900px down inside it. Centring the
+    // ITEM put the reader on whatever round sat at 600px — a different message
+    // from the one they clicked in the history dialog.
+    const prefix = nextPrefix();
+    const s = setup(items(40, prefix), {
+      rowAttrs: (it) =>
+        it.id === `${prefix}-5`
+          ? { "data-oh": "1200", "data-testid": "row" }
+          : { "data-oh": "40", "data-testid": "row" },
+      renderItem: (it) =>
+        it.id === `${prefix}-5` ? (
+          <div data-seq="b7" data-rt="900" data-oh="60" />
+        ) : (
+          <span>row</span>
+        ),
+    });
+
+    // Coarse placement: the item's top edge at the pane's top. Rows are 40px
+    // plus the shell's 4px gap (5 × 44).
+    expect(s.handle.current!.scrollToKey(`${prefix}-5`, "start")).toBe(true);
+    const itemAligned = s.container.scrollTop;
+    expect(itemAligned).toBe(220);
+
+    // With the row named, the pane lands on it: 900px further down, less the
+    // half-viewport lead that centres a 60px row in the 400px pane.
+    expect(s.handle.current!.scrollToKey(`${prefix}-5`, "center", '[data-seq="b7"]')).toBe(true);
+    expect(s.container.scrollTop).toBe(itemAligned + 900 - (400 - 60) / 2);
+  });
+
+  it("scrollToKey anchors a row that is its own item (standalone message)", () => {
+    // A plain message row IS its item and carries `data-seq` on the wrapper:
+    // the anchor must reduce to the old item centring (its offset inside itself
+    // is zero), not answer false because `querySelector` cannot match the
+    // element it starts from.
+    const prefix = nextPrefix();
+    const s = setup(items(40, prefix), {
+      rowAttrs: (it) =>
+        it.id === `${prefix}-5`
+          ? { "data-oh": "120", "data-seq": "u9", "data-rt": "900" }
+          : { "data-oh": "40" },
+    });
+
+    expect(s.handle.current!.scrollToKey(`${prefix}-5`, "start")).toBe(true);
+    const itemAligned = s.container.scrollTop;
+    expect(itemAligned).toBe(220);
+    expect(s.handle.current!.scrollToKey(`${prefix}-5`, "center", '[data-seq="u9"]')).toBe(true);
+    // inItem = 0 (the item's own rect is the row's), lead = (400-120)/2 = 140.
+    expect(s.container.scrollTop).toBe(itemAligned - 140);
   });
 
   it("scrollToBottom is honest: false on zero items, true once positioned", () => {

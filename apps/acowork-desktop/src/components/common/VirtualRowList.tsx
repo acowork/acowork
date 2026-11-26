@@ -49,6 +49,7 @@ import React, {
 } from "react";
 import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
 import { decideBottomPin } from "./bottomAnchor";
+import { rowCentredScrollTop } from "./scrollAnchor";
 
 /** Fallback row height when neither the measured cache nor the adapter's
  *  estimator has an opinion. Generous enough that a short chat row
@@ -151,8 +152,16 @@ export interface VirtualRowListHandle {
   scrollToIndex: (index: number, align?: "start" | "center" | "end") => void;
   /** Jump to the row whose `keyOf` matches. Returns true only when the row
    *  is present AND the virtualizer has a scroll element (a false return
-   *  means the viewport did NOT move — do not treat the pane as positioned). */
-  scrollToKey: (key: string, align?: "start" | "center" | "end") => boolean;
+   *  means the viewport did NOT move — do not treat the pane as positioned).
+   *
+   *  `within` names a row INSIDE the item (`[data-seq="7"]`), for an item that
+   *  folds several transcript rows into one virtual one (a run block). The item
+   *  is placed first — that is what mounts the row — and the pane is then
+   *  corrected onto it, so a locate lands on the message the reader clicked and
+   *  not on the block that holds it. With `within`, `align` is ignored: the row
+   *  is centred (a row taller than the pane keeps its top edge). See
+   *  ./scrollAnchor.ts. */
+  scrollToKey: (key: string, align?: "start" | "center" | "end", within?: string) => boolean;
 }
 
 export interface VirtualRowListProps<T> {
@@ -464,8 +473,46 @@ export function VirtualRowList<T>({
   const keyPinRef = useRef<{
     key: string;
     align: "start" | "center" | "end";
+    /** A row inside the item (`[data-seq="7"]`), for an item that folds several
+     *  transcript rows into one. Re-resolved on every commit of the pin: the
+     *  row mounts with the item, so the first pass may still miss it. */
+    within?: string;
     deadline: number;
   } | null>(null);
+  /**
+   * Place the pane on a row INSIDE the item at `idx`, whose top edge was just
+   * aligned to the pane's top. Returns the offset it wrote, or null when the
+   * item or the row is not in the DOM yet (the caller keeps the coarse
+   * placement and retries on the next commit).
+   *
+   * Rect differences only: `row.top - item.top` is the row's offset within its
+   * item and is unaffected by where the pane happens to sit.
+   */
+  const placeWithinItem = useCallback(
+    (idx: number, within: string): number | null => {
+      const el = virtualizer.scrollElement;
+      if (!el) return null;
+      const itemEl =
+        virtualizer.elementsCache.get(idx) ??
+        el.querySelector<HTMLElement>(`[data-index="${idx}"]`);
+      if (!itemEl) return null;
+      // A standalone row IS its item (the wrapper carries its `data-seq`), and
+      // `querySelector` does not match the element itself.
+      const rowEl = itemEl.matches(within)
+        ? itemEl
+        : itemEl.querySelector<HTMLElement>(within);
+      if (!rowEl) return null;
+      const top = rowCentredScrollTop({
+        alignedTop: el.scrollTop,
+        clientHeight: el.clientHeight,
+        item: itemEl.getBoundingClientRect(),
+        row: rowEl.getBoundingClientRect(),
+      });
+      el.scrollTop = top;
+      return top;
+    },
+    [virtualizer],
+  );
   // ── Key-scroll convergence ───────────────────────────────────────
   // ponytail: bounded re-scroll (<= KEY_PIN_MS) rather than solving for the
   // converged height analytically. Ceiling: a row that measures in slower than
@@ -487,6 +534,14 @@ export function VirtualRowList<T>({
     // paint). Only the deadline ends the chase.
     if (performance.now() > req.deadline) {
       keyPinRef.current = null;
+      return;
+    }
+    if (req.within !== undefined) {
+      // Item top first (mounts the block, and is the reference the correction
+      // measures against), then the row inside it — re-issued together so the
+      // pair stays idempotent while heights settle.
+      virtualizer.scrollToIndex(idx, { align: "start" });
+      placeWithinItem(idx, req.within);
       return;
     }
     virtualizer.scrollToIndex(idx, { align: req.align });
@@ -566,7 +621,11 @@ export function VirtualRowList<T>({
         const clamped = Math.max(0, Math.min(index, count - 1));
         virtualizer.scrollToIndex(clamped, { align });
       },
-      scrollToKey: (key: string, align: "start" | "center" | "end" = "start") => {
+      scrollToKey: (
+        key: string,
+        align: "start" | "center" | "end" = "start",
+        within?: string,
+      ) => {
         const idx = itemsRef.current.findIndex(
           (it, i) => keyOfRef.current(it, i) === key,
         );
@@ -575,10 +634,21 @@ export function VirtualRowList<T>({
         // is attached — report false so the caller does not treat the pane
         // as positioned (the locate path depends on this).
         if (!virtualizer.scrollElement) return false;
-        virtualizer.scrollToIndex(idx, { align });
         // Ride the commits that follow: on a replaced window the offsets above
         // are still estimates, and they shrink the moment the rows measure.
-        keyPinRef.current = { key, align, deadline: performance.now() + KEY_PIN_MS };
+        keyPinRef.current = {
+          key,
+          align,
+          ...(within !== undefined ? { within } : {}),
+          deadline: performance.now() + KEY_PIN_MS,
+        };
+        if (within !== undefined) {
+          // The item first — that is what mounts the row — then the row itself.
+          virtualizer.scrollToIndex(idx, { align: "start" });
+          placeWithinItem(idx, within);
+          return true;
+        }
+        virtualizer.scrollToIndex(idx, { align });
         return true;
       },
     }),
