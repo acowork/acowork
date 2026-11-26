@@ -199,6 +199,25 @@ export function AgentSetupTab() {
   const [avatarBusy, setAvatarBusy] = useState(false);
 
   /**
+   * Ordering guard for the two pieces of state the avatar popup shows.
+   *
+   * `avatarConfig` and `avatarAssets` are each the answer of a *read*, and
+   * each is also overwritten by a *write* (pick, upload, delete). Nothing
+   * ordered them, so a read still in flight when the user picked landed
+   * afterwards and repainted the pre-pick state — the "first pick after
+   * opening the panel does nothing, the next one works" report. The same
+   * holds for the assets list (the panel's mount read can land after an
+   * upload and drop the just-uploaded tile).
+   *
+   * So one rule, applied to both: **an answer applies only while it is
+   * still the newest request**. Every read batch and every confirmed write
+   * bumps the sequence; an older answer is dropped. This is the same
+   * last-write-wins discipline the settings fields above already keep in
+   * `fieldVersionsRef`, not a second mechanism.
+   */
+  const avatarSeqRef = useRef(0);
+
+  /**
    * What the header avatar paints *right now*.
    *
    * Seeded from the store's `AgentInfo` — already effective, because the
@@ -334,13 +353,17 @@ export function AgentSetupTab() {
     let cancelled = false;
     setAvatarAssets([]);
     setAvatarConfig(null);
+    const seq = ++avatarSeqRef.current;
 
+    // Both reads answer "the state as of when I was issued". A write
+    // answered meanwhile bumps the sequence and makes them stale
+    // (see `avatarSeqRef`).
     fetchAvatarConfig(selectedAgentId)
-      .then((cfg) => { if (!cancelled) setAvatarConfig(cfg); })
+      .then((cfg) => { if (!cancelled && seq === avatarSeqRef.current) setAvatarConfig(cfg); })
       .catch((err) => { if (!cancelled) log.debug("[AgentSetup] Avatar config fetch failed:", err); });
 
     fetchAvatarAssets(selectedAgentId)
-      .then((resp) => { if (!cancelled) setAvatarAssets(resp.assets); })
+      .then((resp) => { if (!cancelled && seq === avatarSeqRef.current) setAvatarAssets(resp.assets); })
       .catch((err) => { if (!cancelled) log.debug("[AgentSetup] Avatar assets fetch failed:", err); });
 
     return () => { cancelled = true; };
@@ -677,6 +700,9 @@ export function AgentSetupTab() {
     if (!selectedAgentId) return;
     setAvatarBusy(true);
     try {
+      // Committed: this write outranks any avatar read still in flight
+      // (`avatarSeqRef`), including one answered while the PUT is pending.
+      avatarSeqRef.current += 1;
       const cfg = await updateAvatarConfig(selectedAgentId, { avatar: relativePath, builtin_avatar: "" });
       setAvatarConfig(cfg);
       applyConfirmedIdentity(cfg);
@@ -692,6 +718,9 @@ export function AgentSetupTab() {
     if (!selectedAgentId) return;
     setAvatarBusy(true);
     try {
+      // Committed: this write outranks any avatar read still in flight
+      // (`avatarSeqRef`), including one answered while the PUT is pending.
+      avatarSeqRef.current += 1;
       const cfg = await updateAvatarConfig(selectedAgentId, { avatar: "", builtin_avatar: iconId });
       setAvatarConfig(cfg);
       applyConfirmedIdentity(cfg);
@@ -716,9 +745,16 @@ export function AgentSetupTab() {
     const ext = selected.split(".").pop()?.toLowerCase() ?? "png";
     if (!IMAGE_EXTENSIONS.includes(ext)) return;
 
-    const relative = `assets/${nextAvatarName(avatarAssets, ext)}`;
     setAvatarBusy(true);
     try {
+      // Name the new file from the server's list, not the local copy: a
+      // stale list can name a file that already exists, and the upload
+      // would then overwrite the user's avatar in place — same path, so the
+      // picker keeps painting the old bytes and the pick looks ignored.
+      avatarSeqRef.current += 1;
+      const { assets } = await fetchAvatarAssets(selectedAgentId);
+      setAvatarAssets(assets);
+      const relative = `assets/${nextAvatarName(assets, ext)}`;
       await invoke("upload_agent_file", {
         agentId: selectedAgentId,
         relativePath: relative,
@@ -740,6 +776,9 @@ export function AgentSetupTab() {
     if (!selectedAgentId) return;
     setAvatarBusy(true);
     try {
+      // The reference the delete route is about to clear outranks the
+      // panel's still-in-flight mount read (`avatarSeqRef`).
+      avatarSeqRef.current += 1;
       await deleteAvatarFile(selectedAgentId, relativePath);
       // Refresh both — backend clears avatar field if deleted file was current
       const [assetsResp, cfg] = await Promise.all([

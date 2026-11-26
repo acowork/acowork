@@ -203,11 +203,32 @@ DOC / PM 不要改成「先写 workspace 再上传」。它们的产物就是库
 
 ## 7. 主题与语言
 
-`AppFrame` 在 load / `ready` 以及 **light/dark class 变化**时 `postMessage`：
+`AppFrame` 在 load / `ready`、**light/dark class 变化**、以及 **`<html lang>` 变化**时 `postMessage`：
 
 ```json
 { "channel": "acowork", "type": "theme", "theme": "light|dark", "accent": "#…", "locale": "zh-CN" }
 ```
+
+`locale` 就是界面当前语言，取值来自 `<html lang>`——**该属性由 i18n 模块单点写入**（启动时按检测到的语言写一次，`languageChanged` 时再写）。它曾经只是 `index.html` 里写死的 `lang="zh-CN"`，没人改过：界面切到英文，三方 app 收到的仍是 `zh-CN`。宿主同时补发一条独立消息给只监听语言的 adapter：
+
+```json
+{ "channel": "acowork", "type": "locale", "locale": "zh-CN" }
+```
+
+**但 postMessage 只改得了"已经启动"的应用。** wasm 应用在首帧之前就把语言定死了：VectorCraft 的 web 壳先读入口 URL 的 `?lang=`，读不到才退到浏览器的 `navigator.languages`，而 `i18n::set_system_locales` 只认第一次答复（`crates/ui-egui/src/i18n.rs`）。所以界面语言必须同时进**入口 URL**：
+
+```
+/ui/?control=1&lang=zh-CN&v=<installed_version>#ticket=<ticket>
+```
+
+`lang` 与 `locale` 取同一个值（`<html lang>`）。它只在进入应用时读一次，**语言变化不重载 iframe**（重载会丢掉应用已打开的文档），运行时切换仍走上面的 `locale` 消息。
+
+各应用当前实际消费到什么（按源码，不是按契约设想）：
+
+| 应用 | 首帧语言入口 | 运行时 `locale` | 结果 |
+|---|---|---|---|
+| VectorCraft | `?lang=`（上游已实现） | 无 host 模式 | 跟随宿主；应用内 Preferences 显式选过语言时仍以应用为准 |
+| Fig / Word / Grid / Deck / PdfCraft | 无（web 壳只认 `?author` `?chrome` `?host` `?file` `?control`） | adapter 只映射主题命令 | 恒为内置默认（英文）；要跟随宿主，app 侧需读 `?lang=` 或把 `locale` 映射到应用自己的语言切换 |
 
 Adapter 注入脚本监听，映射到应用自己的主题命令，adapter 只承载映射表：
 

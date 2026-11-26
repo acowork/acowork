@@ -36,6 +36,13 @@ const ROUND_SIGNAL_RETRY_MS = 500;
 /** Batch window: refs requested during one render pass ride one request. */
 const BATCH_MS = 16;
 
+/** Refs per read. They ride the query string (`?refs=a,b,c`), so a whole
+ *  transcript window asked for at once — which is what the layout prefetch does
+ *  (`useTranscriptLayout`) — would push a deep group history past what a request
+ *  line may carry. A slice per flush, the rest queued for the next one: the
+ *  caller asks for a window, the store decides how many fit in a request. */
+const MAX_REFS_PER_READ = 24;
+
 interface ChatBlockState {
   /** By ref (`instance|session|round`) — a ref names one round of one session,
    *  so it cannot collide across chats. */
@@ -114,9 +121,13 @@ export const useChatBlockStore = create<ChatBlockState>((set, get) => {
     }
     const queue = state.pending[chatId];
     if (!queue || queue.size === 0) return;
-    const refs = [...queue];
+    // One request's worth: the rest stays queued and the `finally` below re-arms
+    // the timer for it (`MAX_REFS_PER_READ`).
+    const refs = [...queue].slice(0, MAX_REFS_PER_READ);
+    const rest = [...queue].slice(MAX_REFS_PER_READ);
     const nextPending = { ...get().pending };
-    delete nextPending[chatId];
+    if (rest.length > 0) nextPending[chatId] = new Set(rest);
+    else delete nextPending[chatId];
     set({ pending: nextPending, inFlight: { ...get().inFlight, [chatId]: true } });
     fetchChatBlocks(chatId, refs)
       .then((entries) => {

@@ -1141,6 +1141,134 @@ run_effect_deps_redline() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# agent -> bot terminology guardrails (checklist v6 §6, decisions D1/D4/D6/D7/D8).
+#
+# Budget mode (D8): each counted assertion compares its measured hits against
+# a NAMED BASELINE constant, and the comparison is always `<=`. A baseline may
+# only be LOWERED as the rename cards land; raising one is a regression and
+# turns this gate red. The constants live where the counting lives:
+#   - dev/check-bot-terminology.mjs  (assertions 1/2/3/5: LOCALE_AGENT_BASELINE,
+#     SITE_AGENT_BASELINE, DESKTOP_EXT_CLASS_A_BASELINE,
+#     DESKTOP_AGENT_LITERAL_CLASS_B_BASELINE)
+#   - PRODUCER_BASELINE below        (assertion 4: core-repo/script side)
+# T8 (收尾门) zeroes them all.
+#
+# WHITELIST RULE (D8, non-negotiable): every whitelist entry carries a fixed
+# category and a reason comment — ① code identifier ② third-party/ecosystem
+# name ③ historical record (docs/adr per D5, docs/research) ④ real log output
+# ⑤ internal part. ANY entry added later MUST have a note in the owning card's
+# PM activity log: who added it, why, which D decision it implements. An entry
+# without an activity trail is a backdoor, not a whitelist.
+# ---------------------------------------------------------------------------
+
+# Assertion 1: desktop locale VALUES must not carry the retired term.
+# Caliber: occurrences of /agent/gi in the values (keys are code, not counted)
+# of the five locale JSONs, minus the whitelisted placeholder/example-id forms.
+# Measured 2026-11-26 (post T1): 0. Baseline: LOCALE_AGENT_BASELINE = 0.
+run_locale_bot_term_redline() {
+    echo "Checking desktop locale bot-term red line (T7 #1)..."
+    if ! node "$SCRIPT_DIR/check-bot-terminology.mjs" locales; then
+        exit 1
+    fi
+}
+
+# Assertion 2: mobile msgids.ts language sections must carry the identical key
+# set. Structural (no budget): a key missing from one language renders the
+# zh-CN source string in that locale — silent language mixing (checklist §5.4).
+run_mobile_msgids_redline() {
+    echo "Checking mobile msgids key-set red line (T7 #2)..."
+    if ! node "$SCRIPT_DIR/check-bot-terminology.mjs" msgids; then
+        exit 1
+    fi
+}
+
+# Assertion 3: website / hub site/ user-visible copy whitelist check.
+# Caliber: /agent/gi hits in the site files after stripping comments and the
+# categorized whitelist (SEO transitional terms, real log strings, repo/file
+# names, field names). Measured 2026-11-26 (post T3/T6): 0.
+# Baseline: SITE_AGENT_BASELINE = 0. Sibling repos absent from a checkout SKIP
+# loudly — the site repos' own CI owns enforcement there.
+run_site_bot_term_redline() {
+    echo "Checking website/hub site copy bot-term red line (T7 #3)..."
+    if ! node "$SCRIPT_DIR/check-bot-terminology.mjs" site; then
+        exit 1
+    fi
+}
+
+# Assertion 4: extension uniqueness on the core-repo / script side — no code
+# path may PRODUCE a `.agent` package any more (D6: packages ship as `.bot`).
+# Caliber: grep over tracked files in core/ + dev/ + agents/ (git ls-files
+# inherently excludes target/, core/target/, target-e2e/, dist/, build/,
+# node_modules/) for the producer forms:
+#   format!("...{}.agent"  /  f"...{x}.agent"   — package file name assembly
+#   ends_with(".agent") / endswith(".agent")    — extension acceptance check
+#   with_extension("agent")                     — extension rewrite
+#   eq_ignore_ascii_case("agent") / == "agent"  — suffix comparison
+#   ".agent" as a bare string literal           — exclusion sets, constants
+# Measured 2026-11-26 (post T5): 1 raw hit = the deliberate anti-regression
+# guard in example_packages.rs ("a .agent artifact reappearing is a build
+# failure") — a DETECTION pattern, not a producer; whitelisted (category ①,
+# rationale in the grep -v below + T7 activity). Net: 0.
+PRODUCER_BASELINE=0
+
+run_package_ext_redline() {
+    echo "Checking .agent producer-form red line, core/scripts side (T7 #4)..."
+    local root="$SCRIPT_DIR/.."
+    local offenders
+    # Producer forms, each anchored so an agent_id literal (reverse-domain
+    # `com.test.agent"`) cannot match: the `.agent` must sit at the END of the
+    # first string literal of the call.
+    #   format!("...{x}.agent")   — package file name assembly (escaped-quote
+    #                               form `\"{}.agent\"` included)
+    #   f"...agent"               — Python assembly (dev scripts)
+    #   ends_with(".agent")       — Rust extension acceptance
+    #   endswith(".agent")        — Python extension acceptance
+    #   with_extension("agent")   — extension rewrite
+    #   eq_ignore_ascii_case("agent") / extension() == Some("agent") — suffix compare
+    #   ".agent"                  — bare literal (exclusion sets, gate constants)
+    offenders=$(cd "$root" && git ls-files -z -- core dev agents \
+        | grep -zE '\.(rs|sh|ps1|py)$' \
+        | xargs -0 grep -nE 'format!\("([^"\\]|\\.)*\.agent\\?"|f"([^"\\]|\\.)*\.agent"|ends_with\("\.agent"\)|endswith\("\.agent"\)|endswith\(.\.agent.|with_extension\("agent"\)|eq_ignore_ascii_case\("agent"\)|extension\(\) == Some\("agent"|"\.agent"' 2>/dev/null \
+        | grep -vE '^dev/ci\.sh:' \
+        | grep -vE '^core/acowork-sign/tests/example_packages\.rs:.*ends_with\("\.agent"\)' || true)
+# Self-exclusion of dev/ci.sh above: this very grep's pattern strings would
+# otherwise match themselves (category ① — the checker is not a producer).
+    # The one grep -v above is whitelisted: example_packages.rs asserts that
+    # NO `.agent` artifact exists in agents/agent-packages/ — the literal is
+    # the detection pattern of that guard, not a producer. Category ①.
+    # (Rationale recorded in T7's PM activity, per the whitelist rule above.)
+    local count
+    count=$(printf '%s' "$offenders" | grep -c . || true)
+    if [ "$count" -gt "$PRODUCER_BASELINE" ]; then
+        echo "ERROR: a code path that produces or accepts the retired .agent"
+        echo "       package extension is back: $count hits (budget: $PRODUCER_BASELINE)."
+        echo "$offenders"
+        echo "Packages ship as .bot (D6). Fix the producer, or add a whitelist"
+        echo "entry WITH a PM activity trail (see the rule block above)."
+        exit 1
+    fi
+    echo ".agent producer-form red line (core/scripts): OK ($count <= $PRODUCER_BASELINE)"
+}
+
+# Assertion 5: desktop `.agent` literals — class A (extension producers:
+# picker filters, drop checks, gate constants, name assembly) and class B
+# (the literal inside user-visible strings: error messages, JSX copy,
+# generated package templates). Scan scope: apps/acowork-desktop/src +
+# src-tauri/src; comments and test fixtures are whitelisted (not user
+# visible); locale values are owned by assertion 1, not double-counted.
+# Measured 2026-11-26 (post T5): A = 0, B = 1 (agent_library.rs:709, a
+# regression introduced by 9a5d18b4 AFTER T5) — the string was fixed to
+# `.bot` the same day and the baseline lowered to 0.
+# Baselines: DESKTOP_EXT_CLASS_A_BASELINE = 0,
+#            DESKTOP_AGENT_LITERAL_CLASS_B_BASELINE = 0.
+run_desktop_agent_literal_redline() {
+    echo "Checking desktop .agent literal red line (T7 #5)..."
+    if ! node "$SCRIPT_DIR/check-bot-terminology.mjs" desktop; then
+        exit 1
+    fi
+}
+
 run_all_redlines() {
     run_node_redline
     run_mqtt_redline
@@ -1164,6 +1292,12 @@ run_all_redlines() {
     run_deliverables_coupling_redline
     run_model_caps_redline
     run_effect_deps_redline
+    # T7: agent -> bot terminology guardrails (checklist v6 §6, D8 budget mode).
+    run_locale_bot_term_redline
+    run_mobile_msgids_redline
+    run_site_bot_term_redline
+    run_package_ext_redline
+    run_desktop_agent_literal_redline
 }
 
 run_clippy() {

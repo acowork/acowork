@@ -205,7 +205,28 @@ tab, and the Desktop only writes the path it opened.
 
 ## 7. Theme and locale
 
-`AppFrame` `postMessage`s on load / `ready` and when the light/dark class changes. The adapter injects the listener; each app keeps its own light/dark command, so the adapter only carries the mapping:
+`AppFrame` `postMessage`s on load / `ready`, when the light/dark class changes, and when **`<html lang>` changes**. The adapter injects the listener; each app keeps its own light/dark command, so the adapter only carries the mapping:
+
+`locale` is the interface's active language, read from `<html lang>` — and that attribute has **one writer**, the i18n module (once at startup from the detected language, then on every `languageChanged`). It used to be only the hard-coded `lang="zh-CN"` in `index.html`, which nobody rewrote: switching the interface to English still told every hosted app `zh-CN`. The host also sends a standalone message for an adapter that listens for locale alone:
+
+```json
+{ "channel": "acowork", "type": "locale", "locale": "zh-CN" }
+```
+
+**A postMessage only reaches an app that is already running.** A wasm app fixes its language before the first frame: VectorCraft's web shell reads `?lang=` off the entry URL first and only then falls back to the browser's `navigator.languages`, and `i18n::set_system_locales` keeps the first answer it gets (`crates/ui-egui/src/i18n.rs`). So the interface language must also travel in the **entry URL**:
+
+```
+/ui/?control=1&lang=zh-CN&v=<installed_version>#ticket=<ticket>
+```
+
+`lang` carries the same value as `locale` (`<html lang>`). It is read once per entry and a language change **never reloads the iframe** (a reload drops the document the app has open); switching at runtime stays on the `locale` message above.
+
+What each app actually consumes today — from its source, not from the contract as imagined:
+
+| App | Language at first frame | Runtime `locale` | Result |
+|---|---|---|---|
+| VectorCraft | `?lang=` (implemented upstream) | no host mode | follows the shell; an explicit language picked in the app's own Preferences still wins |
+| Fig / Word / Grid / Deck / PdfCraft | none (the web shell only reads `?author` `?chrome` `?host` `?file` `?control`) | the adapter maps theme commands only | always the built-in default (English); following the shell needs the app to read `?lang=` or map `locale` to its own language switch |
 
 | App | Command |
 |---|---|
