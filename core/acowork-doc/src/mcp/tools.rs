@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 use crate::error::{DocError, Result};
 use crate::limit;
+use acowork_core::mcp_page::{page_limit, paginate, text_chunk, text_limit};
 use crate::path::validate_request_id;
 use crate::service::directory::{CreateDirectoryInput, DirectoryService};
 use crate::service::document::{
@@ -246,18 +247,18 @@ struct ListArgs {
     query: String,
     #[serde(default)]
     offset: usize,
-    #[serde(default = "default_list_limit")]
-    limit: usize,
-}
-
-fn default_list_limit() -> usize {
-    100
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 /// `doc_list` — 目录树逐级浏览（含 query 过滤 + 分页）。
+///
+/// A page is at most [`acowork_core::mcp_page::MAX_PAGE`] rows: the result goes
+/// straight into the caller's context, and a 500-entry directory listing does
+/// not fit there. `truncated` + `notice` name the offset to resume from.
 async fn doc_list(state: &DocState, args: Value) -> Result<Value> {
     let a: ListArgs = parse_args("doc_list", args)?;
-    let limit = a.limit.clamp(1, 500);
+    let limit = page_limit(a.limit);
     let dir_id = resolve_dir_or_root(state.dirs.as_ref(), &a.path).await?;
     let tree = state.dirs.list_tree(&dir_id).await?;
 
@@ -296,7 +297,8 @@ async fn doc_list(state: &DocState, args: Value) -> Result<Value> {
         .skip(a.offset)
         .take(limit)
         .collect::<Vec<_>>();
-    Ok(json!({ "path": if dir_id == ROOT_DIR_ID { "" } else { &a.path }, "total": total, "items": items }))
+    let base = json!({ "path": if dir_id == ROOT_DIR_ID { "" } else { &a.path } });
+    Ok(paginate(base, "items", items, Some(total), a.offset, limit))
 }
 
 #[derive(Deserialize)]
@@ -306,16 +308,50 @@ struct DocRefArgs {
     reference: String,
 }
 
-/// `doc_read` — 读取文档（Markdown 原文 + version + 元数据）。
+/// `doc_read` arguments: the document plus a character window into it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadArgs {
+    #[serde(rename = "ref")]
+    reference: String,
+    /// Start character offset (0-based) — continue where the last read stopped.
+    #[serde(default)]
+    offset: usize,
+    /// Characters to return, capped at [`acowork_core::mcp_page::MAX_TEXT_CHUNK`].
+    /// The document ceiling is megabytes; one read must not be.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `doc_read` — 读取文档正文（Markdown）+ version + 元数据。
+///
+/// **Windowed**: the content ceiling is measured in megabytes, and a caller
+/// that asks for a whole document gets it pasted into its context window. So
+/// the body comes back in chunks of at most `MAX_TEXT_CHUNK` characters, with
+/// `content_chars` / `offset` / `truncated` / `notice` telling the
+/// caller how to read on — the same policy `doc_list` applies to rows.
 async fn doc_read(state: &DocState, args: Value) -> Result<Value> {
-    let a: DocRefArgs = parse_args("doc_read", args)?;
+    let a: ReadArgs = parse_args("doc_read", args)?;
     let (_dir, doc_id) =
         resolve_doc_ref(state.dirs.as_ref(), state.docs.as_ref(), &a.reference).await?;
     let read = state.docs.read(&doc_id).await?;
     let mut paths = PathCtx::new(state.dirs.as_ref());
     let path = paths.humanize(&read.path).await?;
     let mut v = doc_to_value(read.meta, path)?;
-    v["content"] = Value::String(read.content);
+    let limit = text_limit(a.limit);
+    let (chunk, total_chars, has_more) = text_chunk(&read.content, a.offset, limit);
+    v["content"] = Value::String(chunk.to_string());
+    v["content_chars"] = Value::from(total_chars);
+    v["offset"] = Value::from(a.offset);
+    v["limit"] = Value::from(limit);
+    if has_more {
+        let next = a.offset + chunk.chars().count();
+        v["truncated"] = Value::Bool(true);
+        v["notice"] = Value::String(format!(
+            "Truncated: this read returned characters {}..{next} of {total_chars}. Call doc_read again with offset={next} to continue.",
+            a.offset
+        ));
+    }
     Ok(v)
 }
 
@@ -360,18 +396,20 @@ fn doc_to_value(meta: DocMeta, path: String) -> Result<Value> {
 #[serde(deny_unknown_fields)]
 struct SearchArgs {
     keyword: String,
-    #[serde(default = "default_search_limit")]
-    limit: usize,
-}
-
-fn default_search_limit() -> usize {
-    20
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: usize,
 }
 
 /// `doc_search` — 跨目录关键字检索。
 async fn doc_search(state: &DocState, args: Value) -> Result<Value> {
     let a: SearchArgs = parse_args("doc_search", args)?;
-    let hits = state.search.search(&a.keyword, a.limit.clamp(1, 100)).await?;
+    let limit = page_limit(a.limit);
+    // The service answers "the top N", it cannot count its whole match set, so
+    // `total` is reported as null and paging is offset-based.
+    let hits = state.search.search(&a.keyword, a.offset + limit).await?;
+    let hits = hits.into_iter().skip(a.offset);
     // The search service reports `{dir_id}/{name}.md` (its store view); every
     // other tool answers in the agent's addressing space, so a hit path must
     // be readable back into `doc_read(ref=…)` — otherwise the natural
@@ -391,7 +429,10 @@ async fn doc_search(state: &DocState, args: Value) -> Result<Value> {
             "score": h.score,
         }));
     }
-    Ok(json!({ "keyword": a.keyword, "hits": items }))
+    let base = json!({ "keyword": a.keyword });
+    // `total: None` — a ranked search cannot count its matches; a full page
+    // therefore reports `truncated`, which is the safe direction.
+    Ok(paginate(base, "hits", items, None, a.offset, limit))
 }
 
 // ── 写工具（需身份）──────────────────────────────────────────────────────
@@ -427,6 +468,8 @@ async fn doc_mkdir(state: &DocState, actor: &str, args: Value) -> Result<Value> 
             // the agent that creates a bucket becomes the one that governs
             // it.
             creator: Some(actor.to_string()),
+            icon: None,
+            description: None,
         })
         .await?;
     Ok(json!({
@@ -1652,6 +1695,8 @@ struct ListRequestsArgs {
     reference: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    offset: usize,
 }
 
 /// `doc_list_requests` — the review queue, so a lost `request_id` is not a
@@ -1683,10 +1728,11 @@ async fn doc_list_requests(state: &DocState, args: Value) -> Result<Value> {
         None => state.requests.list(status).await?,
     };
 
-    let limit = a.limit.unwrap_or(50).clamp(1, 200);
+    let limit = page_limit(a.limit);
     let total = requests.len();
     let page: Vec<Value> = requests
         .into_iter()
+        .skip(a.offset)
         .take(limit)
         .map(|r| {
             let mut v = json!({
@@ -1703,12 +1749,7 @@ async fn doc_list_requests(state: &DocState, args: Value) -> Result<Value> {
         })
         .collect();
 
-    Ok(json!({
-        "total": total,
-        "returned": page.len(),
-        "has_more": total > page.len(),
-        "requests": page,
-    }))
+    Ok(paginate(json!({}), "requests", page, Some(total), a.offset, limit))
 }
 
 fn request_status_str(status: RequestStatus) -> &'static str {
@@ -1725,6 +1766,8 @@ fn request_status_str(status: RequestStatus) -> &'static str {
 struct ListTrashArgs {
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    offset: usize,
 }
 
 /// `doc_list_trash` — what `doc_remove` took away, with the id to bring it
@@ -1732,10 +1775,11 @@ struct ListTrashArgs {
 async fn doc_list_trash(state: &DocState, args: Value) -> Result<Value> {
     let a: ListTrashArgs = parse_args("doc_list_trash", args)?;
     let entries = state.trash.list().await?;
-    let limit = a.limit.unwrap_or(50).clamp(1, 200);
+    let limit = page_limit(a.limit);
     let total = entries.len();
     let page: Vec<Value> = entries
         .into_iter()
+        .skip(a.offset)
         .take(limit)
         .map(|e| {
             json!({
@@ -1749,12 +1793,7 @@ async fn doc_list_trash(state: &DocState, args: Value) -> Result<Value> {
             })
         })
         .collect();
-    Ok(json!({
-        "total": total,
-        "returned": page.len(),
-        "has_more": total > page.len(),
-        "entries": page,
-    }))
+    Ok(paginate(json!({}), "entries", page, Some(total), a.offset, limit))
 }
 
 #[derive(Deserialize)]
@@ -1838,8 +1877,13 @@ impl DocRefArgs {
 }
 
 #[cfg(test)]
+impl ReadArgs {
+    const FIELDS: &'static [&'static str] = &["ref", "offset", "limit"];
+}
+
+#[cfg(test)]
 impl SearchArgs {
-    const FIELDS: &'static [&'static str] = &["keyword", "limit"];
+    const FIELDS: &'static [&'static str] = &["keyword", "offset", "limit"];
 }
 
 #[cfg(test)]
@@ -1876,12 +1920,12 @@ impl CheckRequestArgs {
 
 #[cfg(test)]
 impl ListRequestsArgs {
-    const FIELDS: &'static [&'static str] = &["status", "reference", "limit"];
+    const FIELDS: &'static [&'static str] = &["status", "reference", "offset", "limit"];
 }
 
 #[cfg(test)]
 impl ListTrashArgs {
-    const FIELDS: &'static [&'static str] = &["limit"];
+    const FIELDS: &'static [&'static str] = &["offset", "limit"];
 }
 
 #[cfg(test)]
@@ -1898,7 +1942,7 @@ impl RmdirArgs {
 #[cfg(test)]
 pub(crate) const MANIFEST_FIELDS: &[(&str, &[&str])] = &[
     ("doc_list", ListArgs::FIELDS),
-    ("doc_read", DocRefArgs::FIELDS),
+    ("doc_read", ReadArgs::FIELDS),
     ("doc_stat", DocRefArgs::FIELDS),
     ("doc_write", WriteArgs::FIELDS),
     ("doc_move", MoveArgs::FIELDS),

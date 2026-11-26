@@ -29,6 +29,10 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+/// 列表页的统一策略（行数上限 + `total/offset/has_more/truncated/notice`）
+/// 与单文档正文分块，定义在 `acowork_core::mcp_page`，与 Doc 侧共用一份。
+use acowork_core::mcp_page::{page_limit, paginate, text_chunk};
+
 use crate::error::{PmError, Result};
 use crate::mcp::{AgentDirectory, AgentEntry, AgentInfo, McpState};
 use crate::store::contract::PmStore;
@@ -331,17 +335,15 @@ struct ListAgentsArgs {
     /// A large roster must not be dumped into the caller's context whole.
     #[serde(default)]
     query: Option<String>,
-    #[serde(default = "default_agent_limit")]
-    limit: usize,
-}
-
-fn default_agent_limit() -> usize {
-    50
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: usize,
 }
 
 #[cfg(test)]
 impl ListAgentsArgs {
-    const FIELDS: &'static [&'static str] = &["project_id", "query", "limit"];
+    const FIELDS: &'static [&'static str] = &["project_id", "query", "limit", "offset"];
 }
 
 /// `pm_list_tasks` arguments.
@@ -349,7 +351,8 @@ impl ListAgentsArgs {
 #[serde(deny_unknown_fields)]
 struct ListTasksArgs {
     /// Omit to search across every project; then at least one narrowing
-    /// filter is required and `limit` is capped at `CROSS_PROJECT_MAX_LIMIT`.
+    /// filter is required. `limit` is capped at
+    /// [`acowork_core::mcp_page::MAX_PAGE`] in every mode.
     #[serde(default)]
     project_id: Option<ProjectId>,
     #[serde(default)]
@@ -404,14 +407,6 @@ impl ListTasksArgs {
     ];
 }
 
-fn default_task_limit() -> usize {
-    20
-}
-
-/// Cap for a scope-less listing: the point of `pm_list_tasks` across projects
-/// is "what is stuck / what awaits review", not a full export.
-const CROSS_PROJECT_MAX_LIMIT: usize = 50;
-
 /// `pm_add_project_member` arguments.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -433,17 +428,17 @@ impl AddProjectMemberArgs {
 #[serde(deny_unknown_fields)]
 struct ListActivityArgs {
     task_id: TaskId,
-    #[serde(default = "default_activity_limit")]
-    limit: usize,
-}
-
-fn default_activity_limit() -> usize {
-    20
+    #[serde(default)]
+    limit: Option<usize>,
+    /// How many of the **newest** entries to skip — the log is read backwards
+    /// from "what just happened", so paging walks toward older entries.
+    #[serde(default)]
+    offset: usize,
 }
 
 #[cfg(test)]
 impl ListActivityArgs {
-    const FIELDS: &'static [&'static str] = &["task_id", "limit"];
+    const FIELDS: &'static [&'static str] = &["task_id", "limit", "offset"];
 }
 
 /// `pm_add_activity` arguments.
@@ -473,11 +468,15 @@ impl AddActivityArgs {
 struct ListProjectsArgs {
     #[serde(default)]
     include_archived: bool,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: usize,
 }
 
 #[cfg(test)]
 impl ListProjectsArgs {
-    const FIELDS: &'static [&'static str] = &["include_archived"];
+    const FIELDS: &'static [&'static str] = &["include_archived", "limit", "offset"];
 }
 
 /// `pm_get_project` arguments.
@@ -587,6 +586,12 @@ pub(crate) const MANIFEST_FIELDS: &[(&str, &[&str])] = &[
 
 // ── 响应序列化辅助 ────────────────────────────────────────────────────────
 
+/// `pm_list_activity` 单条正文的字符上限。
+///
+/// `Submitted` 类型的活动条目带着完整提交记录（可达 20000 字符）；一页 20
+/// 条就是同一个上下文炸弹。全文在 `pm_get_task().result.text` 里。
+const ACTIVITY_TEXT_CHARS: usize = 500;
+
 /// 保留创建者哨兵值（`types::Project::created_by` / `types::Task::created_by`
 /// 的合法取值之一，见 `types.rs` 文档：`human` 或 agent instance UUID）。
 /// 非 instance_id，不应发起 Gateway 查询。
@@ -621,37 +626,41 @@ async fn lookup_agent_meta(
     agent_dir.agent_info(id).await
 }
 
-/// 把 `instance_id` 字符串 + 元信息投影成
-/// `{instance_id, agent_id, name, package_name, role}`。
+/// 把 `instance_id` + 目录元信息投影成行级 agent 引用。
 ///
-/// `instance_id` 为 `None` 或元信息为 `None`（Agent 已卸载 / Noop 目录）
-/// 时返回 `Value::Null`，让 LLM 拿到清晰的 null 而不是空字符串。
+/// 形状固定为 `{name, agent_id, role}`：
+/// - `name`（实例名，`SSE.Kevin`）——人看到的、agent 自己回答的名，唯一能区分
+///   同包多个实例的字段；
+/// - `agent_id`（包 id，`com.acowork.senior-engineer`）——"这是哪种 agent"；
+/// - `role`（`Senior Software Engineer`）——协作面上的身份。
 ///
-/// `name` 是**实例名**（`SSE.Kevin`）——人看到的名字、agent 自己上下文里的
-/// 名字、PM 引用它时该用的人名，三者同一个字符串，不需要任何 fallback。
-/// `package_name` 是包名（`SSE`），只回答"这是哪种 agent"。
-/// `package_name` / `role` 缺失时投影为 JSON `null`（字段保留），保持 schema 稳定。
-fn agent_ref_value(instance_id: Option<&str>, info: Option<&AgentInfo>) -> Value {
-    match (instance_id, info) {
-        (Some(id), Some(info)) => json!({
-            "instance_id": id,
-            "agent_id": info.agent_id,
-            "name": info.name,
-            "package_name": info.package_name,
-            "role": info.role,
-        }),
-        _ => Value::Null,
+/// 被刻意排除在外：`instance_id`（裸 UUID 就在相邻的 `assignee` / `created_by`
+/// 字段里，塞一遍是纯冗余）和 `package_name`（与 `agent_id` 表达同一件事）。
+/// 实测一个五字段 meta 占单行 25%–37%；三段式把这部分砍到可用下限。
+///
+/// `instance_id` 为 `None`、或元信息为 `None`（agent 已卸载 / Noop 目录）时
+/// 返回 `Value::Null`，让 LLM 拿到清晰的 null 而不是空对象。
+/// 把 agent 字段投影成 LLM 真正要的东西：**显示名**（如 `"SSE.Kevin"`）。
+///
+/// 裸 `instance_id` 已经在相邻的 `assignee` / `created_by` 字段里（派工 / 审计
+/// 用）；包级 `agent_id` / `role` / `package_name` 属于 [`pm_list_agents`]
+/// 的目录行，不在每条任务/项目上重复——那样做只会把列表吹大。反查一个名字
+/// 走 `pm_list_agents(query=<name>)` 即可，实例名在同一包多份安装里唯一。
+fn agent_name_value(info: Option<&AgentInfo>) -> Value {
+    match info {
+        Some(info) => json!(info.name),
+        None => Value::Null,
     }
 }
 
 /// 任务 → 精简 JSON（复用 REST `TaskResponse` 形状，含派生字段 + Agent 元信息）。
 ///
 /// **MCP 专属**附加字段（不在 REST `TaskResponse` 里）：
-/// - `assignee_meta`：assignee 的 `{instance_id, agent_id, name}`，LLM 据此反查
-///   显示名 / 派任务时取 `instance_id`
-/// - `created_by_meta`：创建者同上（`"human"` 时为 `null`）
+/// - `assignee_name`：assignee 的显示名（如 `"SSE.Kevin"`，见 [`agent_name_value`]），
+///   LLM 据此识别"这是谁"；`null` = 未知 / 人类创建者
+/// - `created_by_name`：创建者同上
 ///
-/// `assignee` / `created_by` 原字段保留为 `String`（前端 join agentStore 显示）。
+/// `assignee` / `created_by` 原字段保留为 `String`（派工 / 审计用的裸 UUID）。
 ///
 /// 单条场景（get / create / claim / submit / update）直接查 meta；列表场景
 /// 请走 [`tasks_to_values`]（先批量去重查询，再复用 [`task_to_value_with_meta`]）。
@@ -675,36 +684,88 @@ async fn task_to_value(
     .await
 }
 
-/// [`task_to_value`] 的查表变体：`assignee_meta` / `created_by_meta` 已由
-/// 调用方（如 [`tasks_to_values`] 的批量查询）解析好，此处只做派生字段
-/// 计算 + 序列化 + 附加，不再访问 `agent_dir`。
+/// 任务的**派生字段**（由 store 的结构位置与依赖图算出，与投影形状无关）。
+///
+/// 单条全量投影（[`task_to_value_with_meta`]）和列表摘要投影
+/// （[`task_summary_value`]）都从这里取：派生口径只有一份，加一个新派生字段
+/// 不需要在第二个投影里再记得一次。
+struct TaskDerived {
+    depth: u8,
+    parent_id: Option<TaskId>,
+    blocked_by: Vec<TaskId>,
+}
+
+async fn task_derived(store: &Arc<dyn PmStore>, id: &TaskId) -> Result<TaskDerived> {
+    Ok(TaskDerived {
+        depth: store.task_depth(id),
+        parent_id: store.parent_of(id),
+        blocked_by: store.compute_blocked_by(id).await?,
+    })
+}
+
+/// [`task_to_value`] 的查表变体：`assignee_name` / `created_by_name` 已由
+/// 调用方（如 [`tasks_to_values`] 的批量查询）解析好，此处只做序列化 + 附加，
+/// 不再访问 `agent_dir`。
 async fn task_to_value_with_meta(
     store: &Arc<dyn PmStore>,
     task: Task,
     assignee_meta: Option<&AgentInfo>,
     created_by_meta: Option<&AgentInfo>,
 ) -> Result<Value> {
-    let tid = task.id.clone();
-    let depth = store.task_depth(&tid);
-    let parent_id = store.parent_of(&tid);
-    let blocked_by = store.compute_blocked_by(&tid).await?;
-
-    // 在 `task` move 进 `TaskResponse` 前取出原始字符串，避免从序列化结果
-    // 反读（`v["assignee"]` / `v["created_by"]`）带来的格式耦合。
-    let assignee = task.assignee.clone();
-    let created_by = task.created_by.clone();
+    let derived = task_derived(store, &task.id).await?;
 
     let resp = TaskResponse {
         task,
-        is_blocked: !blocked_by.is_empty(),
-        blocked_by,
-        depth,
-        parent_id,
+        is_blocked: !derived.blocked_by.is_empty(),
+        blocked_by: derived.blocked_by,
+        depth: derived.depth,
+        parent_id: derived.parent_id,
     };
     let mut v = serde_json::to_value(resp).map_err(PmError::from)?;
-    v["assignee_meta"] = agent_ref_value(assignee.as_deref(), assignee_meta);
-    v["created_by_meta"] = agent_ref_value(Some(&created_by), created_by_meta);
+    v["assignee_name"] = agent_name_value(assignee_meta);
+    v["created_by_name"] = agent_name_value(created_by_meta);
     Ok(v)
+}
+
+/// 列表行 → **摘要** JSON：只保留定位 / 过滤要用的字段。
+///
+/// 回归护栏：一次 `limit=50` 的 `pm_list_tasks` 曾把每条任务的
+/// `description`（≤20000 字符）和上一次 submit 的 `result.text`
+/// （≤20000 字符）一起回给调用方，50 行就是上千 KB，直接把 agent 的上下文
+/// 压爆。列表要回答的问题只是“有哪些任务、什么状态、卡在谁身上”；正文、
+/// 提交结果、附件一律走 `pm_get_task`（[`task_to_value`] 的全量形状）。
+///
+/// 白名单而不是黑名单：将来给 `Task` 加大字段时，列表默认不会跟着膨胀。
+async fn task_summary_value(
+    store: &Arc<dyn PmStore>,
+    task: Task,
+    assignee_meta: Option<&AgentInfo>,
+    created_by_meta: Option<&AgentInfo>,
+) -> Result<Value> {
+    let derived = task_derived(store, &task.id).await?;
+    // 先算 meta 值再 move 字段：`json!` 顺序求值，借用不能打架。
+    let assignee_meta_v = agent_name_value(assignee_meta);
+    let created_by_meta_v = agent_name_value(created_by_meta);
+    Ok(json!({
+        "id": task.id,
+        "project_id": task.project_id,
+        "title": task.title,
+        "type": task.task_type,
+        "status": task.status,
+        "review_status": task.review_status,
+        "priority": task.priority,
+        "assignee": task.assignee,
+        "assignee_name": assignee_meta_v,
+        "created_by": task.created_by,
+        "created_by_name": created_by_meta_v,
+        "due_at": task.due_at,
+        "depth": derived.depth,
+        "parent_id": derived.parent_id,
+        "is_blocked": !derived.blocked_by.is_empty(),
+        "blocked_by": derived.blocked_by,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }))
 }
 
 /// 批量查 `instance_id` 元信息（过滤哨兵 + 去重 + 限流并发）。
@@ -745,7 +806,9 @@ async fn batch_lookup_agent_meta(
         .collect()
 }
 
-/// 任务列表 → JSON 值列表（应用 limit + 先批量查 meta 再组装）。
+/// 任务列表 → **摘要** JSON 值列表（应用 limit + 先批量查 meta 再组装）。
+///
+/// 每条只走 [`task_summary_value`]：正文 / 提交结果 / 附件不进列表响应。
 ///
 /// 关键点：**先**把全部任务的 assignee + created_by 收集、去重、一次性查
 /// `agent_dir`（单次列表至多一次批量查询），**再**逐条序列化查表组装。
@@ -774,7 +837,7 @@ async fn tasks_to_values(
     for task in tasks {
         let assignee_meta = task.assignee.as_deref().and_then(|id| meta.get(id));
         let created_by_meta = meta.get(&task.created_by);
-        out.push(task_to_value_with_meta(store, task, assignee_meta, created_by_meta).await?);
+        out.push(task_summary_value(store, task, assignee_meta, created_by_meta).await?);
     }
     Ok(out)
 }
@@ -785,7 +848,7 @@ async fn tasks_to_values(
 /// 不混入此函数 — `pm_list_projects` 列表展示时不带成员（避免一次拉全量
 /// agent 目录塞回列表响应，撑爆 LLM 上下文）。
 ///
-/// `created_by_meta`（MCP 专属）见 [`task_to_value`]。
+/// `created_by_name`（MCP 专属）见 [`task_to_value`]。
 ///
 /// `doc_path` is the design 32 §5.5 convention rendered into the response:
 /// the project's deliverable directory inside the document library. It is
@@ -809,7 +872,7 @@ fn project_to_value(
         "description": p.description,
         "status": p.status,
         "created_by": p.created_by,
-        "created_by_meta": agent_ref_value(Some(&p.created_by), created_by_meta),
+        "created_by_name": agent_name_value(created_by_meta),
         "created_at": p.created_at,
         "updated_at": p.updated_at,
         "task_count": task_count,
@@ -834,14 +897,19 @@ async fn pm_list_projects(state: &McpState, args: Value) -> Result<Value> {
                 || !matches!(p.status, ProjectStatus::Archived | ProjectStatus::Completed)
         })
         .collect();
-    let created_by_ids: Vec<String> = visible
+    let total = visible.len();
+    let limit = page_limit(a.limit);
+    // Slice before the per-row work (task count + meta lookup): a page of 20
+    // must not pay for the whole library.
+    let page: Vec<_> = visible.into_iter().skip(a.offset).take(limit).collect();
+    let created_by_ids: Vec<String> = page
         .iter()
         .filter(|p| !creator_is_user(p))
         .map(|p| p.created_by.clone())
         .collect();
     let meta = batch_lookup_agent_meta(state.agent_dir.as_ref(), created_by_ids).await;
 
-    let out: Vec<Value> = visible
+    let out: Vec<Value> = page
         .into_iter()
         .map(|p| {
             let count = state.store.project_task_count(&p.id);
@@ -849,7 +917,7 @@ async fn pm_list_projects(state: &McpState, args: Value) -> Result<Value> {
             project_to_value(p, count, cb_meta)
         })
         .collect();
-    Ok(Value::Array(out))
+    Ok(paginate(json!({}), "projects", out, Some(total), a.offset, limit))
 }
 
 /// `pm_get_project` — 项目详情（含任务数分拆 + 成员元信息）。
@@ -943,15 +1011,9 @@ async fn pm_list_tasks(state: &McpState, actor: Option<&str>, args: Value) -> Re
         ));
     }
 
-    let limit = {
-        let d = a.limit.unwrap_or(default_task_limit());
-        match (a.project_id.is_some(), a.limit) {
-            (false, Some(v)) => v.min(CROSS_PROJECT_MAX_LIMIT),
-            (false, None) => d.min(CROSS_PROJECT_MAX_LIMIT),
-            (true, _) => d.min(100),
-        }
-        .max(1)
-    };
+    // One page cap for every mode: a project-scoped query answering 100 rows
+    // is the same context bomb as a cross-project one (acowork_core::mcp_page).
+    let limit = page_limit(a.limit);
     let offset = a.offset.unwrap_or(0);
 
     let sort = match a.order_by.as_deref() {
@@ -985,15 +1047,8 @@ async fn pm_list_tasks(state: &McpState, actor: Option<&str>, args: Value) -> Re
     let agent_dir: &dyn AgentDirectory = state.agent_dir.as_ref();
     let out = tasks_to_values(&state.store, agent_dir, page, limit).await?;
     // An object envelope, not a bare array: `offset` is only usable if the
-    // caller can see how much is left.
-    Ok(json!({
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-        "returned": out.len(),
-        "has_more": offset + out.len() < total,
-        "tasks": out,
-    }))
+    // caller can see how much is left, and a capped page must say so.
+    Ok(paginate(json!({}), "tasks", out, Some(total), offset, limit))
 }
 
 /// `pm_get_task` — 任务详情（含 is_blocked / blocked_by / depth / parent_id）。
@@ -1521,7 +1576,6 @@ async fn pm_list_agents(state: &McpState, _actor: &str, args: Value) -> Result<V
             added_at: None,
         }));
     }
-    let total = rows.len();
 
     // `query` narrows on display fields only. A row without directory metadata
     // (a human member, or any row while the directory is down) has nothing to
@@ -1566,7 +1620,9 @@ async fn pm_list_agents(state: &McpState, _actor: &str, args: Value) -> Result<V
             .cmp(&sort_key(y))
             .then_with(|| x.instance_id.cmp(&y.instance_id))
     });
-    rows.truncate(a.limit);
+    let total = rows.len();
+    let limit = page_limit(a.limit);
+    let rows: Vec<Row> = rows.into_iter().skip(a.offset).take(limit).collect();
 
     let agents: Vec<Value> = rows
         .iter()
@@ -1595,19 +1651,17 @@ async fn pm_list_agents(state: &McpState, _actor: &str, args: Value) -> Result<V
         })
         .collect();
 
-    Ok(json!({
+    let base = json!({
         "mode": if a.project_id.is_some() { "project_members" } else { "directory" },
         "project_id": a.project_id.as_ref().map(|p| p.to_string()),
         "directory_available": directory_available,
-        "total": total,
         // Roster mode only: how many members were left out because the MCP
         // surface cannot dispatch to a human account (D7). Reported rather than
         // silently dropped, so "nobody else is in this project" is never a
         // conclusion an agent can draw from this result by accident.
         "human_member_count": (human_member_count > 0).then_some(human_member_count),
-        "count": agents.len(),
-        "agents": agents,
-    }))
+    });
+    Ok(paginate(base, "agents", agents, Some(total), a.offset, limit))
 }
 
 /// `pm_add_project_member` — invite an agent instance or a human account into
@@ -1720,27 +1774,42 @@ async fn pm_list_activity(state: &McpState, args: Value) -> Result<Value> {
 
     let entries = state.store.list_activity(&a.task_id).await?;
     let total = entries.len();
-    let start = total.saturating_sub(a.limit);
-    let page = &entries[start..];
+    let limit = page_limit(a.limit);
+    // Newest-first window: `offset` skips the newest entries, so paging walks
+    // toward older ones — the direction a reader actually goes.
+    let end = total.saturating_sub(a.offset);
+    let start = end.saturating_sub(limit);
+    let page = &entries[start..end];
 
-    Ok(json!({
-        "task_id": a.task_id,
-        "total": total,
-        "returned": page.len(),
-        // `true` = older entries exist and are NOT in this response.
-        "truncated": start > 0,
-        "activity": page
-            .iter()
-            .map(|act| json!({
-                "id": act.id,
-                "kind": act.kind,
-                "actor": act.actor,
-                "actor_kind": act.actor_kind,
-                "text": act.text,
-                "created_at": act.created_at,
-            }))
+    Ok(paginate(
+        json!({ "task_id": a.task_id }),
+        "activity",
+        page.iter()
+            .map(|act| {
+                // The `Submitted` entry carries the whole submission — up to
+                // MAX_TEXT_CHUNK characters of it, times 20 entries, is the
+                // same context bomb the task list had. The full text is one
+                // `pm_get_task` (task.result.text) away.
+                let (text, total_chars, cut) = text_chunk(&act.text, 0, ACTIVITY_TEXT_CHARS);
+                let mut v = json!({
+                    "id": act.id,
+                    "kind": act.kind,
+                    "actor": act.actor,
+                    "actor_kind": act.actor_kind,
+                    "text": text,
+                    "created_at": act.created_at,
+                });
+                if cut {
+                    v["text_truncated"] = json!(true);
+                    v["text_total_chars"] = json!(total_chars);
+                }
+                v
+            })
             .collect::<Vec<_>>(),
-    }))
+        Some(total),
+        a.offset,
+        limit,
+    ))
 }
 
 /// `pm_add_activity` — append a reply to a task (`ActivityKind::Comment`).

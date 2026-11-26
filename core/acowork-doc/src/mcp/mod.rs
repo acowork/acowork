@@ -381,6 +381,80 @@ mod tests {
         serde_json::from_str(text).unwrap()
     }
 
+    const TEST_ACTOR: &str = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+
+    /// 回归：文档上限是 MB 级，`doc_read` 一次回全文就是上下文炸弹。
+    /// 正文按 `MAX_TEXT_CHUNK` 字符分块，截断时明说下一个 offset。
+    #[tokio::test]
+    async fn doc_read_windows_long_content() {
+        let (router, _tmp) = shared_router().await;
+        let v = call_shared(
+            &router,
+            "doc_write",
+            json!({ "ref": "big.md", "mode": "create", "content": "字".repeat(30_000) }),
+            Some(TEST_ACTOR),
+        )
+        .await;
+        assert!(v["error"].is_null(), "write: {v}");
+
+        let v = call_shared(&router, "doc_read", json!({ "ref": "big.md" }), None).await;
+        let first = content(&v);
+        assert_eq!(
+            first["content"].as_str().unwrap().chars().count(),
+            acowork_core::mcp_page::MAX_TEXT_CHUNK
+        );
+        assert_eq!(first["content_chars"], 30_000);
+        assert_eq!(first["truncated"], true);
+        assert!(
+            first["notice"].as_str().unwrap().contains("offset=20000"),
+            "the notice must say where to continue: {first}"
+        );
+
+        let v = call_shared(
+            &router,
+            "doc_read",
+            json!({ "ref": "big.md", "offset": 20_000 }),
+            None,
+        )
+        .await;
+        let second = content(&v);
+        assert_eq!(second["content"].as_str().unwrap().chars().count(), 10_000);
+        assert!(second.get("truncated").is_none(), "{second}");
+    }
+
+    /// 目录列表同样受统一页大小约束：要 500 条也只给 20 条，并说明下一页。
+    #[tokio::test]
+    async fn doc_list_pages_at_twenty_and_says_so() {
+        let (router, _tmp) = shared_router().await;
+        for i in 0..25 {
+            let v = call_shared(
+                &router,
+                "doc_write",
+                json!({ "ref": format!("n{i:02}.md"), "mode": "create", "content": "x" }),
+                Some(TEST_ACTOR),
+            )
+            .await;
+            assert!(v["error"].is_null(), "write {i}: {v}");
+        }
+
+        let v = call_shared(&router, "doc_list", json!({ "limit": 500 }), None).await;
+        let first = content(&v);
+        assert_eq!(first["limit"], 20, "{first}");
+        assert_eq!(first["returned"], 20);
+        assert_eq!(first["total"], 25);
+        assert_eq!(first["truncated"], true);
+        assert!(
+            first["notice"].as_str().unwrap().contains("offset=20"),
+            "{first}"
+        );
+
+        let v = call_shared(&router, "doc_list", json!({ "offset": 20 }), None).await;
+        let second = content(&v);
+        assert_eq!(second["returned"], 5);
+        assert_eq!(second["has_more"], false);
+        assert!(second.get("truncated").is_none(), "{second}");
+    }
+
     #[tokio::test]
     async fn initialize_returns_server_info() {
         let (status, value) = raw(
