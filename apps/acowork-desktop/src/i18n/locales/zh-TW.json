@@ -1768,6 +1768,7 @@
     "errorProjectService": "專案服務未就緒或搜尋失敗",
     "errorMemory": "記憶搜尋失敗",
     "errorConversation": "對話搜尋失敗",
+    "conversationTimedOut": "對話搜尋逾時，本次未回傳對話結果（可稍後重試）",
     "errorGit": "Git 歷史載入失敗",
     "indexingSync": "索引同步中，結果可能不完整",
     "rerun": "重新搜尋",

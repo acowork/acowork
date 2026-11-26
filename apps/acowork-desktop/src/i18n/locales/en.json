@@ -1030,6 +1030,7 @@
     "errorProjectService": "Project service is not ready or search failed",
     "errorMemory": "Memory search failed",
     "errorConversation": "Conversation search failed",
+    "conversationTimedOut": "Conversation search timed out — no conversation results this time (try again shortly)",
     "errorGit": "Failed to load Git history",
     "indexingSync": "Index syncing — results may be incomplete",
     "rerun": "Re-run search",

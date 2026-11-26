@@ -153,6 +153,29 @@ pub type SharedAgentCore = Arc<std::sync::RwLock<Option<Arc<crate::agent::agent_
 // no amount of re-embedding could clear the banner. Its readers now ask the live
 // provider (`AgentCore::live_embedding_provider`), the one value a session updates
 // when it adopts a new model.
+
+/// The embedding provider the process is actually using right now.
+///
+/// This is the one correct way for an HTTP handler to reach the provider, and
+/// it exists so the rule cannot be got wrong at a call site: the slot holds an
+/// `Arc<AgentCore>` snapshot published once at startup, `AgentCore` is `Clone`,
+/// and a model switch adopts the new provider into the *session's own* clone —
+/// so the snapshot's `embedding_provider` field keeps naming the retired
+/// provider for the rest of the process's life. Only the shared cell is
+/// updated. A handler that reads the field embeds with a model the index no
+/// longer uses, or with a retired remote endpoint that never answers at all.
+///
+/// `None` when no core is published yet, or when none is bound.
+///
+/// See also [`RuntimeHttpServer::live_embed_dim`], the same read for the width,
+/// and `conversation_index`'s sweep, which is the third reader of this cell.
+pub(crate) fn live_embedding_provider(
+    slot: &SharedAgentCore,
+) -> Option<Arc<dyn crate::embedding::EmbeddingProvider>> {
+    slot.read()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|core| core.live_embedding_provider()))
+}
 /// Shared degradation reasons — startup-phase failures that are not
 /// fatal enough to abort the runtime but degrade functionality.
 ///
@@ -382,16 +405,7 @@ impl HttpState {
     /// the process started with long after the model had changed - which is how
     /// the memory panel told the user to rebuild an index that already matched.
     pub(crate) fn live_embed_dim(&self) -> u64 {
-        self.agent_core
-            .read()
-            .ok()
-            .and_then(|guard| {
-                guard
-                    .as_ref()
-                    .and_then(|core| core.live_embedding_provider())
-            })
-            .map(|p| p.dimension() as u64)
-            .unwrap_or(0)
+        live_embedding_provider(&self.agent_core).map_or(0, |p| p.dimension() as u64)
     }
 
     pub(crate) fn instance_matches(&self, id: &str) -> bool {

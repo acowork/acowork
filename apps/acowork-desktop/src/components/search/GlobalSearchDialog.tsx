@@ -856,6 +856,16 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                 const resp = await fetch(`${baseUrl}/api/agents/${agentId}/search?${params}`, { signal });
                 if (!resp.ok) throw new Error(`status ${resp.status}`);
                 const data = (await resp.json()) as GlobalSearchResponse;
+                // A 200 with an empty conversation tab is not "nothing matched".
+                // The Runtime bounds the scope below this client's deadline and
+                // reports the overrun in `scopes.conversation.status`, so the
+                // request lands fast and would otherwise render as a clean
+                // no-result — turning a loud failure into a silent wrong answer.
+                // Reuse `conversationError`: it already means "this tab could not
+                // answer", and it suppresses the no-match line by construction.
+                if (data.scopes?.conversation?.status === "timeout") {
+                    setConversationError(t("globalSearch.conversationTimedOut"));
+                }
                 return toConversationHits(data.hits ?? []);
             };
 

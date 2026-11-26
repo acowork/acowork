@@ -16,6 +16,7 @@
 //! ADR-064/070).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     extract::{Query, State},
@@ -90,27 +91,126 @@ pub struct GlobalSearchResponse {
     pub indexing: bool,
 }
 
-/// Embed `q` with the agent's live embedding provider (ADR-081 memory
-/// scope). Returns `None` when no provider is bound or embedding fails —
-/// the memory scope then falls back to BM25 text search.
-pub(crate) async fn embed_query(state: &HttpState, q: &str) -> Option<Vec<f32>> {
-    let provider: Option<Arc<dyn crate::embedding::EmbeddingProvider>> = {
-        let guard = state.agent_core.read().ok();
-        guard
-            .as_ref()
-            .and_then(|g| g.as_ref())
-            .and_then(|c| c.embedding_provider.clone())
-    };
-    match provider {
-        Some(provider) => match provider.embed(q).await {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::warn!(error = %e, "global search: embedding failed, falling back to BM25");
-                None
-            }
-        },
-        None => None,
+/// Wall-clock budget for the **whole** conversation scope, not for one step of it.
+///
+/// The scope is a sequential chain — embed the query, run the hybrid search,
+/// then resolve session titles — and every link can block: the first on a remote
+/// embedding endpoint, the other two on a synchronous SQLite read that shares a
+/// single connection mutex with the indexer sweep. A budget on one step leaves
+/// the other two unbounded, and an unbounded step still blows the deadline. So
+/// the budget belongs to the scope, which is the unit the caller actually waits
+/// on.
+///
+/// The number is set by its relationship to the caller, not by measurement:
+/// Desktop aborts a search at `SEARCH_DEADLINE_MS` = 8 s
+/// (`apps/acowork-desktop/src/lib/searchRun.ts`), so a scope that intends to
+/// answer must answer inside that and leave room for the Gateway→Node→Runtime
+/// hops and serialization. 5 s is the largest value that still guarantees the
+/// response arrives before the client stops listening.
+///
+/// This matters beyond the conversation tab: the three scopes are combined with
+/// `tokio::join!`, which waits for **all** of them, so one scope that overruns
+/// discards the file and git results that already finished. The budget is what
+/// turns "the whole search failed" into "the conversation tab came back empty".
+///
+/// The coupling to the 8 s client deadline is by convention and by test, not by
+/// compiler — the two constants live in different languages with no shared
+/// source of truth. `scope_budget_outfits_the_client_deadline` guards it.
+const CONVERSATION_SCOPE_BUDGET_SECS: u64 = 5;
+const CONVERSATION_SCOPE_BUDGET: Duration = Duration::from_secs(CONVERSATION_SCOPE_BUDGET_SECS);
+
+/// What the query embedding may spend of [`CONVERSATION_SCOPE_BUDGET`].
+///
+/// Derived rather than chosen: the embed is the only step with an unbounded
+/// external dependency, but the steps after it are local and cheap, and a
+/// slow-but-successful embed must not consume the budget before the search that
+/// needs its result ever runs. Half the scope keeps both steps alive.
+///
+/// Exceeding it is not an error — it is the documented degradation to BM25.
+const QUERY_EMBED_BUDGET: Duration = Duration::from_secs(CONVERSATION_SCOPE_BUDGET_SECS / 2);
+
+/// The shape of a conversation scope that ran out of budget.
+///
+/// Empty hits with `embedded: false`, reported as its own status rather than as
+/// `ok`: a reader must be able to tell "nothing matched" from "we could not
+/// finish", which is the distinction the Desktop UI currently flattens into a
+/// single failure message.
+fn conversation_degraded() -> (serde_json::Value, Vec<SearchHit>, bool) {
+    (
+        json!({
+            "status": "timeout",
+            "budget_ms": CONVERSATION_SCOPE_BUDGET.as_millis() as u64,
+            "message": "conversation search exceeded its budget; results are empty for this query",
+        }),
+        Vec::new(),
+        false,
+    )
+}
+
+/// Apply [`CONVERSATION_SCOPE_BUDGET`] to the scope's future.
+///
+/// Extracted from the handler so the policy can be tested against a future that
+/// never completes. That distinction is the point: a budget tested only through
+/// the embed step proves nothing about the two SQLite steps behind it, and any
+/// one of the three can be the one that hangs.
+async fn within_scope_budget<F>(fut: F) -> (serde_json::Value, Vec<SearchHit>, bool)
+where
+    F: std::future::Future<Output = (serde_json::Value, Vec<SearchHit>, bool)>,
+{
+    match tokio::time::timeout(CONVERSATION_SCOPE_BUDGET, fut).await {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            tracing::warn!(
+                budget_ms = CONVERSATION_SCOPE_BUDGET.as_millis() as u64,
+                "global search: conversation scope exceeded its budget"
+            );
+            conversation_degraded()
+        }
     }
+}
+
+/// Embed with the provider's own attempt, bounded by [`QUERY_EMBED_BUDGET`].
+///
+/// `None` on error *or* on budget exhaustion — both degrade the scope to BM25
+/// rather than failing it. Kept separate from [`embed_query`] so the budget is
+/// exercised against a hanging provider without constructing an `HttpState`.
+async fn embed_within_budget(
+    provider: Arc<dyn crate::embedding::EmbeddingProvider>,
+    q: &str,
+) -> Option<Vec<f32>> {
+    match tokio::time::timeout(QUERY_EMBED_BUDGET, provider.embed(q)).await {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "global search: embedding failed, falling back to BM25");
+            None
+        }
+        Err(_) => {
+            // Counted, not just logged: `embedded=false` in `search_meta` tells
+            // a reader the vector source never ran, which is otherwise
+            // indistinguishable from a vector source that ran and found nothing.
+            tracing::warn!(
+                budget_ms = QUERY_EMBED_BUDGET.as_millis() as u64,
+                "global search: embedding exceeded the query budget, falling back to BM25"
+            );
+            None
+        }
+    }
+}
+
+/// Embed `q` with the agent's live embedding provider.
+///
+/// Returns `None` when no provider is bound, when embedding fails, or when it
+/// does not finish inside [`QUERY_EMBED_BUDGET`] — the scope then falls back to
+/// BM25 text search.
+///
+/// The provider comes from [`crate::http::server::live_embedding_provider`],
+/// never from the snapshot's `embedding_provider` field: that field is per-clone
+/// and frozen at publish time, so after an in-process model switch it names a
+/// retired endpoint and the embed blocks until its own 60 s cap — long past the
+/// point where the Desktop gives up.
+pub(crate) async fn embed_query(state: &HttpState, q: &str) -> Option<Vec<f32>> {
+    let provider = crate::http::server::live_embedding_provider(&state.agent_core)?;
+    embed_within_budget(provider, q).await
 }
 
 /// The agent's retrieval policy for this request (ADR-095 D6).
@@ -213,24 +313,37 @@ fn conversation_hits_to_search_hits(
 /// Resolve `session_id → title` from the session-meta store (ADR-082 §4
 /// step 3: SQLite; blocking reads off the async runtime). Missing rows map
 /// to `None` — the caller falls back to the raw id.
+///
+/// One `spawn_blocking` hop for the whole batch, not one per id: each hop
+/// re-contends the store's connection mutex, so the previous per-id loop made
+/// a `limit`-hit search pay `limit` separate round-trips through the same lock
+/// the indexer sweep holds on its own cadence. With an empty `session_ids`
+/// (no hits, or a workspace with no conversations dir) nothing is dispatched
+/// at all.
 async fn resolve_session_titles(
     conversations_dir: &std::path::Path,
     session_ids: &[String],
 ) -> std::collections::HashMap<String, Option<String>> {
-    let mut titles = std::collections::HashMap::with_capacity(session_ids.len());
-    for sid in session_ids {
-        let dir = conversations_dir.to_path_buf();
-        let sid_key = sid.clone();
-        let title = tokio::task::spawn_blocking(move || {
-            crate::conversation::read_session_meta(&dir, &sid_key)
-                .ok()
-                .and_then(|m| m.title)
-        })
-        .await
-        .unwrap_or(None);
-        titles.insert(sid.clone(), title);
+    if session_ids.is_empty() {
+        return std::collections::HashMap::new();
     }
-    titles
+    let dir = conversations_dir.to_path_buf();
+    let ids = session_ids.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let mut titles = std::collections::HashMap::with_capacity(ids.len());
+        for sid in ids {
+            let title = crate::conversation::read_session_meta(&dir, &sid)
+                .ok()
+                .and_then(|m| m.title);
+            titles.insert(sid, title);
+        }
+        titles
+    })
+    .await
+    // Same reasoning as the search hop above: no titles is a cosmetic
+    // degradation (the caller falls back to the raw session id), a hung
+    // request is not.
+    .unwrap_or_default()
 }
 
 /// `GET /search` handler.
@@ -393,11 +506,41 @@ pub(crate) async fn global_search(
         };
         let embedding = embed_query(state, &qq).await;
         let embedded = embedding.is_some();
-        let lexical = LexicalQuery {
-            raw: &qq,
-            terms: &lexical_conversation,
+        // The directory is read here rather than inside the blocking hop: it is
+        // a plain field access, and the title resolution below needs it even
+        // when the search itself failed.
+        let conversations_dir = index.conversations_dir().to_path_buf();
+        // `search_detailed` is a synchronous SQLite read on a store whose
+        // connection is a single `Mutex`, and the workspace's
+        // `private.sqlite` is written by the indexer sweep on a 2 s cadence.
+        // Running it inline parks an async worker for the duration of that
+        // contention, which stalls every other route this Runtime serves —
+        // including the sibling scopes of this very request. The title reads
+        // below already go through `spawn_blocking` for the same reason; the
+        // search itself is the heavier of the two and was the one left behind.
+        let hits = {
+            let index = index.clone();
+            let raw = qq.clone();
+            let terms = lexical_conversation.clone();
+            let embedding = embedding.clone();
+            let policy = conversation_policy;
+            tokio::task::spawn_blocking(move || {
+                let lexical = LexicalQuery {
+                    raw: &raw,
+                    terms: &terms,
+                };
+                index.search_detailed(&lexical, embedding.as_deref(), limit, &policy)
+            })
+            .await
+            // A panic inside the closure leaves no hits, and the scope is still
+            // answered — but it is logged as the defect it is. Silently turning
+            // a panic into "no results" is how a crashing search becomes a
+            // user-visible mystery.
+            .inspect_err(|e| {
+                tracing::error!(error = %e, "global search: conversation search task failed")
+            })
+            .unwrap_or_else(|_| Vec::new())
         };
-        let hits = index.search_detailed(&lexical, embedding.as_deref(), limit, &conversation_policy);
         // Session titles for display (dedup by session; meta reads off-runtime).
         let mut session_ids: Vec<String> = Vec::new();
         for h in &hits {
@@ -405,16 +548,23 @@ pub(crate) async fn global_search(
                 session_ids.push(h.session_id.clone());
             }
         }
-        let titles = resolve_session_titles(index.conversations_dir(), &session_ids).await;
+        let titles = resolve_session_titles(&conversations_dir, &session_ids).await;
         let hits = conversation_hits_to_search_hits(hits, &titles);
         (json!({"status": "ok", "count": hits.len()}), hits, embedded)
     };
+
+    // The budget covers the scope end to end. Note what it does *not* do: a
+    // `tokio::time::timeout` drops the future, it does not cancel a blocking
+    // task already running on the pool, so an overrun leaves the SQLite read to
+    // finish on its own. That is the correct trade — the caller is served inside
+    // its deadline, and the orphaned read holds no lock once it completes.
+    let conversation_guarded = within_scope_budget(conversation_fut);
 
     let (
         (file_meta, file_hits),
         (git_meta, git_hits),
         (conversation_meta, conversation_hits, conversation_embedded),
-    ) = tokio::join!(file_fut, git_fut, conversation_fut);
+    ) = tokio::join!(file_fut, git_fut, conversation_guarded);
 
     // Presentation order, deliberately **not** a score sort (ADR-095 D4).
     //
@@ -482,6 +632,223 @@ mod tests {
     use crate::usecases::git_query::GitCommitDto;
 
     use super::{conversation_hits_to_search_hits, git_scope_hits};
+
+    /// Fixed-dimension embedding provider, so a test can tell *which* provider
+    /// answered by the width of the vector it returned.
+    struct SizedEmbed(usize);
+
+    #[async_trait::async_trait]
+    impl crate::embedding::EmbeddingProvider for SizedEmbed {
+        fn name(&self) -> &str {
+            "sized-test"
+        }
+        async fn embed(
+            &self,
+            _t: &str,
+        ) -> std::result::Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+            Ok(vec![0.0; self.0])
+        }
+        async fn embed_batch(
+            &self,
+            ts: &[&str],
+        ) -> std::result::Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+            Ok(ts.iter().map(|_| vec![0.0; self.0]).collect())
+        }
+        fn dimension(&self) -> usize {
+            self.0
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// A provider that never answers — a retired remote endpoint, or one that
+    /// has simply stopped responding.
+    struct HangingEmbed;
+
+    #[async_trait::async_trait]
+    impl crate::embedding::EmbeddingProvider for HangingEmbed {
+        fn name(&self) -> &str {
+            "hanging-test"
+        }
+        async fn embed(
+            &self,
+            _t: &str,
+        ) -> std::result::Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+        async fn embed_batch(
+            &self,
+            ts: &[&str],
+        ) -> std::result::Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+            let mut out = Vec::with_capacity(ts.len());
+            for _ in ts {
+                out.push(self.embed("x").await?);
+            }
+            Ok(out)
+        }
+        fn dimension(&self) -> usize {
+            1024
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    fn minimal_core() -> crate::agent::agent_core::AgentCore {
+        let config = crate::config::RuntimeConfig {
+            history_max_tokens: 8000,
+            ..Default::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.search"
+            version = "1.0.0"
+            name = "Search test"
+            description = "global-search regression tests"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        crate::agent::agent_core::AgentCore::new(
+            config,
+            manifest,
+            Arc::new(acowork_core::providers::mock::MockProvider::single_text("test")),
+            vec![],
+        )
+    }
+
+    /// Regression: the conversation scope embedded the query with a **retired**
+    /// provider after a model switch.
+    ///
+    /// The published `Arc<AgentCore>` snapshot is immutable, so its
+    /// `embedding_provider` field froze at publish time while the session went
+    /// on to adopt a new model through the shared cell. The search path read the
+    /// field, so it embedded at the old width against an index already
+    /// re-embedded at the new one — and when the retired provider was a remote
+    /// endpoint that had been torn down, the query blocked on it for the full
+    /// concurrency-inflated fallback budget (up to 60 s) against an 8 s client
+    /// deadline. The tab reported that as "search failed".
+    ///
+    /// `ConversationIndexer::sweep` had already been moved to the cell for the
+    /// same reason; this asserts the search path did the same.
+    #[test]
+    fn query_provider_follows_a_model_switch_after_the_snapshot_is_published() {
+        let mut core = minimal_core();
+        core.update_embedding_provider(Arc::new(SizedEmbed(1024)));
+
+        // The snapshot the HTTP layer holds, published with the old provider.
+        let published = Arc::new(core.clone());
+        let slot: crate::http::SharedAgentCore =
+            Arc::new(std::sync::RwLock::new(Some(published.clone())));
+
+        // A session adopts a different model afterwards. `update_embedding_
+        // provider` takes `&mut self`, so it runs on the session's own clone.
+        let mut session = core.clone();
+        session.update_embedding_provider(Arc::new(SizedEmbed(768)));
+
+        assert_eq!(
+            crate::http::server::live_embedding_provider(&slot).map(|p| p.dimension()),
+            Some(768),
+            "the search path must embed with the provider the agent uses now"
+        );
+
+        // The trap, pinned: the field still reports the retired provider. Were
+        // the accessor to read it, this assertion is what would fail.
+        assert_eq!(
+            published.embedding_provider.as_ref().map(|p| p.dimension()),
+            Some(1024),
+            "the per-clone field is stale by construction; if this ever reads \
+             768 the cell is no longer the only shared path and the guard above \
+             can be simplified"
+        );
+    }
+
+    #[test]
+    fn query_provider_is_none_without_a_published_core() {
+        let slot: crate::http::SharedAgentCore = Arc::new(std::sync::RwLock::new(None));
+        assert!(crate::http::server::live_embedding_provider(&slot).is_none());
+    }
+
+    /// Regression: a provider that never answers used to own the request.
+    ///
+    /// The fallback chain's per-attempt budget scales with in-flight attempts
+    /// (capped at 60 s) because a background sweep must not lose vectors to
+    /// queueing. That is the wrong budget for an interactive search, so the
+    /// search path bounds the call and degrades to BM25 instead.
+    #[tokio::test(start_paused = true)]
+    async fn hanging_provider_degrades_to_bm25_instead_of_owning_the_request() {
+        let provider = Arc::new(HangingEmbed);
+        let attempt = tokio::spawn(embed_within_budget(provider, "q"));
+
+        // Past the budget, still inside the Desktop's 8 s deadline.
+        tokio::time::advance(QUERY_EMBED_BUDGET + Duration::from_millis(100)).await;
+
+        assert_eq!(
+            attempt.await.unwrap(),
+            None,
+            "a dead embedding backend must cost the vector source, not the tab"
+        );
+    }
+
+    /// The budget ladder, pinned.
+    ///
+    /// `SEARCH_DEADLINE_MS` = 8000 lives in
+    /// `apps/acowork-desktop/src/lib/searchRun.ts`. Rust cannot import it, so the
+    /// coupling is held here by assertion rather than by the compiler: if the
+    /// Desktop deadline ever drops below the scope budget, this is where it
+    /// surfaces instead of in a user report.
+    #[test]
+    fn scope_budget_outfits_the_client_deadline() {
+        const DESKTOP_SEARCH_DEADLINE_MS: u64 = 8_000;
+        assert!(
+            (CONVERSATION_SCOPE_BUDGET.as_millis() as u64) < DESKTOP_SEARCH_DEADLINE_MS,
+            "the scope must answer before the Desktop stops listening"
+        );
+        assert!(
+            QUERY_EMBED_BUDGET < CONVERSATION_SCOPE_BUDGET,
+            "the embed step must not be able to spend the whole scope budget before the search runs"
+        );
+    }
+
+    /// Regression: the budget covers the scope, not merely its first step.
+    ///
+    /// Embedding is one of three sequential calls; the hybrid search and the
+    /// title reads are synchronous SQLite on a store whose connection is a
+    /// single mutex shared with the indexer sweep. A hang in either of those
+    /// owns the request exactly as a dead embedding backend did, and no budget
+    /// on the embed step would have covered it. This drives the guard with a
+    /// future that never completes — the shape of a post-embed stall.
+    #[tokio::test(start_paused = true)]
+    async fn a_hang_after_the_embed_still_degrades_the_scope_not_the_request() {
+        let hung = tokio::spawn(within_scope_budget(std::future::pending::<(
+            serde_json::Value,
+            Vec<SearchHit>,
+            bool,
+        )>()));
+
+        tokio::time::advance(CONVERSATION_SCOPE_BUDGET + Duration::from_millis(10)).await;
+
+        let (meta, hits, embedded) = hung.await.unwrap();
+        // Reported as its own status, not as `ok` with no hits: "nothing
+        // matched" and "we could not finish" are different facts, and collapsing
+        // them is what made this bug unreadable from the UI.
+        assert_eq!(meta["status"], "timeout");
+        assert!(hits.is_empty(), "a degraded scope returns nothing rather than hanging");
+        assert!(!embedded, "the vector source cannot claim to have run");
+    }
+
+    #[tokio::test]
+    async fn responsive_provider_still_returns_its_vector() {
+        let provider = Arc::new(SizedEmbed(1024));
+        assert_eq!(embed_within_budget(provider, "q").await.map(|v| v.len()), Some(1024), "the bound must not reject a provider that answers in time");
+    }
 
     /// A conversation hit from the legacy single-path `search()`: no fusion, so
     /// no per-source signals at all.

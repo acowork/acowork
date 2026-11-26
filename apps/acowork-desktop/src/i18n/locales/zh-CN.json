@@ -2028,6 +2028,7 @@
     "errorProjectService": "项目服务未就绪或搜索失败",
     "errorMemory": "记忆搜索失败",
     "errorConversation": "对话搜索失败",
+    "conversationTimedOut": "对话搜索超时，本次未返回对话结果（可稍后重试）",
     "errorGit": "Git 历史加载失败",
     "indexingSync": "索引同步中，结果可能不完整",
     "rerun": "重新搜索",

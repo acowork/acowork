@@ -1777,6 +1777,7 @@
     "errorProjectService": "プロジェクトサービスが未準備か検索に失敗しました",
     "errorMemory": "メモリ検索に失敗しました",
     "errorConversation": "会話検索に失敗しました",
+    "conversationTimedOut": "会話検索がタイムアウトしました。今回は結果を返せませんでした（しばらくして再試行してください）",
     "errorGit": "Git 履歴の読み込みに失敗しました",
     "indexingSync": "インデックス同期中のため、結果が不完全な可能性があります",
     "rerun": "再検索",
