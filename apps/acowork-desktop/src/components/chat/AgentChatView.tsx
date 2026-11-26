@@ -111,7 +111,6 @@ import { agentActivity, liveActivityStatus } from "../../lib/agentActivity";
 import { ChatTurnHeader, type TurnIdentity } from "./ChatTurnHeader";
 import { turnInflight, resolveExpectedResponders } from "../../lib/chatTurnInflight";
 import { useLocateMessage } from "../../lib/useLocateMessage";
-import { rowSelector } from "../common/scrollAnchor";
 import {
   fetchCardAnswer,
   useChatSessionStore,
@@ -690,7 +689,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     virtualEstimate,
     virtualAttrs,
     seqsByItem,
-  } = useTranscriptLayout(rows, sessionId, sessionId);
+  } = useTranscriptLayout(rows, sessionId);
   const isBubble = (item: TranscriptItem | undefined) =>
     item?.kind === "row" && item.row.kind === "agent_message";
   // The router's open question, and the run it asks about (ADR-106 revision
@@ -823,15 +822,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => clearLocate(sessionId),
     // Virtualization fallback: the row is in the window but not in the DOM. A
     // folded row is not in the transcript as its own item either, so its seq
-    // resolves through the layout's `keyOfSeq` to the block that holds it — and
-    // the block is then anchored on the ROW, not on the block's top: a
-    // long-lived session folds dozens of rounds into one block, and centring the
-    // block put the reader on a different round of the same run (see
-    // ./scrollAnchor.ts).
+    // resolves through the layout's `keyOfSeq` to the block that holds it.
     (seq) => {
       const key = keyOfSeqRef.current.get(seq);
       if (!key) return false;
-      return listRef.current?.scrollToKey(key, "center", rowSelector(seq)) ?? false;
+      return listRef.current?.scrollToKey(key, "center") ?? false;
     },
     // A locate parks the reader mid-history on purpose: take them out of
     // the follow, or the persistent anchor rides the next commit back to

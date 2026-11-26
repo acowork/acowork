@@ -36,7 +36,6 @@
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 import { isCardNotice, mayAnswerCard } from "../../lib/chatCardAnswer";
 import type { CardAnswerHandler } from "../../lib/chatCardAnswer";
-import type { ChatBlockEntry } from "../../lib/chatBlocks";
 
 /** One round as the block sees it. */
 export interface RoundItem {
@@ -404,25 +403,4 @@ export function blockSeqs(block: RunBlock): number[] {
     }
   }
   return [...new Set(seqs)];
-}
-
-/**
- * The run's last word: the newest round that HAS an answer.
- *
- * ONE spelling, because two readers depend on it and they must agree — the
- * block draws it as its card body (`ChatExecutionBlock`), and the transcript
- * estimates the block's height from it (`transcriptHeight`). A round still
- * working has not spoken yet, so it contributes nothing; a run with no answered
- * round yet has no body, which is exactly what the estimate folds at its
- * ceiling.
- */
-export function latestAnswerOf(
-  block: RunBlock,
-  entries: Record<string, ChatBlockEntry | undefined>,
-): string {
-  for (let i = block.rounds.length - 1; i >= 0; i -= 1) {
-    const body = entries[block.rounds[i]!.ref]?.projection?.answer?.body.trim();
-    if (body) return body;
-  }
-  return "";
 }

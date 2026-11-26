@@ -49,28 +49,16 @@ import React, {
 } from "react";
 import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
 import { decideBottomPin } from "./bottomAnchor";
-import { rowCentredScrollTop } from "./scrollAnchor";
 
 /** Fallback row height when neither the measured cache nor the adapter's
  *  estimator has an opinion. Generous enough that a short chat row
  *  under-fills rather than over-fills the estimate; measurements correct it
  *  on first mount. */
 const DEFAULT_ROW_HEIGHT_PX = 64;
-/** How long a `scrollToKey` request keeps chasing after the layout last
- *  MOVED. This is a QUIET period, not a budget: every commit whose placement
- *  differs from the previous one re-arms it (see the pin effect), so a window
- *  whose height keeps changing — a group transcript is a stack of run blocks,
- *  and a block's height is unknown until its batched block read lands and its
- *  images decode — is chased until it stops, however long that takes.
- *
- *  It may be generous because the reader is protected by a different rule: a
- *  scroll the request did not write releases the pin immediately (a chat row
- *  that is 2.5 s late is a real thing; a reader held hostage is not). */
-const KEY_PIN_QUIET_MS = 2500;
-/** Safety valve on the chase above: a live round streams text into its block
- *  and the layout would never go quiet. Not a bet on measurements — just a
- *  ceiling on how long one locate may own the viewport. */
-const KEY_PIN_MAX_MS = 8000;
+/** How long a `scrollToKey` request keeps re-centring while row measurements
+ *  converge. Long enough for the commits that follow a window replacement,
+ *  short enough that it never fights a reader who scrolls away. */
+const KEY_PIN_MS = 600;
 
 /** Bottom-pin tuning — the anchor re-pins on every commit until the layout
  *  settles (measurements land). MAX is a safety valve; the release rule
@@ -163,16 +151,8 @@ export interface VirtualRowListHandle {
   scrollToIndex: (index: number, align?: "start" | "center" | "end") => void;
   /** Jump to the row whose `keyOf` matches. Returns true only when the row
    *  is present AND the virtualizer has a scroll element (a false return
-   *  means the viewport did NOT move — do not treat the pane as positioned).
-   *
-   *  `within` names a row INSIDE the item (`[data-seq="7"]`), for an item that
-   *  folds several transcript rows into one virtual one (a run block). The item
-   *  is placed first — that is what mounts the row — and the pane is then
-   *  corrected onto it, so a locate lands on the message the reader clicked and
-   *  not on the block that holds it. With `within`, `align` is ignored: the row
-   *  is centred (a row taller than the pane keeps its top edge). See
-   *  ./scrollAnchor.ts. */
-  scrollToKey: (key: string, align?: "start" | "center" | "end", within?: string) => boolean;
+   *  means the viewport did NOT move — do not treat the pane as positioned). */
+  scrollToKey: (key: string, align?: "start" | "center" | "end") => boolean;
 }
 
 export interface VirtualRowListProps<T> {
@@ -484,87 +464,14 @@ export function VirtualRowList<T>({
   const keyPinRef = useRef<{
     key: string;
     align: "start" | "center" | "end";
-    /** A row inside the item (`[data-seq="7"]`), for an item that folds several
-     *  transcript rows into one. Re-resolved on every commit of the pin: the
-     *  row mounts with the item, so the first pass may still miss it. */
-    within?: string;
-    /** The offset the last placement wrote, or null before the first one
-     *  landed. The difference against the next placement is what tells "the
-     *  layout is still moving" from "this is where the row is". */
-    landed: number | null;
-    /** The chase re-arms to `now + KEY_PIN_QUIET_MS` whenever the placement MOVES. */
-    quietUntil: number;
-    /** `KEY_PIN_MAX_MS` after the request: a streamed answer never goes quiet. */
-    ceiling: number;
+    deadline: number;
   } | null>(null);
-  /**
-   * Place the pane on a row INSIDE the item at `idx`, whose top edge was just
-   * aligned to the pane's top. Returns the offset it wrote, or null when the
-   * item or the row is not in the DOM yet (the caller keeps the coarse
-   * placement and retries on the next commit).
-   *
-   * Rect differences only: `row.top - item.top` is the row's offset within its
-   * item and is unaffected by where the pane happens to sit.
-   */
-  const placeWithinItem = useCallback(
-    (idx: number, within: string): number | null => {
-      const el = virtualizer.scrollElement;
-      if (!el) return null;
-      const itemEl =
-        virtualizer.elementsCache.get(idx) ??
-        el.querySelector<HTMLElement>(`[data-index="${idx}"]`);
-      if (!itemEl) return null;
-      // A standalone row IS its item (the wrapper carries its `data-seq`), and
-      // `querySelector` does not match the element itself.
-      const rowEl = itemEl.matches(within)
-        ? itemEl
-        : itemEl.querySelector<HTMLElement>(within);
-      if (!rowEl) return null;
-      const top = rowCentredScrollTop({
-        alignedTop: el.scrollTop,
-        clientHeight: el.clientHeight,
-        item: itemEl.getBoundingClientRect(),
-        row: rowEl.getBoundingClientRect(),
-      });
-      el.scrollTop = top;
-      return top;
-    },
-    [virtualizer],
-  );
-  /** One placement of an armed request; the offset it landed on, or null when
-   *  the row is not mounted yet. */
-  const landKeyPin = useCallback(
-    (idx: number, req: NonNullable<typeof keyPinRef.current>): number | null => {
-      const el = virtualizer.scrollElement;
-      if (!el) return null;
-      if (req.within !== undefined) {
-        // Item top first — that is what mounts the block, and it is the
-        // reference the correction measures against.
-        virtualizer.scrollToIndex(idx, { align: "start" });
-        return placeWithinItem(idx, req.within);
-      }
-      virtualizer.scrollToIndex(idx, { align: req.align });
-      // Read back rather than trusting the request: the pane clamps at both
-      // ends, and it is the CLAMPED offset the next commit has to compare with.
-      return el.scrollTop;
-    },
-    [placeWithinItem, virtualizer],
-  );
   // ── Key-scroll convergence ───────────────────────────────────────
-  // Re-place the target on every commit for as long as the LAYOUT is still
-  // moving — the quiet period, not a fixed budget. A time-boxed chase is a bet
-  // that estimates have converged by then, and the chat surfaces lose it: a
-  // transcript window's height is unknown until `measureElement` runs, and a
-  // run block's is unknown until its block read lands (`chatBlockStore` batches
-  // one request per chat), so a group window — a stack of run blocks — can move
-  // by thousands of pixels well after any fixed window has closed. The 1:1
-  // surface survived the bet because its rows are short bubbles whose estimate
-  // is nearly right; that is the whole difference between the two lists, not
-  // the locate code, which is shared.
-  //
-  // ponytail: still a bounded chase (KEY_PIN_MAX_MS) rather than solving for
-  // the converged height analytically; the ceiling only has to cover a live
-  // round streaming text into its block.
+  // ponytail: bounded re-scroll (<= KEY_PIN_MS) rather than solving for the
+  // converged height analytically. Ceiling: a row that measures in slower than
+  // the deadline can still land off-centre; upgrade path is the library's
+  // `shouldAdjustScrollPositionOnItemSizeChange`, which needs the target index
+  // to be its own state.
   useLayoutEffect(() => {
     const req = keyPinRef.current;
     if (!req) return;
@@ -573,62 +480,17 @@ export function VirtualRowList<T>({
       keyPinRef.current = null;
       return;
     }
-    const now = performance.now();
-    if (now > req.ceiling) {
+    // Re-issue on EVERY commit until the deadline. No "already in view" exit:
+    // the row is routinely in view on the commit right after a window
+    // replacement and is pushed back out ~100 ms later when the rows above it
+    // measure in taller than their estimate (markdown/code rows grow after
+    // paint). Only the deadline ends the chase.
+    if (performance.now() > req.deadline) {
       keyPinRef.current = null;
       return;
     }
-    // Did anyone but this request move the pane since the last placement? The
-    // bottom anchor is the one legitimate writer that runs BEFORE this effect
-    // in the same commit (it always lands exactly at the pane's maximum), and
-    // it is overwritten a few lines down — so it is not the reader. Anything
-    // else is: release instead of dragging them back.
-    const pane = virtualizer.scrollElement;
-    if (pane && req.landed !== null && Math.abs(pane.scrollTop - req.landed) > 2) {
-      const max = pane.scrollHeight - pane.clientHeight;
-      if (pane.scrollTop < max - 1) {
-        keyPinRef.current = null;
-        return;
-      }
-    }
-    const landed = landKeyPin(idx, req);
-    if (landed === null) {
-      // The row is not in the DOM yet (the item has not mounted). Nothing to
-      // compare against — keep the request and try on the next commit.
-      return;
-    }
-    const moved = req.landed === null || Math.abs(landed - req.landed) > 0.5;
-    req.landed = landed;
-    if (moved) {
-      // Still settling: the target has moved since the last commit, so the
-      // layout will move again. Extend the quiet period.
-      req.quietUntil = now + KEY_PIN_QUIET_MS;
-      return;
-    }
-    if (now > req.quietUntil) {
-      // Placement has been identical for a full quiet period: the row is where
-      // it is going to stay, and the pane goes back to the reader.
-      keyPinRef.current = null;
-    }
+    virtualizer.scrollToIndex(idx, { align: req.align });
   });
-
-  // ── Reader release ───────────────────────────────────────────────
-  // The chase's quiet period is generous (a chat row can be seconds late), so
-  // the guarantee that a reader is never held hostage lives here instead: any
-  // pane offset this request did not write ends it. A scroll event carries the
-  // FINAL offset of the task that wrote it, so the shell's own writes (this
-  // pin, the bottom anchor, the correction) each report the value they left —
-  // and a value that differs can only be the reader (or `scrollIntoView`).
-  useEffect(() => {
-    if (!scrollEl) return;
-    const onScroll = () => {
-      const req = keyPinRef.current;
-      if (!req || req.landed === null) return;
-      if (Math.abs(scrollEl.scrollTop - req.landed) > 2) keyPinRef.current = null;
-    };
-    scrollEl.addEventListener("scroll", onScroll, { passive: true });
-    return () => scrollEl.removeEventListener("scroll", onScroll);
-  }, [scrollEl]);
 
   // ── Imperative handle ────────────────────────────────────────────
   // Data-derived queries only — no scrollTop pixel guessing.
@@ -704,11 +566,7 @@ export function VirtualRowList<T>({
         const clamped = Math.max(0, Math.min(index, count - 1));
         virtualizer.scrollToIndex(clamped, { align });
       },
-      scrollToKey: (
-        key: string,
-        align: "start" | "center" | "end" = "start",
-        within?: string,
-      ) => {
+      scrollToKey: (key: string, align: "start" | "center" | "end" = "start") => {
         const idx = itemsRef.current.findIndex(
           (it, i) => keyOfRef.current(it, i) === key,
         );
@@ -717,26 +575,10 @@ export function VirtualRowList<T>({
         // is attached — report false so the caller does not treat the pane
         // as positioned (the locate path depends on this).
         if (!virtualizer.scrollElement) return false;
-        // Ride the commits that follow — and keep riding while the layout keeps
-        // moving (see the pin effect): on a replaced window the offsets are
-        // still estimates, and a chat window's block heights do not become real
-        // until their block reads land.
-        const now = performance.now();
-        const req = {
-          key,
-          align,
-          ...(within !== undefined ? { within } : {}),
-          landed: null as number | null,
-          quietUntil: now + KEY_PIN_QUIET_MS,
-          ceiling: now + KEY_PIN_MAX_MS,
-        };
-        keyPinRef.current = req;
-        // First placement right away, so the first commit has something to
-        // compare against (and a single-commit jump lands without waiting for
-        // a re-render).
-        const idxNow = idx;
-        const landed = landKeyPin(idxNow, req);
-        if (landed !== null) req.landed = landed;
+        virtualizer.scrollToIndex(idx, { align });
+        // Ride the commits that follow: on a replaced window the offsets above
+        // are still estimates, and they shrink the moment the rows measure.
+        keyPinRef.current = { key, align, deadline: performance.now() + KEY_PIN_MS };
         return true;
       },
     }),

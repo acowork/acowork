@@ -12,10 +12,9 @@
  * path (`keyOfSeq` and the item's own key) must agree, or a search hit scrolls
  * to nothing.
  */
-import { act, renderHook } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { renderHook } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
 import { useTranscriptLayout } from "./useTranscriptLayout";
-import { useChatBlockStore } from "../../stores/chatBlockStore";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 
 const A = "agent-a";
@@ -54,7 +53,7 @@ function round(seq: number, roundId: string, trigger: string): ChatMessageRow {
 /** The one run block's key, after checking that every seq it owns resolves to
  *  it — the contract `useLocateMessage` relies on. */
 function blockKeyIn(rows: ChatMessageRow[], scope = "chat-1") {
-  const { result } = renderHook(() => useTranscriptLayout(rows, scope, "chat-1"));
+  const { result } = renderHook(() => useTranscriptLayout(rows, scope));
   const block = result.current.items.find((i) => i.kind === "run");
   if (block?.kind !== "run") throw new Error("expected one run block");
   const key = result.current.virtualKeyOf(block);
@@ -102,75 +101,11 @@ describe("useTranscriptLayout", () => {
       },
     };
     const { result } = renderHook(() =>
-      useTranscriptLayout(
-        [ask(1, "both"), round(2, "r1", "u1"), otherRound],
-        "chat-1",
-        "chat-1",
-      ),
+      useTranscriptLayout([ask(1, "both"), round(2, "r1", "u1"), otherRound], "chat-1"),
     );
     const keys = result.current.items
       .filter((i) => i.kind === "run")
       .map((i) => result.current.virtualKeyOf(i));
     expect(new Set(keys).size).toBe(keys.length);
-  });
-});
-
-/**
- * The window's blocks are read by the LAYOUT, not by each block as it mounts.
- *
- * That is what makes a virtualized transcript's estimates true: a window is
- * mostly unmounted rows, so the estimate is most of the pane's total height, and
- * a run block is the one item whose height an estimate cannot guess (its answer
- * is prose). Reading them up front lets the estimate use the real answer AND
- * means a block that scrolls into view already holds its content — it mounts at
- * its final height instead of growing under the reader a frame later, which is
- * the "my scrolling is unstable" report on the group surface.
- */
-describe("useTranscriptLayout — the window's block reads", () => {
-  beforeEach(() => {
-    useChatBlockStore.setState({ blocks: {}, pending: {}, inFlight: {} });
-  });
-
-  const REF_1 = `${A}|s1|r1`;
-  const REF_2 = `${A}|s1|r2`;
-
-  it("asks for every round of every run block in the window", () => {
-    renderHook(() =>
-      useTranscriptLayout([ask(1, "看下这个 bug"), round(2, "r1", "u1"), round(3, "r2", "u1")], "chat-1", "chat-1"),
-    );
-    // Queued for the next batch, keyed by the chat the read is checked against.
-    const queued = [...(useChatBlockStore.getState().pending["chat-1"] ?? [])];
-    expect(queued.sort()).toEqual([REF_1, REF_2].sort());
-  });
-
-  it("estimates a run from its answer once the read lands", async () => {
-    const rows = [ask(1, "看下这个 bug"), round(2, "r1", "u1")];
-    const { result } = renderHook(() => useTranscriptLayout(rows, "chat-1", "chat-1"));
-    const block = () => result.current.items.find((i) => i.kind === "run")!;
-    const before = result.current.virtualEstimate(block());
-
-    await act(async () => {
-      useChatBlockStore.setState({
-        blocks: {
-          [REF_1]: {
-            ref: REF_1,
-            agent_instance_id: A,
-            agent_session_id: "s1",
-            round_id: "r1",
-            status: "ok",
-            projection: {
-              round_id: "r1",
-              terminal: true,
-              status: "completed",
-              // A one-line answer: the fold does not bite, so the block is
-              // shorter than the unread estimate assumed.
-              answer: { body: "改好了", ts: "2026-11-03T09:00:00.000Z" },
-            },
-          },
-        },
-      });
-    });
-    const after = result.current.virtualEstimate(block());
-    expect(after).toBeLessThan(before);
   });
 });

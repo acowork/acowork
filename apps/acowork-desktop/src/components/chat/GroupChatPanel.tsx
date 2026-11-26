@@ -100,7 +100,6 @@ import {
   VirtualRowList,
   type VirtualRowListHandle,
 } from "../common/VirtualRowList";
-import { rowSelector } from "../common/scrollAnchor";
 import { useAuthStore } from "../../stores/authStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
@@ -1017,7 +1016,7 @@ export function GroupChatPanel() {
     virtualEstimate,
     virtualAttrs,
     seqsByItem,
-  } = useTranscriptLayout(rows, activeGroupId ?? "", activeGroupId ?? "");
+  } = useTranscriptLayout(rows, activeGroupId ?? "");
   // The router's open question, and the run it asks about (ADR-106 revision
   // 2026-11-11): it is docked at the bottom of this surface, and the run wears
   // a badge so the question still has a subject.
@@ -1072,14 +1071,11 @@ export function GroupChatPanel() {
       useChatSessionStore.getState().clearLocate(activeGroupId),
     // Virtualization fallback: the row is in the window but not in the DOM. A
     // folded row is not an item of its own either, so its seq resolves through
-    // the layout's `keyOfSeq` to the block that holds it (ADR-097) — and the
-    // block is then anchored on the ROW, not on the block's top: a long-lived
-    // session folds dozens of rounds into one block, and centring the block put
-    // the reader on a different round of the same run (see ./scrollAnchor.ts).
+    // the layout's `keyOfSeq` to the block that holds it (ADR-097).
     (seq) => {
       const key = keyOfSeqRef.current.get(seq);
       if (!key) return false;
-      return listRef.current?.scrollToKey(key, "center", rowSelector(seq)) ?? false;
+      return listRef.current?.scrollToKey(key, "center") ?? false;
     },
     // A locate parks the reader mid-history on purpose: take them out of
     // the follow, or the persistent anchor rides the next commit back to
