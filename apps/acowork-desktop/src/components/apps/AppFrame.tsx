@@ -12,7 +12,10 @@
  * `allow-top-navigation` / `allow-modals` stay out — the app's own DOM is not
  * the Desktop's.
  *
- * Theme is re-pushed when the shell `light`/`dark` class changes. Optional
+ * Theme is re-pushed when the shell `light`/`dark` class changes, and the
+ * interface language both travels in the entry URL (`?lang=`, the only channel
+ * a boot-resolved app can see — see `bootLocale`) and is re-pushed with the
+ * theme. Optional
  * `search` / `openFile` are the visual-preview channel (workspace file in
  * the editor pane) — they must not be used to attach MCP to the left-nav
  * user canvas.
@@ -127,7 +130,7 @@ export function AppFrame({
                 const ticket = await mintAppTicket(app.id);
                 if (cancelled) return;
                 const base = `${getGatewayUrl()}/api/apps/${encodeURIComponent(app.id)}${app.ui_path}`;
-                const extra = withControlParam(search);
+                const extra = withControlParam(search, bootLocale());
                 // Version-key the entry URL: a heuristic-cached index from an older install
                 // keeps requesting superseded hashed assets, which the SPA fallback answers
                 // with HTML ("expected magic word … found 3c 21 64 6f").
@@ -155,11 +158,9 @@ export function AppFrame({
             getComputedStyle(root).getPropertyValue("--color-accent").trim() || "#3b82f6";
         // settingsStore only toggles `.dark` on <html>; there is no `.light`.
         const theme = root.classList.contains("dark") ? "dark" : "light";
-        // The shell's `<html lang>` IS the interface's language — the i18n
-        // module owns that attribute — and it is the locale a hosted app must
-        // render in. The OS locale is only a fallback for a shell that never
-        // said one.
-        const locale = root.lang || navigator.language || "en";
+        // The locale a hosted app must render in — the shell's interface
+        // language, for the reason given on {@link bootLocale}.
+        const locale = bootLocale();
         const key = `${theme}|${accent}|${locale}`;
         if (lastThemeKeyRef.current === key) return;
         lastThemeKeyRef.current = key;
@@ -381,10 +382,31 @@ function normalizeSearch(search?: string): string {
     return trimmed.startsWith("?") ? trimmed : `?${trimmed}`;
 }
 
-/** FigCraft's `window.figcraft` control API is opt-in via `?control`. */
-function withControlParam(search?: string): string {
+/** FigCraft's `window.figcraft` control API is opt-in via `?control`. The
+ *  interface language travels as `?lang=` because an app that resolves its
+ *  language at boot cannot be told later — see {@link bootLocale}. */
+function withControlParam(search: string | undefined, locale: string): string {
     const extra = normalizeSearch(search);
     const params = new URLSearchParams(extra.startsWith("?") ? extra.slice(1) : extra);
     if (!params.has("control")) params.set("control", "1");
+    if (!params.has("lang")) params.set("lang", locale);
     return `?${params.toString()}`;
+}
+
+/**
+ * The language a hosted app must start in: the shell's interface language.
+ *
+ * The bridge's `locale` message arrives after boot, but a wasm app picks its
+ * language once, before its first frame, and freezes it — VectorCraft's web
+ * shell seeds `i18n::set_system_locales` from `?lang=` first and the browser's
+ * `navigator.languages` after it, and that call keeps the first answer it gets
+ * (`apps/vectorcraft-web/src/web.rs`, `crates/ui-egui/src/i18n.rs`). So the only
+ * channel that reaches such an app's first frame is the entry URL; without it
+ * the app renders in the OS language no matter what ACowork is set to.
+ *
+ * Read per entry, never as an effect dependency: changing the interface
+ * language re-pushes the bridge, it must not reload the app.
+ */
+function bootLocale(): string {
+    return document.documentElement.lang || navigator.language || "en";
 }

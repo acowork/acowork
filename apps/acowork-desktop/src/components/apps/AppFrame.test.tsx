@@ -138,6 +138,8 @@ describe("AppFrame", () => {
         expect(url.pathname).toBe("/api/apps/figcraft/ui/");
         expect(url.searchParams.get("file")).toBe("designs/a.figcraft");
         expect(url.searchParams.get("control")).toBe("1");
+        // Language travels with the entry, not only with the bridge.
+        expect(url.searchParams.get("lang")).toBeTruthy();
         expect(url.hash).toBe(`#ticket=${TICKET}`);
         expect(src).not.toContain("?ticket");
     });
@@ -212,6 +214,45 @@ describe("AppFrame", () => {
         }
     });
 
+
+    it("starts the app in the interface language, and a later change never reloads it", async () => {
+        const posted: Array<Record<string, unknown>> = [];
+        const originalLang = document.documentElement.getAttribute("lang");
+        document.documentElement.setAttribute("lang", "en");
+        try {
+            render(<AppFrame app={makeApp("vectorcraft")} />);
+            const frame = await waitFor(() => {
+                const el = document.querySelector("iframe");
+                expect(el).not.toBeNull();
+                return el as HTMLIFrameElement;
+            });
+            Object.defineProperty(frame, "contentWindow", {
+                configurable: true,
+                value: {
+                    postMessage: (data: Record<string, unknown>) => {
+                        posted.push(data);
+                    },
+                },
+            });
+
+            // An app that resolves its language before the first frame reads it
+            // off the entry URL — the bridge only arrives after that.
+            const entryLang = () =>
+                new URL(frame.getAttribute("src") ?? "").searchParams.get("lang");
+            expect(entryLang()).toBe("en");
+
+            // A language change is a message, not a reload: the app would drop
+            // the document it has open.
+            document.documentElement.setAttribute("lang", "ja");
+            await waitFor(() => {
+                expect(posted.some((p) => p.type === "locale" && p.locale === "ja")).toBe(true);
+            });
+            expect(entryLang()).toBe("en");
+        } finally {
+            if (originalLang === null) document.documentElement.removeAttribute("lang");
+            else document.documentElement.setAttribute("lang", originalLang);
+        }
+    });
 
     it("hands the document over only after the bridge says hello, and stops once it is acked", async () => {
         vi.useFakeTimers();
