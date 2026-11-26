@@ -235,6 +235,44 @@ describe("VirtualRowList shell", () => {
     expect(s.container.scrollTop).toBe(itemAligned + 900 - (400 - 60) / 2);
   });
 
+  it("keeps chasing a target while the layout moves past any fixed budget", async () => {
+    // The group transcript's window is a stack of run blocks: a block's height
+    // is unknown until its batched block read lands (and its images decode), so
+    // the target's offset can move well after the jump. A time-boxed chase bets
+    // the layout has settled by then — the 1:1 list wins that bet (short
+    // bubbles), the group list loses it: "first locate misses, and works after
+    // I scrolled there myself".
+    const prefix = nextPrefix();
+    const s = setup(items(40, prefix));
+    expect(s.handle.current!.scrollToKey(`${prefix}-20`, "start")).toBe(true);
+    const placed = s.container.scrollTop;
+    expect(placed).toBeGreaterThan(0);
+
+    // Well past the old fixed chase window (600 ms).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 700));
+    });
+
+    // Ten rows land ABOVE the target and push it down the transcript.
+    s.commit([...items(10, `${prefix}-p`), ...items(40, prefix)]);
+
+    // The pane moved WITH the target instead of being left where it was.
+    expect(s.container.scrollTop).toBeGreaterThan(placed + 400);
+  });
+
+  it("releases the pane once the layout is quiet (a reader scroll is not fought)", async () => {
+    const prefix = nextPrefix();
+    const s = setup(items(40, prefix));
+    expect(s.handle.current!.scrollToKey(`${prefix}-20`, "start")).toBe(true);
+
+    // The reader takes the pane: a scroll the request did not write ends the
+    // chase at once, even though the quiet period has not elapsed.
+    s.scroll(0);
+    s.commit([...items(40, prefix)]); // an unrelated commit
+
+    expect(s.container.scrollTop).toBe(0);
+  });
+
   it("scrollToKey anchors a row that is its own item (standalone message)", () => {
     // A plain message row IS its item and carries `data-seq` on the wrapper:
     // the anchor must reduce to the old item centring (its offset inside itself

@@ -56,10 +56,21 @@ import { rowCentredScrollTop } from "./scrollAnchor";
  *  under-fills rather than over-fills the estimate; measurements correct it
  *  on first mount. */
 const DEFAULT_ROW_HEIGHT_PX = 64;
-/** How long a `scrollToKey` request keeps re-centring while row measurements
- *  converge. Long enough for the commits that follow a window replacement,
- *  short enough that it never fights a reader who scrolls away. */
-const KEY_PIN_MS = 600;
+/** How long a `scrollToKey` request keeps chasing after the layout last
+ *  MOVED. This is a QUIET period, not a budget: every commit whose placement
+ *  differs from the previous one re-arms it (see the pin effect), so a window
+ *  whose height keeps changing — a group transcript is a stack of run blocks,
+ *  and a block's height is unknown until its batched block read lands and its
+ *  images decode — is chased until it stops, however long that takes.
+ *
+ *  It may be generous because the reader is protected by a different rule: a
+ *  scroll the request did not write releases the pin immediately (a chat row
+ *  that is 2.5 s late is a real thing; a reader held hostage is not). */
+const KEY_PIN_QUIET_MS = 2500;
+/** Safety valve on the chase above: a live round streams text into its block
+ *  and the layout would never go quiet. Not a bet on measurements — just a
+ *  ceiling on how long one locate may own the viewport. */
+const KEY_PIN_MAX_MS = 8000;
 
 /** Bottom-pin tuning — the anchor re-pins on every commit until the layout
  *  settles (measurements land). MAX is a safety valve; the release rule
@@ -477,7 +488,14 @@ export function VirtualRowList<T>({
      *  transcript rows into one. Re-resolved on every commit of the pin: the
      *  row mounts with the item, so the first pass may still miss it. */
     within?: string;
-    deadline: number;
+    /** The offset the last placement wrote, or null before the first one
+     *  landed. The difference against the next placement is what tells "the
+     *  layout is still moving" from "this is where the row is". */
+    landed: number | null;
+    /** The chase re-arms to `now + KEY_PIN_QUIET_MS` whenever the placement MOVES. */
+    quietUntil: number;
+    /** `KEY_PIN_MAX_MS` after the request: a streamed answer never goes quiet. */
+    ceiling: number;
   } | null>(null);
   /**
    * Place the pane on a row INSIDE the item at `idx`, whose top edge was just
@@ -513,12 +531,40 @@ export function VirtualRowList<T>({
     },
     [virtualizer],
   );
+  /** One placement of an armed request; the offset it landed on, or null when
+   *  the row is not mounted yet. */
+  const landKeyPin = useCallback(
+    (idx: number, req: NonNullable<typeof keyPinRef.current>): number | null => {
+      const el = virtualizer.scrollElement;
+      if (!el) return null;
+      if (req.within !== undefined) {
+        // Item top first — that is what mounts the block, and it is the
+        // reference the correction measures against.
+        virtualizer.scrollToIndex(idx, { align: "start" });
+        return placeWithinItem(idx, req.within);
+      }
+      virtualizer.scrollToIndex(idx, { align: req.align });
+      // Read back rather than trusting the request: the pane clamps at both
+      // ends, and it is the CLAMPED offset the next commit has to compare with.
+      return el.scrollTop;
+    },
+    [placeWithinItem, virtualizer],
+  );
   // ── Key-scroll convergence ───────────────────────────────────────
-  // ponytail: bounded re-scroll (<= KEY_PIN_MS) rather than solving for the
-  // converged height analytically. Ceiling: a row that measures in slower than
-  // the deadline can still land off-centre; upgrade path is the library's
-  // `shouldAdjustScrollPositionOnItemSizeChange`, which needs the target index
-  // to be its own state.
+  // Re-place the target on every commit for as long as the LAYOUT is still
+  // moving — the quiet period, not a fixed budget. A time-boxed chase is a bet
+  // that estimates have converged by then, and the chat surfaces lose it: a
+  // transcript window's height is unknown until `measureElement` runs, and a
+  // run block's is unknown until its block read lands (`chatBlockStore` batches
+  // one request per chat), so a group window — a stack of run blocks — can move
+  // by thousands of pixels well after any fixed window has closed. The 1:1
+  // surface survived the bet because its rows are short bubbles whose estimate
+  // is nearly right; that is the whole difference between the two lists, not
+  // the locate code, which is shared.
+  //
+  // ponytail: still a bounded chase (KEY_PIN_MAX_MS) rather than solving for
+  // the converged height analytically; the ceiling only has to cover a live
+  // round streaming text into its block.
   useLayoutEffect(() => {
     const req = keyPinRef.current;
     if (!req) return;
@@ -527,25 +573,62 @@ export function VirtualRowList<T>({
       keyPinRef.current = null;
       return;
     }
-    // Re-issue on EVERY commit until the deadline. No "already in view" exit:
-    // the row is routinely in view on the commit right after a window
-    // replacement and is pushed back out ~100 ms later when the rows above it
-    // measure in taller than their estimate (markdown/code rows grow after
-    // paint). Only the deadline ends the chase.
-    if (performance.now() > req.deadline) {
+    const now = performance.now();
+    if (now > req.ceiling) {
       keyPinRef.current = null;
       return;
     }
-    if (req.within !== undefined) {
-      // Item top first (mounts the block, and is the reference the correction
-      // measures against), then the row inside it — re-issued together so the
-      // pair stays idempotent while heights settle.
-      virtualizer.scrollToIndex(idx, { align: "start" });
-      placeWithinItem(idx, req.within);
+    // Did anyone but this request move the pane since the last placement? The
+    // bottom anchor is the one legitimate writer that runs BEFORE this effect
+    // in the same commit (it always lands exactly at the pane's maximum), and
+    // it is overwritten a few lines down — so it is not the reader. Anything
+    // else is: release instead of dragging them back.
+    const pane = virtualizer.scrollElement;
+    if (pane && req.landed !== null && Math.abs(pane.scrollTop - req.landed) > 2) {
+      const max = pane.scrollHeight - pane.clientHeight;
+      if (pane.scrollTop < max - 1) {
+        keyPinRef.current = null;
+        return;
+      }
+    }
+    const landed = landKeyPin(idx, req);
+    if (landed === null) {
+      // The row is not in the DOM yet (the item has not mounted). Nothing to
+      // compare against — keep the request and try on the next commit.
       return;
     }
-    virtualizer.scrollToIndex(idx, { align: req.align });
+    const moved = req.landed === null || Math.abs(landed - req.landed) > 0.5;
+    req.landed = landed;
+    if (moved) {
+      // Still settling: the target has moved since the last commit, so the
+      // layout will move again. Extend the quiet period.
+      req.quietUntil = now + KEY_PIN_QUIET_MS;
+      return;
+    }
+    if (now > req.quietUntil) {
+      // Placement has been identical for a full quiet period: the row is where
+      // it is going to stay, and the pane goes back to the reader.
+      keyPinRef.current = null;
+    }
   });
+
+  // ── Reader release ───────────────────────────────────────────────
+  // The chase's quiet period is generous (a chat row can be seconds late), so
+  // the guarantee that a reader is never held hostage lives here instead: any
+  // pane offset this request did not write ends it. A scroll event carries the
+  // FINAL offset of the task that wrote it, so the shell's own writes (this
+  // pin, the bottom anchor, the correction) each report the value they left —
+  // and a value that differs can only be the reader (or `scrollIntoView`).
+  useEffect(() => {
+    if (!scrollEl) return;
+    const onScroll = () => {
+      const req = keyPinRef.current;
+      if (!req || req.landed === null) return;
+      if (Math.abs(scrollEl.scrollTop - req.landed) > 2) keyPinRef.current = null;
+    };
+    scrollEl.addEventListener("scroll", onScroll, { passive: true });
+    return () => scrollEl.removeEventListener("scroll", onScroll);
+  }, [scrollEl]);
 
   // ── Imperative handle ────────────────────────────────────────────
   // Data-derived queries only — no scrollTop pixel guessing.
@@ -634,21 +717,26 @@ export function VirtualRowList<T>({
         // is attached — report false so the caller does not treat the pane
         // as positioned (the locate path depends on this).
         if (!virtualizer.scrollElement) return false;
-        // Ride the commits that follow: on a replaced window the offsets above
-        // are still estimates, and they shrink the moment the rows measure.
-        keyPinRef.current = {
+        // Ride the commits that follow — and keep riding while the layout keeps
+        // moving (see the pin effect): on a replaced window the offsets are
+        // still estimates, and a chat window's block heights do not become real
+        // until their block reads land.
+        const now = performance.now();
+        const req = {
           key,
           align,
           ...(within !== undefined ? { within } : {}),
-          deadline: performance.now() + KEY_PIN_MS,
+          landed: null as number | null,
+          quietUntil: now + KEY_PIN_QUIET_MS,
+          ceiling: now + KEY_PIN_MAX_MS,
         };
-        if (within !== undefined) {
-          // The item first — that is what mounts the row — then the row itself.
-          virtualizer.scrollToIndex(idx, { align: "start" });
-          placeWithinItem(idx, within);
-          return true;
-        }
-        virtualizer.scrollToIndex(idx, { align });
+        keyPinRef.current = req;
+        // First placement right away, so the first commit has something to
+        // compare against (and a single-commit jump lands without waiting for
+        // a re-render).
+        const idxNow = idx;
+        const landed = landKeyPin(idxNow, req);
+        if (landed !== null) req.landed = landed;
         return true;
       },
     }),
