@@ -484,7 +484,7 @@ Runtime 初始化 ConversationSession（立即）：
 **架构：AgentCore + SessionState 分离**
 
 ```
-AgentCore（per-agent，跨所有 Session 共享，Arc）
+AgentCore（per-bot，跨所有 Session 共享，Arc）
 ├── provider: Arc<dyn Provider>
 ├── tools: Vec<Arc<dyn Tool>>
 ├── manifest: AgentManifest

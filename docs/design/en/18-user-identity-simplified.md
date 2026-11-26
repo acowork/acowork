@@ -6,7 +6,7 @@
 
 ## 1. Design Background
 
-The original design (`07-system-agent.md`, deleted) delegated user identity management to the system Bot (`com.acowork.system`), implementing identity management through the full chain `identity_deps` → `identity_delivery` → `identity_store`/`identity_query` tools. That approach introduced excessive complexity: the system Bot had to run, required a ContentProvider mechanism, needed dedicated built-in tools, and required cross-Agent Intent communication channels.
+The original design (`07-system-agent.md`, deleted) delegated user identity management to the system Bot (`com.acowork.system`), implementing identity management through the full chain `identity_deps` → `identity_delivery` → `identity_store`/`identity_query` tools. That approach introduced excessive complexity: the system Bot had to run, required a ContentProvider mechanism, needed dedicated built-in tools, and required cross-Bot Intent communication channels.
 
 This design follows the **public resource management model** (used for model/MCP/search: version-driven diff sync + AgentHelloResult injection), treating user identity as a public resource managed by Gateway. Gateway centralizes management and persistence, pushes to Runtime at handshake, and hot-pushes on changes.
 
@@ -223,7 +223,7 @@ UserProfileUpdate.version: 8
 | `core/acowork-gateway/src/ipc/server.rs` | `handle_agent_hello()` adds user identity version comparison and delivery logic; add `handle_user_send_identity()` broadcast handling |
 | `core/acowork-gateway/src/http/users_api.rs` | **New** — `GET /api/users`, `PUT /api/users/{id}`, `POST /api/users` HTTP API |
 | `core/acowork-gateway/src/http/routes.rs` | Add `users_routes()` merge |
-| `core/acowork-gateway/src/lifecycle/manager.rs` | **Remove** `build_identity_delivery()`, `get_identity_deps()`, `load_user_display_name()`; per-agent identity construction no longer needed |
+| `core/acowork-gateway/src/lifecycle/manager.rs` | **Remove** `build_identity_delivery()`, `get_identity_deps()`, `load_user_display_name()`; per-bot identity construction no longer needed |
 | `core/acowork-runtime/src/grpc/client.rs` | Parse `AgentHelloResult.user_identity` → `GatewayResponse::AgentHelloResult`; handle `UserProfileUpdate` push |
 | `core/acowork-runtime/src/agent/session/session_manager.rs` | Add `update_user_identity()` method; `identity_context` formatted from `UserProfile` |
 | `core/acowork-runtime/src/agent/session/session_task.rs` | `identity_context` accepts `UserProfile` instead of `IdentityEntry` |

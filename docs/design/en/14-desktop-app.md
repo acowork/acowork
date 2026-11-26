@@ -12,7 +12,7 @@ Desktop App is the **user interface layer** of the ACowork platform; it carries 
 
 | Responsibility | Description |
 |----------------|-------------|
-| Bot interaction | User-Agent conversation UI, message send/receive |
+| Bot interaction | User-Bot conversation UI, message send/receive |
 | Bot management | Install, uninstall, clone, create, start/stop Bots |
 | Debug panel | Developer-mode step debugging, record/replay on Bot Runtime |
 | Configuration management | Gateway config, API Key management (Vault), Provider config |

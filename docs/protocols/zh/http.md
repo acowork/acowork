@@ -974,7 +974,7 @@ Tauri 的命令名映射表也一并删除 —— 也就是说这不是"发出�
 `ControlCommand` 现只余 `Intent`（Gateway → Runtime）与 `ActiveHeartbeat`（存在性心跳），
 **均非用户动作**。新代码请用上表 HTTP 接口：只有 HTTP 路径携带身份，MQTT 控制消息不携带。
 
-#### 5.6.3 工具收窄：per-session 覆盖 per-agent
+#### 5.6.3 工具收窄：per-session 覆盖 per-bot
 
 工具开关有两层，**方向是单向的**：Bot 层（`agent-tools.json` / `agent-mcp.json`，右侧设置面板编辑）
 决定这个 Bot 有哪些内置工具、哪些 MCP server / tool 可用；会话层只能**从这层里拿掉**，不能加回来。
@@ -983,8 +983,8 @@ Tauri 的命令名映射表也一并删除 —— 也就是说这不是"发出�
 
 - **新会话默认继承**：Meta 的 `tool_policy` 列为 `NULL`，任何工具开关一次都没动过就一直是 `NULL`——
   "只有改过才写"是数据模型层面的事实，不是前端的约定。
-- **两层互不影响**：per-session 的改动只作用于**这一个** session（含它后续每一轮），与 per-agent 的
-  配置值互不覆盖；而 per-agent 的值继续是**下一个新建 session 的默认值**。所以右侧设置面板与 `+` 菜单
+- **两层互不影响**：per-session 的改动只作用于**这一个** session（含它后续每一轮），与 per-bot 的
+  配置值互不覆盖；而 per-bot 的值继续是**下一个新建 session 的默认值**。所以右侧设置面板与 `+` 菜单
   同时显示不同的值是正常的——面板描述 Bot 层，会话层只在它之下做减法。
 - **写整份策略，不做逐项 toggle**：请求体是完整替换，重放同一请求不会叠加；这也让 UI 的乐观更新
   与服务端回显一一对应。

@@ -447,7 +447,7 @@ RAG tool and local SQLite memory layer are two completely independent retrieval 
 | Storage location | Local file (rusqlite) | Enterprise RAG service (remote) |
 | Data type | Personal preferences, interaction history, autobiographical | Product docs, business processes, internal specs |
 | Retrieval method | Vector + fulltext + associative diffusion (graph expand) | Vector retrieval + optional hybrid keyword + metadata filter |
-| Privacy boundary | Agent-private, filtered by PrivacyLevel when sharing package | Enterprise-managed, Bot read-only |
+| Privacy boundary | Bot-private, filtered by PrivacyLevel when sharing package | Enterprise-managed, Bot read-only |
 
 RAG retrieval results and local SQLite memory layer retrieval results are spliced in the transient layer and uniformly fed into LLM context, but not integrated into the Memory system's abstraction layer — their query paradigms and storage models are entirely different.
 
@@ -467,7 +467,7 @@ The following operations do not belong to "tools" (not triggered by LLM tool_cal
 | `KeyRelease` | After startup handshake | Get LLM API Key (one-time) |
 | `IdentityDelivery` | After startup handshake | Get user identity information (actively pushed by Gateway) |
 | `CapabilityOverview` | After startup handshake | Get installed Bots' capability summary (actively pushed by Gateway) |
-| `IntentSend` / `IntentReceived` | When LLM calls `intent_send` tool | Cross-Agent message routing |
+| `IntentSend` / `IntentReceived` | When LLM calls `intent_send` tool | Cross-Bot message routing |
 | `BudgetQuery` | During budget pre-check | Query remaining budget |
 | `UsageReport` | After each iteration (async) | Report LLM usage |
 | `RateAcquire` | Before calling LLM | Apply for rate token |

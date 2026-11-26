@@ -41,7 +41,7 @@
   - [5.6 Session Control Plane (ADR-076 §Decision 4)](#56-session-control-plane-adr-076-decision-4)
     - [5.6.1 Lifecycle (first batch)](#561-lifecycle-first-batch)
     - [5.6.2 Session actions (second batch)](#562-session-actions-second-batch)
-    - [5.6.3 Tool narrowing: per-session over per-agent](#563-tool-narrowing-per-session-over-per-agent)
+    - [5.6.3 Tool narrowing: per-session over per-bot](#563-tool-narrowing-per-session-over-per-agent)
   - [5.7 Round Projection Read (ADR-106 D4)](#57-round-projection-read-adr-106-d4)
 - [6. Static File Service (direct streaming of raw bytes)](#6-static-file-service-direct-streaming-of-raw-bytes)
 - [7. MQTT Responsibility Boundary (ADR-076 §Decision 4)](#7-mqtt-responsibility-boundary-adr-076-decision-4)
@@ -145,7 +145,7 @@ Gateway handles these directly, without needing the Runtime subprocess online. C
 
 Package-level CRUD and publishing. Packages are installed to `<packages_dir>`, and Gateway maintains a manifest in `installed_agents`.
 
-> `<packages_dir>` defaults to `<node_home>/packages` (`ACOWORK_NODE_HOME` env → `$HOME/.acowork/acowork-node` → `./.acowork-node`), giving local and standalone Node bots the same layout. File operations actually execute on the Node side; Gateway only exposes the HTTP API and maintains the manifest. See [ADR-055 §6.11 / §6.20](../adr/zh/ADR-055-remote-runtime-node-topology.md) and [runbook `single-machine-remote-topology.md`](../runbooks/single-machine-remote-topology.md).
+> `<packages_dir>` defaults to `<node_home>/packages` (`ACOWORK_NODE_HOME` env → `$HOME/.acowork/acowork-node` → `./.acowork-node`), giving local and standalone Node services the same layout. File operations actually execute on the Node side; Gateway only exposes the HTTP API and maintains the manifest. See [ADR-055 §6.11 / §6.20](../adr/zh/ADR-055-remote-runtime-node-topology.md) and [runbook `single-machine-remote-topology.md`](../runbooks/single-machine-remote-topology.md).
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -428,7 +428,7 @@ Dispatches a PM task into its project group chat and wakes the target bot's exec
 | `owner` | yes | Dispatching human (project owner) — the chat row's `from` |
 | `title` | no | Task title (used when ensuring the group chat) |
 | `message` | yes | **Human text** (title + description): goes to the group-chat row body and the envelope's `params.message` |
-| `assignment_brief` | no | **High-trust envelope field** (the claim→work→submit playbook): enters only the Runtime execution session's system block, never any chat surface; agent-sourced params carrying this key are stripped by the Gateway at the edge (ADR-102) |
+| `assignment_brief` | no | **High-trust envelope field** (the claim→work→submit playbook): enters only the Runtime execution session's system block, never any chat surface; bot-sourced params carrying this key are stripped by the Gateway at the edge (ADR-102) |
 | `chat_session_id` | no | Project group chat; ensured idempotently when absent |
 | `message_id` | no | **Caller-supplied dispatch generation identity.** The PM scanner persists one before the first attempt and replays it on every retry → the chat row dedupes on `meta.message_id` and the mailbox budget dedupes on the same id (one charge per generation). Absent → the Gateway mints one (one row per call, no retry idempotency) |
 
@@ -451,7 +451,7 @@ by construction, so a mixed-version fleet pays it on every dispatch. Caller budg
 bound `INTENT_DEFAULT` (30s) plus `INTENT_ACCEPT`, and the PM client gives `dispatch_task` its own 40s request timeout —
 a shorter default would abort while the first publish is still completing server-side and make the same-id retry
 re-deliver the Intent. This is the *only* caller that waits: the generic
-`/api/intents` surface records the fact without blocking, so agent-to-agent delivery pays nothing for it.
+`/api/intents` surface records the fact without blocking, so bot-to-bot delivery pays nothing for it.
 
 #### 4.16.2 `POST /api/intents/task-close`
 
@@ -788,7 +788,7 @@ it (see below).
 > `can_write === false`. Letting a viewer activate would create a permanently
 > resident session that the viewer may not close and whose owner does not know
 > who holds it: the lifecycle loses its accountable party, and the Runtime has
-> **no** per-session GC (`evict_idle_sessions` has no caller; only agent-level
+> **no** per-session GC (`evict_idle_sessions` has no caller; only bot-level
 > auto-sleep), so reclaiming it would need observer reference counting.
 >
 > **Read-only presentation of a public session**: when a non-owner opens someone
@@ -893,14 +893,14 @@ no broker client can silently rewrite someone else's session through them.
 `ControlCommand` now holds only `Intent` (Gateway → Runtime) and
 `ActiveHeartbeat` (liveness); neither is a user action.
 
-#### 5.6.3 Tool narrowing: per-session over per-agent
+#### 5.6.3 Tool narrowing: per-session over per-bot
 
 Tool switches have two layers, and the direction is **one-way**: the bot layer
 (`agent-tools.json` / `agent-mcp.json`, edited in the right-panel settings)
 decides which builtin tools and which MCP servers / tools this bot has at all;
 the session layer can only **take away from it**, never add back. The reason is
 composability: if it could widen, sessions of one bot would each hold their own
-tool set, and both the agent-level approval / risk rules and `agent-mcp.json`'s
+tool set, and both the bot-level approval / risk rules and `agent-mcp.json`'s
 connection lifecycle would stop applying (a tool a bot did not enable has no
 wrapper in memory to begin with).
 

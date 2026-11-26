@@ -223,7 +223,7 @@ UserProfileUpdate.version: 8
 | `core/acowork-gateway/src/ipc/server.rs` | `handle_agent_hello()` 新增 user identity 版本比较和交付逻辑；新增 `handle_user_send_identity()` 广播处理 |
 | `core/acowork-gateway/src/http/users_api.rs` | **新建** — `GET /api/users`、`PUT /api/users/{id}`、`POST /api/users` HTTP API |
 | `core/acowork-gateway/src/http/routes.rs` | 新增 `users_routes()` 合并 |
-| `core/acowork-gateway/src/lifecycle/manager.rs` | **移除** `build_identity_delivery()`、`get_identity_deps()`、`load_user_display_name()`；不再需要 per-agent identity 构建 |
+| `core/acowork-gateway/src/lifecycle/manager.rs` | **移除** `build_identity_delivery()`、`get_identity_deps()`、`load_user_display_name()`；不再需要 per-bot identity 构建 |
 | `core/acowork-runtime/src/grpc/client.rs` | 解析 `AgentHelloResult.user_identity` → `GatewayResponse::AgentHelloResult`；处理 `UserProfileUpdate` 推送 |
 | `core/acowork-runtime/src/agent/session/session_manager.rs` | 新增 `update_user_identity()` 方法；`identity_context` 从 `UserProfile` 格式化 |
 | `core/acowork-runtime/src/agent/session/session_task.rs` | `identity_context` 接收类型从 `IdentityEntry` 改为 `UserProfile` |

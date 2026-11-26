@@ -249,7 +249,7 @@ fn build_tool_registry(manifest: &AgentManifest, all_tools: Vec<Arc<dyn Tool>>) 
 |-----------|----------------|
 | Tool registration | Two-step: `all_tools()` builds pool + `activate()` filters by manifest |
 | Activation mechanism | manifest `tools[]` + `permissions[]` declaration-driven |
-| Intent tools | New `intent_send` / `intent_receive` (cross-Agent communication) |
+| Intent tools | New `intent_send` / `intent_receive` (cross-Bot communication) |
 | Identity tools | New `identity_query` (query user identity) |
 | Bot collaboration | `delegate` can cross-process (via Gateway Intent) |
 | Third-party integration | manifest declaration + runtime configuration dual control |

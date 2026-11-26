@@ -134,7 +134,7 @@ Centralized management of all LLM API Keys, encrypted storage:
 
 ## 6. Budget Tracker
 
-Receives LLM usage reports from Bot Runtime, maintains cross-Agent statistics:
+Receives LLM usage reports from Bot Runtime, maintains cross-Bot statistics:
 
 - Each Bot has independent daily/monthly Token and cost limits.
 - On overrun, send signal to Bot (stop / fallback / warn).

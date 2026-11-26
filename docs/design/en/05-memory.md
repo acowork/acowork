@@ -14,7 +14,7 @@
 
 ---
 
-Memory uses **biomimetic layered** design, with human cognitive science as reference and SQLite memory layer graph database as storage engine. Each Bot has completely independent private Memory, no Gateway-maintained public database exists. Cross-Agent data sharing is implemented through Intent queries and system Bot services, not shared storage.
+Memory uses **biomimetic layered** design, with human cognitive science as reference and SQLite memory layer graph database as storage engine. Each Bot has completely independent private Memory, no Gateway-maintained public database exists. Cross-Bot data sharing is implemented through Intent queries and system Bot services, not shared storage.
 
 **Design philosophy**: Memory is not storage, it is cognition. A memory system without forgetting is a dump, a memory system without consolidation is a fragment pile, a memory system without self-awareness is a database. What the Memory module should answer is not "how to store", but "how to remember, how to forget, how to think".
 
@@ -68,7 +68,7 @@ The old three-tier (working memory / private memory / cloud sync) confused two d
 |----------------|-----------|-------------------|
 | Transient → Experiential | Summary write | Compaction triggers (80% token usage) or Session close, LLM summary asynchronously writes to SQLite. No longer per-round write, avoiding redundancy with JSONL |
 | Experiential → Consolidated | Consolidation pipeline | Instant extraction (LLM autonomous tool call) + offline replay (dedicated call when idle) |
-| Consolidated → Transient | Retrieval injection | When user input arrives, retrieve related memory and inject into context. **Default OFF since 2026-09-12** (`MemoryManagerConfig::auto_inject_enabled = false`): different Bots have different recall needs, SQLite memory layer triple/preference memory is incomplete, raw user message as query has low hit rate. Recovery method: set `auto_inject_enabled` to `true` (can be per-agent configured). Explicit `memory_recall` tool not affected |
+| Consolidated → Transient | Retrieval injection | When user input arrives, retrieve related memory and inject into context. **Default OFF since 2026-09-12** (`MemoryManagerConfig::auto_inject_enabled = false`): different Bots have different recall needs, SQLite memory layer triple/preference memory is incomplete, raw user message as query has low hit rate. Recovery method: set `auto_inject_enabled` to `true` (can be per-bot configured). Explicit `memory_recall` tool not affected |
 | Intra Consolidated/Experiential flow | Associative diffusion | **Not implemented** (ADR-082 D4 removed graph traversal; no `edges` table — §6 is retained as a design goal) |
 | Consolidated → Dormant | Forgetting decay | Background periodically calculates decay_score |
 
@@ -196,7 +196,7 @@ SQLite `episodes` row
 - **Hybrid retrieval**: application-level RRF fusion ranking (vector + text scores weighted by `1/(k+rank)`, each source gating on its own and unioned)
 - **MMR deduplication**: `db.mmr_search()` — Maximal Marginal Relevance, ensures result diversity, avoids duplicate semantics
 - **Time filter**: Narrow retrieval space by time range
-- **Dual-source query split (memory_recall, 2026-10)**: `MemoryQuery.embedding_text` carries the current turn's full user message to drive the vector source (full-sentence embeddings vastly outperform keyword bags), while `query_text` carries LLM-extracted keywords driving the BM25 lexical source; falls back to `query_text` alone when `embedding_text` is unset or blank. The user message and session id are injected per call via `ToolContext` (`execute_with_context`), resolved by the loop from per-session state — they must NEVER live on the agent-shared `MemorySessionHandle` or tool instances (last-writer-wins race under concurrent sessions, fixed 2026-10).
+- **Dual-source query split (memory_recall, 2026-10)**: `MemoryQuery.embedding_text` carries the current turn's full user message to drive the vector source (full-sentence embeddings vastly outperform keyword bags), while `query_text` carries LLM-extracted keywords driving the BM25 lexical source; falls back to `query_text` alone when `embedding_text` is unset or blank. The user message and session id are injected per call via `ToolContext` (`execute_with_context`), resolved by the loop from per-session state — they must NEVER live on the bot-shared `MemorySessionHandle` or tool instances (last-writer-wins race under concurrent sessions, fixed 2026-10).
 - **Cross-layer associative diffusion** (§6): **design goal, NOT implemented.** The `MemoryQuery.expand_hops` field was never consumed by `MemoryManager::retrieve()` and has been removed as dead code; the backend migrated from the Grafeo LPG graph to SQLite (ADR-082), which has no `edges`-table multi-hop traversal. §6 is retained as a future reference.
 
 **Embedding Generation Strategy**:
@@ -267,8 +267,8 @@ enum NodeStatus {
 }
 
 enum PrivacyLevel {
-    Public,     // cross-Agent shareable (e.g. user name)
-    Personal,   // Agent-private (e.g. user style preference)
+    Public,     // cross-Bot shareable (e.g. user name)
+    Personal,   // Bot-private (e.g. user style preference)
     Sensitive,  // sensitive information, stripped when package sharing
 }
 ```

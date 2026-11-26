@@ -196,7 +196,7 @@ fn build_identity_delivery(agent: &RunningAgent) -> IdentityDelivery {
 }
 ```
 
-**Issue**: This mechanism requires Gateway to know each Bot's `identity_deps`, then deliver corresponding fields. Adds per-Agent configuration burden.
+**Issue**: This mechanism requires Gateway to know each Bot's `identity_deps`, then deliver corresponding fields. Adds per-Bot configuration burden.
 
 ## 4. Problems Found in v3.1 (Leading to v3.2)
 
@@ -219,7 +219,7 @@ Browser and some HTTP/2 clients have connection limit (usually 6 per origin). De
 
 ### 4.4 No Native Pub/Sub
 
-gRPC streams are point-to-point; cross-Agent broadcast needs custom implementation. MQTT's native pub/sub is more natural.
+gRPC streams are point-to-point; cross-Bot broadcast needs custom implementation. MQTT's native pub/sub is more natural.
 
 ### 4.5 Code Generation Overhead
 
@@ -257,9 +257,9 @@ v3.0 → v3.1 → v3.2 evolution taught us:
 
 1. **IPC is not just transport protocol, it's also API design**. Socket API's pain isn't just transport, but also lack of schema and codegen.
 2. **Schema validation value underestimated**. gRPC solved this but introduced complexity; MQTT + protobuf payload strikes a balance.
-3. **Pub/Sub semantics matter**. When cross-Agent broadcast and multi-consumer scenarios emerge, point-to-point streams become insufficient.
+3. **Pub/Sub semantics matter**. When cross-Bot broadcast and multi-consumer scenarios emerge, point-to-point streams become insufficient.
 4. **Web ecosystem is first-class citizen**. Desktop App in browser/WebView, MQTT's WebSocket support is more natural than gRPC-Web.
-5. **Don't over-engineer**. v3.0 Socket API was "simple enough" at design time, but didn't anticipate Desktop App and cross-Agent scenarios. v3.1 gRPC was "fully featured" at design time, but pub/sub and browser support insufficient. Iteration is normal; don't seek one-time perfect design.
+5. **Don't over-engineer**. v3.0 Socket API was "simple enough" at design time, but didn't anticipate Desktop App and cross-Bot scenarios. v3.1 gRPC was "fully featured" at design time, but pub/sub and browser support insufficient. Iteration is normal; don't seek one-time perfect design.
 
 ## 8. Cross-references
 

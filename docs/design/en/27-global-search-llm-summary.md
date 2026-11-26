@@ -39,7 +39,7 @@
 | Runtime LLM | `Provider::chat(ChatRequest)`, `ChatMessage`, and the call pattern in `episode_distill` | Reuse the Provider trait, existing AgentCore/SessionManager model resolution path, and request types; add a small search-summary prompt/parser, not compaction or distillation prompts |
 | Gateway Runtime proxy | `proxy_routes` + `proxy_to_runtime_with_method` | Add one transparent POST route forwarding body/status/content type; no business logic or separate HTTP client |
 
-> Runtime `/search` currently aggregates agent-owned memory/files/Git/conversations; Desktop file search uses `/workspaces/search`, while docs and PM are separate processes. The new coordinator follows each tab's current API; aggregation ownership does not move.
+> Runtime `/search` currently aggregates bot-owned memory/files/Git/conversations; Desktop file search uses `/workspaces/search`, while docs and PM are separate processes. The new coordinator follows each tab's current API; aggregation ownership does not move.
 
 ## 3. Module Topology and Dependency Direction
 
@@ -344,7 +344,7 @@ Idle
 
 ## 7. Security and Permissions
 
-1. `search/summary` inherits existing agent-instance routing and Gateway permissions; callers cannot choose provider, model, endpoint, or tools.
+1. `search/summary` inherits existing bot-instance routing and Gateway permissions; callers cannot choose provider, model, endpoint, or tools.
 2. Runtime validates request bytes, query, scopes, IDs, counts, and field lengths; Gateway's global body limit remains active.
 3. Snippets are untrusted user data in a JSON data region; the system prompt instructs the model to ignore embedded instructions; `tools=None`.
 4. LLM inputs contain no locators; response IDs are allowlisted in Runtime and checked again in the frontend. Neither layer trusts model output.

@@ -187,7 +187,7 @@ cp "{data}/chat-sessions/$SID/files/"* "$OUT/files/" 2>/dev/null || true
 
 ## 7. 版本偏差：Gateway 与 Runtime 混部（v2.8 / ADR-102 起必读）
 
-Intent 信封 `kind` 自 v2.8 起是四值词汇表（`user_message` / `pm_task` / `request` / `response`），消费端由 `TurnOrigin` 策略表解释。**新 Gateway → 旧 Runtime** 的混部窗口里，旧 Runtime 不认识 `pm_task`，按旧词汇表兜底成 responder 语义（agent-to-agent 应对方）：PM 派发轮会被裁掉 `ask_user_question` / `intent_send`，且信封按旧规则渲染成 JSON 进 transcript——正是 v2.8 修掉的行为。
+Intent 信封 `kind` 自 v2.8 起是四值词汇表（`user_message` / `pm_task` / `request` / `response`），消费端由 `TurnOrigin` 策略表解释。**新 Gateway → 旧 Runtime** 的混部窗口里，旧 Runtime 不认识 `pm_task`，按旧词汇表兜底成 responder 语义（bot-to-bot 应对方）：PM 派发轮会被裁掉 `ask_user_question` / `intent_send`，且信封按旧规则渲染成 JSON 进 transcript——正是 v2.8 修掉的行为。
 
 | 混部方向 | 后果 | 处置 |
 |---|---|---|

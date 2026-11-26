@@ -55,7 +55,7 @@ graph LR
 4. **全局资源三层分离**（详见 §3.1）：
    - **全量原始列表**：HTTP only（`GET/POST/PUT/DELETE /api/global/{kind}`），Desktop Settings 用。
    - **已就绪可用状态**：MQTT pub/sub（`acowork/global/{kind}` 单主题,Retained），所有 Runtime 共享。Gateway 是唯一权威。
-   - **Runtime per-agent 运行时数据**（agent_config.json / agent_mcp.json）：Runtime 本地文件，通过 `agents/{id}/config` MQTT retained 同步给 Desktop（无需 HTTP GET）。
+   - **Runtime per-bot 运行时数据**（agent_config.json / agent_mcp.json）：Runtime 本地文件，通过 `agents/{id}/config` MQTT retained 同步给 Desktop（无需 HTTP GET）。
 5. **Gateway 不在 Runtime 与 Desktop 之间转发事件**。Runtime 发布的 session 事件由 Desktop **直接订阅** `agents/{id}/sessions/{sid}/messages/...`；而 **Desktop 触发的一切用户操作都走 HTTP**（Gateway 鉴权 + 反代注入 `x-user-id`，ADR-076 §决策 4）——MQTT 上不再有任何 Desktop → Runtime 的用户操作命令，见 §5.3 与 http.md。`sessions/control/#` 现仅剩 `intent`（Runtime → Runtime）与 `active_heartbeat`（Desktop 存在性心跳）两条非用户动作。
 
 ---
@@ -160,7 +160,7 @@ acowork/global/
 >
 > Runtime 不能每次调用前都 HTTP 拉一次(频繁/慢),也不能用"全量列表"(可能包含未就绪的资源)。Retained + push 模式让 Runtime 在启动后就能拿到一份"现在能用什么"的实时视图,后续增量同步变化。
 >
-> 此外,所有 Runtime 看到的是同一份数据——这是它**不放在 `agents/{id}/` 下的根本原因**:没有 per-agent 差异。
+> 此外,所有 Runtime 看到的是同一份数据——这是它**不放在 `agents/{id}/` 下的根本原因**:没有 per-bot 差异。
 >
 > 这一层同时**携带每个 provider/MCP 的解密后密钥**——Runtime 启动后 Phase A 解析 retained payload，从 `ProviderRef.api_key` 取得 OpenAI/Anthropic 等 LLM provider 的 API key、从 `McpRef.auth_token` 取得 MCP bearer token、填入 provider factory 与 MCP 客户端。这就是 §5.1 启动流程中 Runtime 一行 SUB `acowork/global/#` 就拿到全部启动期所需状态的根因。
 >
@@ -170,9 +170,9 @@ acowork/global/
 > - 但 MQTT Retained **本身就是快照**，而普通 PUBLISH **本身就是增量**——一个主题 + retain=true 同时实现了这两个语义。
 > - 本文档统一采用单主题 + Retained：`acowork/global/{kind}`、`acowork/agents/{id}/meta`、`acowork/agents/{id}/config`、`acowork/agents/{id}/sessions/{sid}/meta`、`acowork/agents/{id}/sessions/{sid}/config` 都不拆双主题。
 
-### 3.1.2 Runtime 端真正维护的 per-agent 状态（本地文件，通过 MQTT retained 同步）
+### 3.1.2 Runtime 端真正维护的 per-bot 状态（本地文件，通过 MQTT retained 同步）
 
-Runtime 拿到 §3.1.1 的可用资源后，**用户从这些可用资源里选了哪几个、怎么激活的**，是 Runtime 自己持久化的 per-agent 状态——**不进 MQTT 事件总线**，但通过 `agents/{id}/config` retained 主题同步给 Desktop：
+Runtime 拿到 §3.1.1 的可用资源后，**用户从这些可用资源里选了哪几个、怎么激活的**，是 Runtime 自己持久化的 per-bot 状态——**不进 MQTT 事件总线**，但通过 `agents/{id}/config` retained 主题同步给 Desktop：
 
 1. 它是 Runtime 工作区的本地文件（`agent_config.json`、`agent_mcp.json` 等），不是"广播数据"
 2. Runtime 启动时加载并合并 manifest 默认值后，**PUBLISH `agents/{id}/config` retained**（包含 agent_config 全部字段 + MCP 选择），Desktop 订阅该主题即可获得最新完整配置
@@ -181,9 +181,9 @@ Runtime 拿到 §3.1.1 的可用资源后，**用户从这些可用资源里选�
 
 | 文件 | 位置 | 内容 | Desktop 获取方式 |
 |------|------|------|-----------------|
-| `agent_config.json` | `<workspace>/agents/{id}/config/` | per-agent 运行时参数（temperature、context_window、max_output_tokens、system_prompt_override、avatar 等），初始化自 manifest.toml 默认值 | SUB `agents/{id}/config` retained（Runtime 启动时 PUBLISH，变更时重新 PUBLISH） |
-| `agent_mcp.json` | `<workspace>/agents/{id}/` | 用户从 available mcps 中激活的子集（per-agent） | 已包含在 `agents/{id}/config` retained 内（`active_mcp_servers` 字段） |
-| `session_meta` | `<workspace>/agents/{id}/sessions/{sid}/` | 当前 session 选择的 provider/model/embedding model（per-session，不是 per-agent 持久状态） | SUB `agents/{id}/sessions/{sid}/meta` retained（动态订阅） |
+| `agent_config.json` | `<workspace>/agents/{id}/config/` | per-bot 运行时参数（temperature、context_window、max_output_tokens、system_prompt_override、avatar 等），初始化自 manifest.toml 默认值 | SUB `agents/{id}/config` retained（Runtime 启动时 PUBLISH，变更时重新 PUBLISH） |
+| `agent_mcp.json` | `<workspace>/agents/{id}/` | 用户从 available mcps 中激活的子集（per-bot） | 已包含在 `agents/{id}/config` retained 内（`active_mcp_servers` 字段） |
+| `session_meta` | `<workspace>/agents/{id}/sessions/{sid}/` | 当前 session 选择的 provider/model/embedding model（per-session，不是 per-bot 持久状态） | SUB `agents/{id}/sessions/{sid}/meta` retained（动态订阅） |
 
 **资源使用分层总结**:
 
@@ -204,7 +204,7 @@ Runtime 拿到 §3.1.1 的可用资源后，**用户从这些可用资源里选�
                               │ Runtime 从 available 中选择激活
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  第 3 层：Runtime 端 per-agent 运行时数据（本地文件，MQTT retained 同步）│
+│  第 3 层：Runtime 端 per-bot 运行时数据（本地文件，MQTT retained 同步）│
 │  agent_config.json（运行时参数）+ agent_mcp.json               │
 │  session_meta 中的 provider/model（per-session）                  │
 │  Desktop 通过 MQTT retained 获取：                                │
@@ -392,13 +392,13 @@ acowork/users/{user_id}/
 9. **全局资源三层分离**:
    - **第 1 层 - 全量原始列表**(用户在 Desktop Settings 里管理的原始配置):HTTP only,不走 MQTT。Desktop Settings 拉取后表单渲染,提交修改走 HTTP POST。
    - **第 2 层 - 已就绪可用状态**(Gateway health-check 后的可用资源):MQTT pub/sub,主题为 `acowork/global/{kind}`(单主题,Retained)。**不区分 bot**,所有 Runtime 共享同一份,因为"资源是否就绪"是全局事实。
-   - **第 3 层 - Runtime per-agent 持久化选择**(`agent_mcp.json`):本地文件,Desktop 通过 HTTP 拉 bot config 查看,不走 MQTT。
-   - **为什么不能把第 2 层放到 `agents/{id}/` 下**:所有 bot 看到的可用资源完全相同,放在 per-agent 主题下会造成冗余数据;所有 Runtime 都 SUB `acowork/global/#` 即可。
+   - **第 3 层 - Runtime per-bot 持久化选择**(`agent_mcp.json`):本地文件,Desktop 通过 HTTP 拉 bot config 查看,不走 MQTT。
+   - **为什么不能把第 2 层放到 `agents/{id}/` 下**:所有 bot 看到的可用资源完全相同,放在 per-bot 主题下会造成冗余数据;所有 Runtime 都 SUB `acowork/global/#` 即可。
 10. **全局资源原始列表 vs 可用状态 vs bot 选择不可混淆**:
     - 全量原始列表 = 用户管理,HTTP only
     - 可用状态 = Gateway 验证后的运行时真相,MQTT pub/sub(全局共享)
     - bot 选择 = Runtime 本地持久化,HTTP 拉 config 即可
-    之前误把"Gateway 计算的 per-agent 子集"放进 `agents/{id}/resource_cache` 是错误的——Gateway 不应该感知 bot 维度,资源可用性是全局维度。
+    之前误把"Gateway 计算的 per-bot 子集"放进 `agents/{id}/resource_cache` 是错误的——Gateway 不应该感知 bot 维度,资源可用性是全局维度。
 
 ### 3.6 节点控制面（Node Service 数据源，ADR-055）
 
@@ -482,8 +482,8 @@ mqtt_client.publish(
 > 这样新主题新增的数据资源只需要扩展 oneof，不破坏已有消息。注：这里不出现 `ProviderUpdate` / `SessionMetaUpdate` 等 "增量+快照"双消息——全链路统一采用"单主题 + Retained"，payload 总是最新完整值（详见 §3.5 原则 3）。
 >
 > **`SessionConfig` 消息（`agents/{id}/sessions/{sid}/config` retained，即 `SessionConfigDelta` 的持久化投影，字段号见 `core/acowork-core/proto/mqtt_payload.proto`）**：
-> - `title = 3` / `provider_id = 4` / `model_id = 5` / `reasoning_effort = 6` / `temperature = 7` / `workspace_id = 8` / `llm_availability = 9`：per-session 覆盖，`null` / 字段缺失 = 继承 per-agent 链。
-> - `context_window = 10`（`optional uint64`，ADR-074）：per-session 上下文窗口覆盖，**presence 语义**——字段缺失 = 继承；`0` = 清除覆盖（落盘归一为字段不存在）；合法区间 `FLOOR=8_192 ..= CEILING=4_194_304`，越界由 HTTP `PUT /api/agents/{id}/sessions/{sid}/config` 返回 400。覆盖生效于该会话 trim / compaction 阈值与 `messages/context_usage` 推送，清除后回退 per-agent 链。详见 [ADR-074](../../adr/zh/ADR-074-per-session-context-window-override.md)。
+> - `title = 3` / `provider_id = 4` / `model_id = 5` / `reasoning_effort = 6` / `temperature = 7` / `workspace_id = 8` / `llm_availability = 9`：per-session 覆盖，`null` / 字段缺失 = 继承 per-bot 链。
+> - `context_window = 10`（`optional uint64`，ADR-074）：per-session 上下文窗口覆盖，**presence 语义**——字段缺失 = 继承；`0` = 清除覆盖（落盘归一为字段不存在）；合法区间 `FLOOR=8_192 ..= CEILING=4_194_304`，越界由 HTTP `PUT /api/agents/{id}/sessions/{sid}/config` 返回 400。覆盖生效于该会话 trim / compaction 阈值与 `messages/context_usage` 推送，清除后回退 per-bot 链。详见 [ADR-074](../../adr/zh/ADR-074-per-session-context-window-override.md)。
 >
 > **`ControlCommand` 消息（`agents/{id}/sessions/control/{cmd}`）——ADR-076 §决策 4 后**：
 > 顶层仅 `instance_id = 1`；oneof `command` 仅 `Intent intent = 2` + `ActiveHeartbeat active_heartbeat = 3`。
@@ -799,7 +799,7 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 |------------|--------|---------|
 | **全局资源全量列表**（providers/mcps/lsps/embedding_models） | ❌ 不走（静态全量，仅 Desktop Settings 用） | ✅ `GET/POST/PUT/DELETE /api/global/{kind}`（Settings 页面交互） |
 | **全局资源可用状态**（Gateway health-check 后的就绪列表） | `acowork/global/{kind}` (Retained,QoS 1) | — |
-| **Runtime per-agent 资源激活选择**（agent_mcp.json） | ❌ 不走（本地文件，不是广播数据） | `GET /api/agents/{id}` → config 字段 |
+| **Runtime per-bot 资源激活选择**（agent_mcp.json） | ❌ 不走（本地文件，不是广播数据） | `GET /api/agents/{id}` → config 字段 |
 | **Session 内 provider/model/embedding 选择**（per-session） | 已包含在 `sessions/{sid}/meta` 中 | `GET /api/agents/{id}/sessions/{sid}/state` |
 | **Bot 状态**（status + meta） | `status` Retained+LWT（在线/离线） + `meta` Retained（单主题） | `GET /api/agents/{id}` 详情 |
 | **Bot config**（Runtime 当前生效的 agent_config.json，合并 manifest 默认值） | `config` Retained（单主题，Runtime 自己 PUBLISH） | —（Runtime 启动时本地加载，Desktop 改走 `PUT /api/agents/{id}/config`） |

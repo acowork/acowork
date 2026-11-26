@@ -71,8 +71,8 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照。每个 Bo
 | 流动方向            | 机制     | 触发条件                                                                                                     |
 | ------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
 | 瞬态层 → 经历层     | 摘要写入 | Compaction 触发（80% token 使用）或 Session 关闭时，LLM 摘要异步写入经历层 SQLite `episodes` 表。不再每轮写入，避免与 JSONL 冗余 |
-| 经历层 → 沉淀层     | 巩固管道 | 唯一管道 = 离线 `EpisodicDistiller`（ADR-068,per-agent opt-in:`[memory.distiller].enabled = true`）。**已下线**:即时提取直写沉淀层、PendingKnowledgeNode、rule-based generalization、offline compress_history_nodes、Relationship 自动生成(2026-09 revision) |
-| 沉淀层 → 瞬态层     | 检索注入 | 用户输入到达时，检索相关记忆注入上下文。**默认关闭（per-agent opt-in）**：`MemoryManagerConfig::auto_inject_enabled = false`，开启后每 session 首轮触发一次（ADR-060 §6.3）；开启方式：manifest `[memory.quality].auto_inject_enabled = true`。历史：2026-09-12 因召回质量不足默认关闭（Dormant 垃圾进上下文等）；ADR-062 M5 曾默认开启（Dormant 排除 + min_score 修复 + keyword 质量门），后因与 LLM 自主 `memory_recall` 双路径召回重复（两条路径同以 user 消息为 query，核心节点必然重叠）回退为 per-agent opt-in，`memory_recall` 工具描述已加防重复召回提示。显式 `memory_recall` 工具不受影响 |
+| 经历层 → 沉淀层     | 巩固管道 | 唯一管道 = 离线 `EpisodicDistiller`（ADR-068,per-bot opt-in:`[memory.distiller].enabled = true`）。**已下线**:即时提取直写沉淀层、PendingKnowledgeNode、rule-based generalization、offline compress_history_nodes、Relationship 自动生成(2026-09 revision) |
+| 沉淀层 → 瞬态层     | 检索注入 | 用户输入到达时，检索相关记忆注入上下文。**默认关闭（per-bot opt-in）**：`MemoryManagerConfig::auto_inject_enabled = false`，开启后每 session 首轮触发一次（ADR-060 §6.3）；开启方式：manifest `[memory.quality].auto_inject_enabled = true`。历史：2026-09-12 因召回质量不足默认关闭（Dormant 垃圾进上下文等）；ADR-062 M5 曾默认开启（Dormant 排除 + min_score 修复 + keyword 质量门），后因与 LLM 自主 `memory_recall` 双路径召回重复（两条路径同以 user 消息为 query，核心节点必然重叠）回退为 per-bot opt-in，`memory_recall` 工具描述已加防重复召回提示。显式 `memory_recall` 工具不受影响 |
 | 沉淀层/经历层内流动 | 关联扩散 | **未实现**（ADR-082 D4 删除图遍历，无 `edges` 表；§6 保留为设计目标）                                   |
 | 沉淀层 → Dormant    | 遗忘衰减 | 后台定期计算 decay_score                                                                                     |
 
@@ -146,7 +146,7 @@ Compaction 不再生成 `entities` / `triples` 块——LLM 在压缩场景下�
 
 沉淀层落地收敛为两条语义管道（ADR-068 2026-09 revision）：
 1. **LLM 即时写经历层**：`memory_store` 只落 Episode（content + `knowledge_subtype`），不直写沉淀层——沉淀层类型判定与晋升全部交给离线蒸馏（§4.1）
-2. **离线蒸馏**（唯一沉淀层生产者）：`EpisodicDistiller` 批量扫描 episode → 服务端 LLM 结构化提取 + embedding 聚簇 + LLM Judge → 晋升 Knowledge/Procedural/Autobiographical 节点（含 `promotion_metadata` 审计）；per-agent opt-in（`[memory.distiller].enabled = true`）。manifest bootstrap 仅对 Identity/Capability 权威直写（§3.3）
+2. **离线蒸馏**（唯一沉淀层生产者）：`EpisodicDistiller` 批量扫描 episode → 服务端 LLM 结构化提取 + embedding 聚簇 + LLM Judge → 晋升 Knowledge/Procedural/Autobiographical 节点（含 `promotion_metadata` 审计）；per-bot opt-in（`[memory.distiller].enabled = true`）。manifest bootstrap 仅对 Identity/Capability 权威直写（§3.3）
 
 设计理由：
 - 每轮提取的成本（~65 tokens/轮）在 ADR-011 之后不再合理——经历层不再逐轮写入，存储目的已消失
@@ -554,7 +554,7 @@ LLM 生成回复（含 tool call 判断）
            ├─ keywords 过 ADR-062 sanitize 门禁
            └─ 组装 Episode 落经历层（不直写沉淀层）
 
-离线蒸馏时（EpisodicDistiller，per-agent opt-in）：
+离线蒸馏时（EpisodicDistiller，per-bot opt-in）：
   → 批量扫描 knowledge_subtype 标注 + unconsolidated 的 episode
   → Step 2a 服务端 LLM 结构化提取 + autobio 候选识别
   → Step 3 embedding 聚簇 + 证据累计（min_evidence 阈值）
@@ -572,7 +572,7 @@ LLM 生成回复（含 tool call 判断）
 
 ### 4.2 离线蒸馏（ADR-068，EpisodicDistiller）
 
-> **实现状态（ADR-068 M1-M8 落地；ADR-071 触发/配置接线 2026-09 已实现 W1–W5）**：离线巩固由 `EpisodicDistiller`（`core/acowork-memory/src/consolidation/distiller.rs`）承载。后台调度与运行时配置按 [ADR-071](../../adr/zh/ADR-071-distiller-runtime-config-and-trigger.md)：触发口径与 legacy Pending 解耦（基于 unconsolidated episode 积压/空闲）、配置分层（manifest 初值 → `agent_config.json` 运行时层）、手动蒸馏端点、模型选择复用摘要模型 UI、蒸馏 prompt 纳入 ADR-063 per-agent 覆盖、记忆面板"记忆蒸馏"卡片与"立即蒸馏"按钮已上线。旧 Phase 3 规划中的 PendingKnowledgeNode 升级制、rule-based generalization、自动自我评估、History 压缩均已下线。
+> **实现状态（ADR-068 M1-M8 落地；ADR-071 触发/配置接线 2026-09 已实现 W1–W5）**：离线巩固由 `EpisodicDistiller`（`core/acowork-memory/src/consolidation/distiller.rs`）承载。后台调度与运行时配置按 [ADR-071](../../adr/zh/ADR-071-distiller-runtime-config-and-trigger.md)：触发口径与 legacy Pending 解耦（基于 unconsolidated episode 积压/空闲）、配置分层（manifest 初值 → `agent_config.json` 运行时层）、手动蒸馏端点、模型选择复用摘要模型 UI、蒸馏 prompt 纳入 ADR-063 per-bot 覆盖、记忆面板"记忆蒸馏"卡片与"立即蒸馏"按钮已上线。旧 Phase 3 规划中的 PendingKnowledgeNode 升级制、rule-based generalization、自动自我评估、History 压缩均已下线。
 
 **蒸馏输入/输出（2026-10 收敛为「投影 + 合并」，见 ADR-068 Revision(2026-10)）**：
 
@@ -612,7 +612,7 @@ LLM 生成回复（含 tool call 判断）
 - **后台触发（与 legacy Pending 计数解耦）**：周期到点（`distiller_interval_minutes`，默认 60）∧（unconsolidated episode 积压 ≥ `distiller_accumulation_threshold`(默认 50) ∨ 空闲 ≥ `distiller_idle_minutes`(默认 30)）→ 跑 `run_episodic_distiller_step`；受 `distiller_enabled` 门控（默认 false，opt-in 保持）
 - **手动触发**：`POST /memory/distill` 立即跑一次（绕过周期，与后台共用同一实现；仍守 opt-in，关闭时返回 409）；`consolidation/status` 返回蒸馏配置与上次运行结果。记忆面板底部"合并节点"按钮已退役，替换为"立即蒸馏"（legacy consolidate action 删除，episodic cleanup 随周期 consolidation 自动执行）
 - **蒸馏模型**：独立字段 `distiller_model`（provider_id/model_id），UI 复用摘要模型下拉逻辑（vault keys + provider 名，与 Harness compact-model 卡片同源）；解析链 agent_config → manifest → `default_compact_model` → provider 第一模型（现状保底）
-- **prompt per-agent**：`distiller-merge.md` 进 ADR-063 覆盖白名单（原 `distiller-extraction.md` / `distiller-judge.md` 两槽随提取段、Judge 段下线合并为一槽），Debug 界面 PromptList 可见可编辑，reload 生效；`DistillerConfig.extraction_prompt_override`/`judge_prompt_override` 在 `distiller_scheduler_config()` 组装时注入；`acowork-memory` 内置常量保留为默认
+- **prompt per-bot**：`distiller-merge.md` 进 ADR-063 覆盖白名单（原 `distiller-extraction.md` / `distiller-judge.md` 两槽随提取段、Judge 段下线合并为一槽），Debug 界面 PromptList 可见可编辑，reload 生效；`DistillerConfig.extraction_prompt_override`/`judge_prompt_override` 在 `distiller_scheduler_config()` 组装时注入；`acowork-memory` 内置常量保留为默认
 - **配置热更新**：`ConsolidationTimer` 持有 `RwLock<SchedulerConfig>`，PUT bot config 后 `update_config()` 换值、后台 loop 每 tick 重读（≤60s 生效），不重建后台任务
 - 失败/证据不足的 episode 原样保留，下轮重试；不存在降级到规则路径的 fallback
 
@@ -620,7 +620,7 @@ LLM 生成回复（含 tool call 判断）
 
 | 维度   | 即时提取（memory_store,LLM 端）          | 离线蒸馏（EpisodicDistiller,服务端）  |
 | ------ | ---------------------------------------- | ------------------------------------- |
-| 触发   | LLM 在回复时自主调用                     | 后台周期任务（per-agent opt-in）      |
+| 触发   | LLM 在回复时自主调用                     | 后台周期任务（per-bot opt-in）      |
 | 粒度   | 单轮对话中的显式信息                     | 跨 episode 的证据聚簇 + 语义归纳      |
 | 写入   | 只写 Episode（content + knowledge_subtype） | 晋升沉淀层节点（含审计证据链）     |
 | LLM 判断 | LLM 自评 confidence/category + normalized 陈述  | 仅合并裁决时调用模型（投影零调用）  |

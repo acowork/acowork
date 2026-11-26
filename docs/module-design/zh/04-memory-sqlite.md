@@ -87,7 +87,7 @@ crates/acowork-memory/
 - `provider.rs` / `store.rs`：定义 trait（实现侧在本 crate 的 `sqlite/`）。
 - `manager.rs`：调用方与 Store 之间的中间层，编排三阶段记忆生命周期。服务侧只用它的
   **检索编排**（`service/mcp/tools.rs` 用 `MemoryManagerConfig::default()` 跑 `retrieve()`：
-  检索质量参数现在是服务级的，旧 Runtime 会话里的 per-agent 配置已无对应物）。
+  检索质量参数现在是服务级的，旧 Runtime 会话里的 per-bot 配置已无对应物）。
 - `consolidation/distiller.rs`：离线蒸馏 6 步流水线（ADR-068 §3.4），按 `MemoryProvider` 接口做写读；由 `service/pipeline.rs` 调度。
 - `retrieval_metrics.rs`：检索质量指标（见 §6）。
 - `quality.rs` / `keyword.rs` / `judge.rs`：蒸馏侧门控配置。
@@ -239,7 +239,7 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 | 9 | `chat_token_usage` 台账表 | 设计 27（Chat Router 用量，一 Chat 一行聚合） |
 | 10 | `sessions.intent_key` / `intent_closed` | ADR-106 D11（会话持有的 intent 上下文与其终态标记） |
 | 11 | `chat_token_usage.history_tokens` | 设计 27（router 的投影历史占用，唯一可与预算比较的数） |
-| 12 | `sessions.aware_users` | ADR-076 §决策 4 rev.（只读知情者，由 Gateway 为 agent-to-agent intent 注入） |
+| 12 | `sessions.aware_users` | ADR-076 §决策 4 rev.（只读知情者，由 Gateway 为 bot-to-bot intent 注入） |
 | 13 | `sessions.tool_policy`（JSON，`NULL` = 继承 Bot 层） | ADR-109（per-session 内置工具 / MCP 收窄） |
 
 v3 存 **sum + count** 而非折叠好的均值：两个指标各自统计自己的样本数。一次调用可能只测得出 TTFT（Provider 未上报 completion 数），共用一个分母会把速度均值系统性抬高。

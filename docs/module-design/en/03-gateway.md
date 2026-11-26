@@ -30,7 +30,7 @@ crates/acowork-gateway/
     ├── budget/
     │   ├── mod.rs
     │   ├── tracker.rs             # usage statistics + over-limit signal
-    │   └── config.rs              # budget config (per-agent daily/monthly limit)
+    │   └── config.rs              # budget config (per-bot daily/monthly limit)
     ├── rate/
     │   ├── mod.rs
     │   └── limiter.rs             # rate token allocation (per-provider RPM/TPM)

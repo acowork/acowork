@@ -38,7 +38,7 @@ MCP 工具注入只解决**可达性**，不解决**可用性**。这个工具�
 | # | 机制 | 代码出处 | 不写进 prompt 的后果 |
 |---|---|---|---|
 | **M1** | Bot 建的任务 `review_status=pending`，未经人批准时 `claim` / `update(status=in_progress)` **两条路径**都返回 409 `review_not_approved` | [tree.rs `ensure_creation_approved`](../../../core/acowork-pm/src/store/tree.rs) | PM 派完工以为结束了，实际一个都没启动 |
-| **M2** | `start_at` 是**唤醒钩子**：dispatch scanner 周期扫描，选中 `pending` + agent-assigned + 已批准 + 未派发 + `start_at` 到点的任务，逐个发 wake-up intent，落 `dispatched_at` 幂等戳 | [dispatch.rs:1-23](../../../core/acowork-pm/src/dispatch.rs#L1) | 唯一的定时派工原语被闲置，改用 `intent_send` 手动催，失去幂等 → 重复催办 |
+| **M2** | `start_at` 是**唤醒钩子**：dispatch scanner 周期扫描，选中 `pending` + bot-assigned + 已批准 + 未派发 + `start_at` 到点的任务，逐个发 wake-up intent，落 `dispatched_at` 幂等戳 | [dispatch.rs:1-23](../../../core/acowork-pm/src/dispatch.rs#L1) | 唯一的定时派工原语被闲置，改用 `intent_send` 手动催，失去幂等 → 重复催办 |
 | **M3** | 状态机窄出口：`in_progress → done` **非法**（必须经 `submitted`）；`Cancelled` 是终态（零出边） | [tree.rs `validate_transition`](../../../core/acowork-pm/src/store/tree.rs#L670) | bot 高频撞 `InvalidStateTransition`，然后开始瞎试 |
 | **M4** | `assignee` 必须是 Gateway bot 目录里存在的 **UUID instance_id**（ADR-073）；`agent_id`（`com.acowork.xxx`）只用于展示 | [mcp/tools.rs 头注释](../../../core/acowork-pm/src/mcp/tools.rs) §9.1 | 派工必失败，且报错（not in directory）不自解释 |
 | **M5** | `type=checkpoint/bug` 提交后进人工审核；其余类型 auto-approved → `done` | [manifest.rs `pm_submit_task`](../../../core/acowork-pm/src/mcp/manifest.rs) | PM 不知道该在哪设验收闸 |

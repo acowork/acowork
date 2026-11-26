@@ -117,11 +117,11 @@ Desktop has two separate lists (AgentList and UserList). Mobile merges them into
 Each row shows: avatar (with a working dot), name, online status, **most recent conversation summary**, timestamp.
 
 The avatar corner dot carries exactly one meaning: **working** (a green dot while `AgentSummary.status === 'busy'`, nothing at all when idle).
-There is no read/unread badge — with no push channel in v1 a per-agent "unread" count has no
+There is no read/unread badge — with no push channel in v1 a per-bot "unread" count has no
 reliable semantics, and a dot that lies is worse than no dot. Only the deterministic working
 signal is kept, matching the desktop sidebar.
 
-**The summary comes from the last message of the most recently active session** — not a fixed Agent-level string. IM semantics demand it: what the user wants to know is "where did we leave off".
+**The summary comes from the last message of the most recently active session** — not a fixed Bot-level string. IM semantics demand it: what the user wants to know is "where did we leave off".
 
 ## 3. Gestures and Navigation Interaction
 
@@ -520,7 +520,7 @@ Enter chat detail / after sending
 | Data | Refresh moments |
 |------|-----------------|
 | Conversation list (§2.3) | once at startup, pull-to-refresh, resume-to-foreground, after session create/delete |
-| Working dot | Follows the bot directory refresh (once at startup + on foreground + pull-to-refresh + after session add/remove). No read/unread count is kept: without push, per-agent "unread" cannot be judged reliably, so v1 drops it outright |
+| Working dot | Follows the bot directory refresh (once at startup + on foreground + pull-to-refresh + after session add/remove). No read/unread count is kept: without push, per-bot "unread" cannot be judged reliably, so v1 drops it outright |
 | (Removed) read/unread badge | v1 did render a local `message_count`-based unread dot; in practice the red/green flip-flop was more distracting than informative and inconsistent with desktop, so the whole thing was removed |
 | Bot online status | pushed by the presence connection (§8.1): online/offline/error flip within milliseconds; the directory poll (once at startup + resume + pull-to-refresh) stays the baseline and the race corrector — a late-arriving poll can repaint a row the push just lit as offline, and the next heartbeat/verdict resets it |
 
@@ -691,7 +691,7 @@ apps/acowork-mobile/
 
 `agentStore` and `chatStore` each held their own `sessions` array. `session-write-access.ts` read the former; `chatStore.openSession` read the latter (always empty). So `can_write` could never be observed as `false` — read-only sessions would wrongly emit `open_session`, and the composer gate would fail open.
 
-This is not a "sync both sides" fix: **two copies of one fact will always diverge**, and the divergence direction here is exactly a fail-open on the permission gate. The fix gives `agentStore` sole ownership of the session list; `chatStore` keeps only per-agent view state (current session, messages, loading) and reads `can_write` through `getSession()`. The defect was surfaced by a delete-case test in `session-access.test.ts`.
+This is not a "sync both sides" fix: **two copies of one fact will always diverge**, and the divergence direction here is exactly a fail-open on the permission gate. The fix gives `agentStore` sole ownership of the session list; `chatStore` keeps only per-bot view state (current session, messages, loading) and reads `can_write` through `getSession()`. The defect was surfaced by a delete-case test in `session-access.test.ts`.
 
 **Corollary: whatever field the permission gate reads must have exactly one owner.**
 
