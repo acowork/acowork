@@ -9,6 +9,10 @@
  *
  * 与头像（`lib/avatar.ts`）同一范式，只是作用域是项目、且 custom 走 PM 端点。
  * 物理落盘与命名（`icon-NN.{ext}`）在服务端（`core/acowork-pm/src/api/icon.rs`）。
+ *
+ * 这里是**读侧**；写侧（回写 metadata 的 `withProjectIcon`）在
+ * `lib/pm-icon-settings.ts`，与 board / view settings 同族，纯函数、零运行时
+ * 依赖 —— 数据层不该为了合并一个字段把本模块的 config / 静态资源依赖拖进来。
  */
 
 import { BUILTIN_ICONS } from "./builtinIcons";

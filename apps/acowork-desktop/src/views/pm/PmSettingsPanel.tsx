@@ -23,6 +23,7 @@ import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { ProjectIconPicker } from "../../components/common/ProjectIconPicker";
 import { parseProjectIcon, type ProjectIconRef } from "../../lib/projectIcon";
+import { withProjectIcon } from "../../lib/pm-icon-settings";
 import {
   BOARD_PAGE_SIZE_OPTIONS,
   parseBoardPageSize,
@@ -183,12 +184,12 @@ function ProjectInfoSection({ project, canGovern }: { project: PmProject; canGov
     else setDescDraft(project.description);
   }, [descDraft, project, updateProjectMeta, t]);
 
-  // 图标：后端对 metadata 整体替换，故必须 {...metadata, icon} 合并再回写。
+  // 图标：后端对 metadata 整体替换，故合并回写（`withProjectIcon`）。
   const currentIcon = parseProjectIcon(project.metadata);
   const saveIcon = useCallback(
     async (ref: ProjectIconRef | null) => {
       const ok = await updateProjectMeta(project.id, {
-        metadata: { ...project.metadata, icon: ref },
+        metadata: withProjectIcon(project.metadata, ref),
       });
       if (ok) showToast({ type: "success", message: t("pm.iconUpdated") });
     },
@@ -200,6 +201,7 @@ function ProjectInfoSection({ project, canGovern }: { project: PmProject; canGov
       {/* 图标行（对标头像设置）：点击图标弹出选择器；旁边显示项目名 + ID */}
       <div className="flex items-center gap-4">
         <ProjectIconPicker
+          mode="project"
           project={project}
           value={currentIcon}
           disabled={blocked}

@@ -214,6 +214,70 @@ export function MemberAvatar({
 }
 
 /**
+ * 可邀请候选全集 —— 与 `ResolvedMember` 同一投影，只是来源是「全量」而不是
+ * 「已在册」。两个宿主共用这一份数据来源与显示解析：
+ * - `MemberManagerSection` 的邀请列表（自己过滤掉已在册的 ∪ owner）
+ * - `ProjectCreateDialog` 的成员多选与群主下拉
+ *
+ * Agent 候选来自 agentStore，人类候选来自登录账号 + 账号目录 —— 目录端点
+ * **排除调用者**，所以自己单独补进来；local 模式没有目录，人类候选为空。
+ * 挂载时顺带拉起两个数据源：候选列表不能依赖「当前成员非空」才去加载。
+ *
+ * 「排除谁」刻意留给调用方 —— 那是每个表面自己的规则（成员管理排除在册
+ * 成员，新建对话框排除创建者，群主下拉谁都不排除），不是候选的来源规则。
+ */
+export function useInviteCandidates(): {
+  agents: ResolvedMember[];
+  humans: ResolvedMember[];
+} {
+  const agents = useAgentStore((s) => s.agents);
+  const fetchAgents = useAgentStore((s) => s.fetchAgents);
+  const self = useSelfAccount();
+  const directoryUsers = usePmDirectoryUsers();
+
+  useEffect(() => {
+    if (Object.keys(agents).length === 0) void fetchAgents();
+  }, [agents, fetchAgents]);
+
+  return useMemo(() => {
+    const byName = (a: ResolvedMember, b: ResolvedMember) =>
+      (a.displayName ?? "").localeCompare(b.displayName ?? "");
+    const agentRows: ResolvedMember[] = Object.values(agents).map((a) => ({
+      instance_id: a.meta.instance_id,
+      kind: "agent" as const,
+      displayName: a.meta.name || a.meta.agent_id || null,
+      avatarUrl: a.meta.avatar ?? null,
+      builtinAvatarId: a.meta.builtin_avatar ?? null,
+      unresolved: false,
+    }));
+
+    const humanRows: ResolvedMember[] = [];
+    if (self) {
+      humanRows.push({
+        instance_id: self.user_id,
+        kind: "user",
+        displayName: self.display_name || self.username,
+        avatarUrl: self.avatar ?? null,
+        builtinAvatarId: self.builtin_avatar ?? null,
+        unresolved: false,
+      });
+    }
+    for (const u of directoryUsers) {
+      if (humanRows.some((r) => r.instance_id === u.user_id)) continue;
+      humanRows.push({
+        instance_id: u.user_id,
+        kind: "user",
+        displayName: u.display_name || u.username,
+        avatarUrl: u.avatar ?? null,
+        builtinAvatarId: u.builtin_avatar ?? null,
+        unresolved: false,
+      });
+    }
+    return { agents: agentRows.sort(byName), humans: humanRows.sort(byName) };
+  }, [agents, self, directoryUsers]);
+}
+
+/**
  * 任务上的 actor id → 显示名。
  *
  * `task.assignee` / `task.created_by` 是裸字符串，没有 `kind` 可判（REST

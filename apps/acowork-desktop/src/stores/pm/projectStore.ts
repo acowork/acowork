@@ -16,7 +16,35 @@
 import { create } from "zustand";
 import * as pmApi from "../../lib/pm-api";
 import { log } from "../../lib/logger";
+import { withProjectIcon } from "../../lib/pm-icon-settings";
 import type { PmMemberKind, PmProject, UpdateProjectInput } from "../../lib/pm-types";
+
+/**
+ * `createProject` 的一步到位草稿 —— 新建项目对话框一次收集的全部字段。
+ *
+ * 刻意与 REST 契约 `CreateProjectInput` 不同形：那份是「项目本体」的
+ * 请求体，而这里描述的是用户意图（图标是本地文件、成员是待邀请集合），
+ * 落到服务端要拆成 1 + N 次调用。
+ */
+export interface ProjectCreateDraft {
+  title: string;
+  description?: string;
+  /** 自定义图标：上传端点按项目寻址，只能在项目存在之后落盘。 */
+  iconFile?: File | null;
+  /** 建群即邀请的成员（Agent 实例 / 人类账号，ADR-076 §决策 11）。 */
+  members?: Array<{ instance_id: string; kind: PmMemberKind }>;
+  /**
+   * 群主（人类账号）。等于 `created_by` 或省略 = 不发起转让 —— 后端
+   * `Project::owner()` 本来就回退到创建者。
+   */
+  ownerId?: string | null;
+}
+
+/** 创建结果：本体必然成功，附加步骤逐项报告哪些没落地。 */
+export interface ProjectCreateOutcome {
+  project: PmProject;
+  warnings: Array<"icon" | "member" | "owner">;
+}
 
 interface PmProjectState {
   projects: PmProject[];
@@ -51,7 +79,19 @@ interface PmProjectState {
 
   loadProjects: (opts?: { silent?: boolean }) => Promise<void>;
   selectProject: (pid: string | null) => void;
-  createProject: (title: string, description?: string) => Promise<PmProject | null>;
+  /**
+   * 一步到位创建项目：项目本体 + 图标 + 成员 + 群主，一次表单全部落地。
+   *
+   * 后三步只能排在创建之后 —— 图标上传与成员邀请端点都按 `pid` 寻址
+   * （`POST /projects/:pid/icon`、`POST /projects/:pid/members`），而群主
+   * 转让要求目标**已在册人类成员**（PM store `transfer_owner`）。附带
+   * 的时序约束：邀请与转让都是 governance 行为（`require_governance`），
+   * 创建者此刻正是 owner，所以**转让必须最后做**，否则后续请求全部 403。
+   *
+   * 本体失败返回 `null`（`error` 已写入 store）；本体成功则附加步骤的失败
+   * 只降级成 `warnings[]`——项目已经存在，回滚它比报告失败更糟。
+   */
+  createProject: (draft: ProjectCreateDraft) => Promise<ProjectCreateOutcome | null>;
   updateProjectMeta: (pid: string, patch: UpdateProjectInput) => Promise<boolean>;
   /** 添加项目成员。`kind` 区分 Agent 实例 / 人类账号（ADR-076，缺省 agent）。
    * 成功返回 true，失败设置 error */
@@ -122,21 +162,76 @@ export const usePmProjectStore = create<PmProjectState>((set, get) => ({
     set({ selected: found });
   },
 
-  createProject: async (title, description = "") => {
+  createProject: async (draft) => {
+    let project: PmProject;
     try {
-      const project = await pmApi.createProject({ title, description });
-      set((s) => ({
-        projects: [...s.projects, project],
-        selected: project,
-        updatedAt: Date.now(),
-      }));
-      void get().refreshCounts();
-      return project;
+      project = await pmApi.createProject({
+        title: draft.title,
+        description: draft.description ?? "",
+      });
     } catch (e) {
       log.warn("[pm:project] createProject failed:", e);
       set({ error: e instanceof Error ? e.message : String(e) });
       return null;
     }
+    set((s) => ({
+      projects: [...s.projects, project],
+      selected: project,
+      updatedAt: Date.now(),
+    }));
+    void get().refreshCounts();
+
+    const warnings: ProjectCreateOutcome["warnings"] = [];
+    const warn = (w: ProjectCreateOutcome["warnings"][number]) => {
+      if (!warnings.includes(w)) warnings.push(w);
+    };
+
+    // 图标：先上传落盘（服务端命名 `icon-NN.{ext}`），再把 ref 合并进
+    // metadata 回写。PATCH 对 metadata 是**整体替换**，所以必须带旧字段。
+    if (draft.iconFile) {
+      try {
+        const asset = await pmApi.uploadProjectIcon(project.id, draft.iconFile);
+        const ok = await get().updateProjectMeta(project.id, {
+          metadata: withProjectIcon(project.metadata, {
+            kind: "custom",
+            path: asset.relative_path,
+          }),
+        });
+        if (!ok) warn("icon");
+      } catch (e) {
+        log.warn("[pm:project] createProject: icon upload failed:", e);
+        warn("icon");
+      }
+    }
+
+    // 成员：邀请失败（实例已卸载 / 目录不可用）不阻塞其余成员。
+    for (const m of draft.members ?? []) {
+      try {
+        await get().addMember(project.id, m.instance_id, m.kind);
+      } catch (e) {
+        log.warn("[pm:project] createProject: addMember failed:", e);
+        warn("member");
+      }
+    }
+
+    // 群主：转让要求目标是已在册人类成员，不在集合里就先补一次邀请。
+    // 放在最后 —— 转让成功后创建者不再是 owner，任何后续 governance
+    // 请求都会被 `require_governance` 拒绝。
+    const ownerId = draft.ownerId;
+    if (ownerId && ownerId !== project.created_by) {
+      try {
+        const current = get().projects.find((p) => p.id === project.id);
+        if (!current?.members.some((m) => m.instance_id === ownerId)) {
+          await get().addMember(project.id, ownerId, "user");
+        }
+        await get().transferOwner(project.id, ownerId);
+      } catch (e) {
+        log.warn("[pm:project] createProject: transferOwner failed:", e);
+        warn("owner");
+      }
+    }
+
+    return { project, warnings };
   },
 
   updateProjectMeta: async (pid, patch) => {

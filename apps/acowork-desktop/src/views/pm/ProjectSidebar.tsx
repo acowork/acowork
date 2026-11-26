@@ -6,10 +6,11 @@
  * - 项目列表 + 选中高亮（与 AgentList 同款：accent/90 + text-white）
  * - 任务计数徽章（待审核数字色高亮）
  * - 底部独立 + 按钮（与 AgentList 同款：p-1.5 + hover:bg-[var(--color-accent)]/10）
- * - 新建项目（对话框）/ 删除项目（ConfirmDialog 二次确认）
+ * - 新建项目（`ProjectCreateDialog`，图标/描述/成员/群主一步到位）/
+ *   删除项目（ConfirmDialog 二次确认）
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Plus, Search } from "lucide-react";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
@@ -22,6 +23,7 @@ import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
 import { CAPSULE_PANE_CN } from "../../components/common/capsule";
 import { useTranslation } from "../../i18n/useTranslation";
+import { ProjectCreateDialog } from "./ProjectCreateDialog";
 import type { PmProject } from "../../lib/pm-types";
 
 export function ProjectSidebar({ width }: { width?: number }) {
@@ -31,39 +33,14 @@ export function ProjectSidebar({ width }: { width?: number }) {
   const counts = usePmProjectStore((s) => s.counts);
   const loadingProjects = usePmProjectStore((s) => s.loading);
   const selectProject = usePmProjectStore((s) => s.selectProject);
-  const createProject = usePmProjectStore((s) => s.createProject);
   const deleteProject = usePmProjectStore((s) => s.deleteProject);
   const creating = usePmProjectStore((s) => s.creating);
   const openCreate = usePmProjectStore((s) => s.openCreate);
   const closeCreate = usePmProjectStore((s) => s.closeCreate);
   const healthy = usePmHealthStore((s) => s.healthy);
 
-  const [title, setTitle] = useState("");
-  const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState<PmProject | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  // 新建对话框打开时聚焦输入框（creating 现在是全局 store 状态）
-  useEffect(() => {
-    if (creating) inputRef.current?.focus();
-  }, [creating]);
-
-  const handleCreate = useCallback(async () => {
-    const trimmed = title.trim();
-    if (!trimmed) {
-      showToast({ type: "warning", message: t("pm.newProjectTitleRequired") });
-      return;
-    }
-    setSaving(true);
-    const project = await createProject(trimmed);
-    setSaving(false);
-    if (project) {
-      setTitle("");
-      closeCreate();
-      showToast({ type: "success", message: t("pm.projectCreated") });
-    }
-  }, [title, createProject, closeCreate, t]);
 
   const handleDelete = useCallback(async () => {
     if (!deleting) return;
@@ -217,56 +194,8 @@ export function ProjectSidebar({ width }: { width?: number }) {
         </button>
       </div>
 
-      {/* 新建项目对话框 */}
-      {creating && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-modal-overlay"
-            onClick={() => closeCreate()}
-          />
-          <div
-            className="relative z-10 w-full max-w-sm rounded-md border border-border-outer bg-modal-surface p-5 shadow-xl"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="pm-new-project-title"
-          >
-            <h3 id="pm-new-project-title" className="text-sm font-semibold">
-              {t("pm.newProject")}
-            </h3>
-            <div className="mt-3">
-              <StyledInput
-                ref={inputRef}
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleCreate();
-                  if (e.key === "Escape") closeCreate();
-                }}
-                placeholder={t("pm.newProjectPlaceholder")}
-                disabled={saving}
-              />
-            </div>
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => closeCreate()}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
-                disabled={saving}
-              >
-                {t("common.cancel")}
-              </button>
-              <button
-                type="button"
-                onClick={handleCreate}
-                className="rounded-md bg-btn-solid px-3 py-1.5 text-xs font-medium text-white hover:bg-btn-solid-hover hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70 disabled:opacity-50"
-                disabled={saving}
-              >
-                {saving ? t("common.saving") : t("common.create")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* 新建项目对话框（图标 / 描述 / 成员 / 群主一步到位） */}
+      {creating && <ProjectCreateDialog onClose={closeCreate} />}
 
       {/* 删除项目确认 */}
       <ConfirmDialog

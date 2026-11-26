@@ -19,12 +19,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { useAgentStore } from "../../stores/agentStore";
-import { useAuthStore } from "../../stores/authStore";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
-import { usePmUserDirectoryStore } from "../../stores/pmUserDirectoryStore";
-import { AgentAvatar } from "../../components/common/AgentAvatar";
-import { UserAvatar } from "../../components/common/UserAvatar";
 import { showToast } from "../../components/common/ToastProvider";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -34,30 +29,24 @@ import {
   MemberAvatar,
   canGovernProject,
   projectOwnerId,
-  usePmDirectoryUsers,
+  useInviteCandidates,
   useResolvedMembers,
   useSelfAccount,
   withOwner,
+  type ResolvedMember,
 } from "./pmMembers";
 
 export function MemberManagerSection({ project }: { project: PmProject }) {
   const { t } = useTranslation();
-  const agents = useAgentStore((s) => s.agents);
-  const fetchAgents = useAgentStore((s) => s.fetchAgents);
   const addMember = usePmProjectStore((s) => s.addMember);
   const removeMember = usePmProjectStore((s) => s.removeMember);
   const transferOwner = usePmProjectStore((s) => s.transferOwner);
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  // 用户候选数据源：登录账号（自己）+ 账号目录里的其他账号（仅多用户
-  // 模式）。usePmDirectoryUsers 订阅目录 store，但加载由 useResolvedMembers
-  // 的 effect 驱动 —— 这里再挂一个独立 effect，避免候选列表依赖“当前成员
-  // 非空”才触发加载。
   const self = useSelfAccount();
-  const directoryUsers = usePmDirectoryUsers();
-  const accessToken = useAuthStore((s) => s.accessToken);
-  const status = useAuthStore((s) => s.status);
-  const loadDirectory = usePmUserDirectoryStore((s) => s.loadDirectory);
+  // 候选全集与「新建项目」对话框同源（Agent 来自 agentStore，人类来自登录
+  // 账号 + 账号目录；两个数据源的加载由 hook 自己拉起，不依赖当前成员非空）。
+  const invite = useInviteCandidates();
 
   // The full display set — the owner folded in (see `withOwner`) so this
   // dialog agrees with the members panel / chat header on who is in the
@@ -76,20 +65,8 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
     [displayMembers],
   );
 
-  // 打开时确保 agent 列表已加载（成员候选来自 agentStore）
-  useEffect(() => {
-    if (Object.keys(agents).length === 0) void fetchAgents();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // 打开时确保账号目录已加载（用户成员候选）。loadDirectory 自带幂等与
-  // 缓存，重复调用不会重复发请求。
-  useEffect(() => {
-    if (status === "logged_in" && self && accessToken) {
-      void loadDirectory(self.user_id, accessToken);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // 候选数据源（agentStore + 账号目录）的加载由 `useInviteCandidates` 自己
+  // 负责，这里不再重复挂 effect。
 
   // ESC 不再由主体处理：主体可内嵌在面板里，关闭语义归宿主
   //（Dialog 自己挂 ESC，PmSettingsPanel 无此需求）。
@@ -151,52 +128,40 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
     }
   };
 
-  // 可添加候选：agentStore 中存在、且还不是成员（按显示名排序）
-  const candidates = useMemo(
-    () =>
-      Object.values(agents)
-        .filter((a) => !memberIds.has(a.meta.instance_id))
-        .sort((a, b) =>
-          (a.meta.name || "").localeCompare(b.meta.name || "",
-          ),
-        ),
-    [agents, memberIds],
+  // 可添加候选 = 全集 − 已在册（owner 已在 displayMembers 里，所以也排除）。
+  const agentCandidates = useMemo(
+    () => invite.agents.filter((c) => !memberIds.has(c.instance_id)),
+    [invite.agents, memberIds],
   );
-
-  // 可添加的用户候选：登录账号（目录接口排除调用者，自己不在目录里）+
-  // 目录中其他账号，排除已是成员的（按显示名排序）。local 模式没有目录，
-  // 列表为空 —— 成员解析走的是 "human" 哨兵，不是真实 user_id。
-  const userCandidates = useMemo(() => {
-    const rows: Array<{
-      user_id: string;
-      displayName: string;
-      avatarUrl: string | null;
-      builtinAvatarId: string | null;
-    }> = [];
-    if (self && !memberIds.has(self.user_id)) {
-      rows.push({
-        user_id: self.user_id,
-        displayName: self.display_name || self.username,
-        avatarUrl: self.avatar ?? null,
-        builtinAvatarId: self.builtin_avatar ?? null,
-      });
-    }
-    for (const u of directoryUsers) {
-      if (memberIds.has(u.user_id) || rows.some((r) => r.user_id === u.user_id)) continue;
-      rows.push({
-        user_id: u.user_id,
-        displayName: u.display_name || u.username,
-        avatarUrl: u.avatar ?? null,
-        builtinAvatarId: u.builtin_avatar ?? null,
-      });
-    }
-    return rows.sort((a, b) => a.displayName.localeCompare(b.displayName));
-    // 按 user_id 取值：账号异步解析到位后自动重算，且不依赖对象引用稳定性
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [memberIds, directoryUsers, self?.user_id]);
+  const userCandidates = useMemo(
+    () => invite.humans.filter((c) => !memberIds.has(c.instance_id)),
+    [invite.humans, memberIds],
+  );
 
   // 已是成员：解析得出名字 → 显示；解析不出（Agent 已卸载）→ 占位
   const currentMembers = useResolvedMembers(displayMembers);
+
+  // Agent / 人类候选行同形，只差 kind 决定头像画法与 add 的 kind —— 一份渲染
+  const renderCandidate = (c: ResolvedMember) => (
+    <li
+      key={c.instance_id}
+      className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
+    >
+      <MemberAvatar member={c} size={24} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-xs text-text ">{c.displayName ?? c.instance_id}</div>
+        <div className="truncate text-10 text-text-tertiary">{c.instance_id}</div>
+      </div>
+      <button
+        type="button"
+        disabled={busyId === c.instance_id}
+        onClick={() => handleAdd(c.instance_id, c.kind)}
+        className="shrink-0 rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-40  dark:hover:bg-[var(--color-accent)]/15"
+      >
+        {t("pm.addMember")}
+      </button>
+    </li>
+  );
 
   return (
     <>
@@ -275,39 +240,10 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
             <div className="mb-1 text-11 font-medium text-text-tertiary ">
               {t("pm.agentMembers")}
             </div>
-            {candidates.length === 0 ? (
+            {agentCandidates.length === 0 ? (
               <p className="mb-4 text-xs italic text-text-tertiary">{t("pm.noMembers")}</p>
             ) : (
-              <ul className="mb-4 space-y-1">
-                {candidates.map((a) => (
-                  <li
-                    key={a.meta.instance_id}
-                    className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
-                  >
-                    <AgentAvatar
-                      agentId={a.meta.instance_id}
-                      displayName={a.meta.name}
-                      avatarUrl={a.meta.avatar ?? null}
-                      builtinAvatarId={a.meta.builtin_avatar ?? null}
-                      size={24}
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-xs text-text ">
-                        {a.meta.name || a.meta.agent_id}
-                      </div>
-                      <div className="truncate text-10 text-text-tertiary">{a.meta.instance_id}</div>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={busyId === a.meta.instance_id}
-                      onClick={() => handleAdd(a.meta.instance_id, "agent")}
-                      className="shrink-0 rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-40  dark:hover:bg-[var(--color-accent)]/15"
-                    >
-                      {t("pm.addMember")}
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <ul className="mb-4 space-y-1">{agentCandidates.map(renderCandidate)}</ul>
             )}
   
             {/* 可添加的用户候选（仅多用户模式有目录数据） */}
@@ -317,33 +253,7 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
             {userCandidates.length === 0 ? (
               <p className="text-xs italic text-text-tertiary">{t("pm.noMembers")}</p>
             ) : (
-              <ul className="space-y-1">
-                {userCandidates.map((u) => (
-                  <li
-                    key={u.user_id}
-                    className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
-                  >
-                    <UserAvatar
-                      displayName={u.displayName}
-                      avatarUrl={u.avatarUrl}
-                      builtinAvatarId={u.builtinAvatarId}
-                      size={24}
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-xs text-text ">{u.displayName}</div>
-                      <div className="truncate text-10 text-text-tertiary">{u.user_id}</div>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={busyId === u.user_id}
-                      onClick={() => handleAdd(u.user_id, "user")}
-                      className="shrink-0 rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-40  dark:hover:bg-[var(--color-accent)]/15"
-                    >
-                      {t("pm.addMember")}
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <ul className="space-y-1">{userCandidates.map(renderCandidate)}</ul>
             )}
             </>
           )}
