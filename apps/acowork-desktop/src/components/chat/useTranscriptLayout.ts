@@ -25,8 +25,11 @@ import type { ChatMessageRow } from "../../stores/chatSessionStore";
 import {
   blockSeqs,
   buildTranscriptItems,
+  latestAnswerOf,
   type TranscriptItem,
 } from "./chatTranscriptGroups";
+import { estimateRunItemHeight } from "./transcriptHeight";
+import { useChatBlocks } from "../../stores/chatBlockStore";
 
 export interface TranscriptLayoutView {
   /** `buildTranscriptItems`'s output: the ordered items plus the seq→key index. */
@@ -48,10 +51,15 @@ export interface TranscriptLayoutView {
  * @param rows the loaded window, oldest first.
  * @param scopeKey the conversation the rows belong to (chat session id, group
  *   id): part of every key, because heights are cached per key process-wide.
+ * @param chatId the chat the window belongs to — the address a block read is
+ *   participation-checked against. The layout reads every run block in the
+ *   window through it, which is what makes the height estimates true instead of
+ *   optimistic (see `virtualEstimate`).
  */
 export function useTranscriptLayout(
   rows: ChatMessageRow[],
   scopeKey: string,
+  chatId: string,
 ): TranscriptLayoutView {
   const rowKeyOf = useCallback(
     (r: ChatMessageRow) => `${scopeKey}:${r.seq}`,
@@ -93,17 +101,37 @@ export function useTranscriptLayout(
       item.kind === "run" ? blockKeyOf(item) : rowKeyOf(item.row),
     [blockKeyOf, rowKeyOf],
   );
-  // A block starts folded: its title banner plus the answer body under it.
-  // Neither height is knowable from the rows alone (the answer comes from the
-  // block read), so this stays a coarse guess — round lines as the upper bound of
-  // what the fold would have cost. `measureElement` corrects it on first mount and
-  // the shell's cache keeps the real height after.
+  // Every run block in the window is READ here, not by each block as it mounts.
+  //
+  // Why the layout does it: a virtualized transcript sizes its unmounted rows
+  // from estimates, and a window is mostly unmounted rows — so an estimate that
+  // is off by 5x IS the pane's total height. Reading the blocks up front makes
+  // two things true at once: the estimate below can use the run's real answer
+  // (the only part big enough to matter), and a block that scrolls into view
+  // already holds its content, so it mounts at its final height instead of
+  // growing under the reader a frame later. The store batches per chat and caps
+  // a request (`MAX_REFS_PER_READ`); this hook asks once per window.
+  const runRefs = useMemo(
+    () =>
+      items.flatMap((item) =>
+        item.kind === "run" ? item.rounds.map((round) => round.ref) : [],
+      ),
+    [items],
+  );
+  const blockEntries = useChatBlocks(chatId, runRefs);
+  // A block starts folded: its title banner plus the answer body under it. The
+  // answer's real text (when the read above has it) decides how much of the fold
+  // is used; the derivation lives in `./transcriptHeight` so it can be read and
+  // tested on its own — this hook only says which item kind gets which number.
   const virtualEstimate = useCallback(
     (item: TranscriptItem) =>
       item.kind === "run"
-        ? 64 + 34 * Math.min(item.rounds.length, 3)
+        ? estimateRunItemHeight({
+            answerBody: latestAnswerOf(item, blockEntries),
+            pendingAsk: item.pendingAsk !== undefined,
+          })
         : estimateRow(item.row),
-    [estimateRow],
+    [estimateRow, blockEntries],
   );
   const virtualAttrs = useCallback(
     (item: TranscriptItem) => ({

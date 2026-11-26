@@ -1017,7 +1017,7 @@ export function GroupChatPanel() {
     virtualEstimate,
     virtualAttrs,
     seqsByItem,
-  } = useTranscriptLayout(rows, activeGroupId ?? "");
+  } = useTranscriptLayout(rows, activeGroupId ?? "", activeGroupId ?? "");
   // The router's open question, and the run it asks about (ADR-106 revision
   // 2026-11-11): it is docked at the bottom of this surface, and the run wears
   // a badge so the question still has a subject.

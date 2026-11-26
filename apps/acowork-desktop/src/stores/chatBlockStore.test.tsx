@@ -243,3 +243,35 @@ describe("the round_state event reaches the block store", () => {
     expect(after).toBe(before);
   });
 });
+
+describe("one request's worth per flush", () => {
+  /** `MAX_REFS_PER_READ` in the store: the refs ride the query string, so a
+   *  window's worth cannot go out in one line. */
+  const MAX = 24;
+
+  it("slices a whole-window request into request-sized reads", async () => {
+    // What the layout prefetch asks for: every run block in the window at once,
+    // which on a deep group history is far more refs than a URL may carry.
+    const refs = Array.from({ length: MAX * 2 }, (_, i) => `i-1|s-${i}|r:1`);
+    renderHook(() => useChatBlocks(CHAT, refs));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(BATCH_SLACK * 4);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]![1]).toHaveLength(MAX);
+    expect(fetchMock.mock.calls[1]![1]).toHaveLength(MAX);
+    // Every ref asked for was read exactly once, in two slices — nothing dropped.
+    const read = fetchMock.mock.calls.flatMap((c) => c[1]);
+    expect([...read].sort()).toEqual([...refs].sort());
+  });
+
+  it("keeps a short request in one read", async () => {
+    const refs = Array.from({ length: 5 }, (_, i) => `i-1|s-${i}|r:1`);
+    renderHook(() => useChatBlocks(CHAT, refs));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(BATCH_SLACK * 4);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![1]).toHaveLength(5);
+  });
+});

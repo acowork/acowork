@@ -690,7 +690,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     virtualEstimate,
     virtualAttrs,
     seqsByItem,
-  } = useTranscriptLayout(rows, sessionId);
+  } = useTranscriptLayout(rows, sessionId, sessionId);
   const isBubble = (item: TranscriptItem | undefined) =>
     item?.kind === "row" && item.row.kind === "agent_message";
   // The router's open question, and the run it asks about (ADR-106 revision

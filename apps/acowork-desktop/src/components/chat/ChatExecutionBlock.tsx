@@ -59,7 +59,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { BlockCard, ChatBlockEntry, RoundProjection } from "../../lib/chatBlocks";
-import type { RunBlock } from "./chatTranscriptGroups";
+import { latestAnswerOf, type RunBlock } from "./chatTranscriptGroups";
 import { useChatBlockStore, useChatBlocks } from "../../stores/chatBlockStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useChatSessionStore } from "../../stores/chatSessionStore";
@@ -470,13 +470,14 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   // not spoken yet, so the newest round WITH an answer is the run's latest
   // utterance. It re-renders whenever the block read lands a newer answer — the
   // block store's re-read of a `pending` ref is what makes that live.
-  const latestAnswer = useMemo(() => {
-    for (let i = block.rounds.length - 1; i >= 0; i -= 1) {
-      const body = entries[block.rounds[i]!.ref]?.projection?.answer?.body.trim();
-      if (body) return body;
-    }
-    return "";
-  }, [block, entries]);
+  // The rule itself lives beside the block type: the transcript estimates this
+  // block's height from the same answer (`transcriptHeight`), and two spellings
+  // of "which round is the run's last word" would let a block paint one body and
+  // reserve room for another.
+  const latestAnswer = useMemo(
+    () => latestAnswerOf(block, entries),
+    [block, entries],
+  );
 
   return (
     // The run the router is asking about wears a light accent wash and a
