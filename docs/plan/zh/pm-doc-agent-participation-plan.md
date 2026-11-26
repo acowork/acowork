@@ -1,12 +1,12 @@
-# PM / Doc 参与契约 — 原生 Agent 改造计划（Product / QA / SSE / Architect）
+# PM / Doc 参与契约 — 原生 Bot 改造计划（Product / QA / SSE / Architect）
 
 > 版本：**v1.3（T5 实施期修订）** | 日期：2026-11-11
 >
-> 关联设计：[`docs/design/zh/32-pm-doc-mcp-tool-surface-for-agents.md`](../../design/zh/32-pm-doc-mcp-tool-surface-for-agents.md)（PM / Docs 两个 agent 的工具面契约，本文只做**其余原生 agent 的参与侧**）
-> 前序计划：[`pm-doc-mcp-agent-integration-plan.md`](pm-doc-mcp-agent-integration-plan.md)（P3 已交付 PM / Docs 两个 agent）
+> 关联设计：[`docs/design/zh/32-pm-doc-mcp-tool-surface-for-agents.md`](../../design/zh/32-pm-doc-mcp-tool-surface-for-agents.md)（PM / Docs 两个 bot 的工具面契约，本文只做**其余原生 bot 的参与侧**）
+> 前序计划：[`pm-doc-mcp-agent-integration-plan.md`](pm-doc-mcp-agent-integration-plan.md)（P3 已交付 PM / Docs 两个 bot）
 > 关联 ADR：[`ADR-029`](../../adr/zh/ADR-029-agent-tools-persistence-and-toggle.md)（工具 opt-in）· [`ADR-069`](../../adr/zh/ADR-069-mcp-tool-level-optin.md)（MCP 工具级 opt-in）· [`ADR-073`](../../adr/zh/ADR-073-agent-instance-identity-decomposition.md)（instance_id 身份）· [`ADR-104`](../../adr/zh/ADR-104-agent-manifest-declaration-surface.md)（manifest 声明面 / `[[mcp_servers]].tools` 白名单）· [`ADR-106`](../../adr/zh/ADR-106-chat-execution-reference-projection.md)（任务作者须能在项目群里发声）
 >
-> **一句话**：PM 与 Docs 两个 agent 已经把 `acowork-pm` / `acowork-doc` 用到了工具面上；**另外 4 个原生 agent 的 skills 至今在写 `file_write`——一个它们 manifest 里根本没声明的工具**。本文把这 4 个 agent 按「不管理项目、只参与项目」的契约改造：承接任务、发布交付物、提交结果、留下交接点。
+> **一句话**：PM 与 Docs 两个 bot 已经把 `acowork-pm` / `acowork-doc` 用到了工具面上；**另外 4 个原生 bot 的 skills 至今在写 `file_write`——一个它们 manifest 里根本没声明的工具**。本文把这 4 个 bot 按「不管理项目、只参与项目」的契约改造：承接任务、发布交付物、提交结果、留下交接点。
 
 ---
 
@@ -23,8 +23,8 @@ grep -c 'name = "file_write"' agents/{product-manager,quality-assurance,senior-e
 
 | # | 事实 | 证据 |
 |---|---|---|
-| **E1** | 4 个 agent 的 23 个 skill 里有 **41 行**写「save with `file_write`」，而 4 个 manifest **都没声明 `file_write`**（只有 `file_edit`）。按 ADR-029，未声明的工具不会出现在 `agent_tools.json` 的启用集里 → 这 41 句是**不可执行的指令** | `agents/*/manifest.toml` `[[tools]]` |
-| **E2** | 同一批 skill 声明了 **46 行** `file_read`，同样一个都没声明 → `validate_graph` 在打包/安装期只会给出 warning（[manifest.rs:950](../../../core/acowork-core/src/manifest.rs#L950)），agent 实际退化成用 `bash` / `shell` 读文件 | 同上 |
+| **E1** | 4 个 bot 的 23 个 skill 里有 **41 行**写「save with `file_write`」，而 4 个 manifest **都没声明 `file_write`**（只有 `file_edit`）。按 ADR-029，未声明的工具不会出现在 `agent_tools.json` 的启用集里 → 这 41 句是**不可执行的指令** | `agents/*/manifest.toml` `[[tools]]` |
+| **E2** | 同一批 skill 声明了 **46 行** `file_read`，同样一个都没声明 → `validate_graph` 在打包/安装期只会给出 warning（[manifest.rs:950](../../../core/acowork-core/src/manifest.rs#L950)），bot 实际退化成用 `bash` / `shell` 读文件 | 同上 |
 | **E3** | Product / QA 的 manifest 有 `hosted = "pm"` 但**无 tool 白名单**（= 「没有意见」，激活后全开，与 ADR-104 「白名单就是初始启用集」的注释自相矛盾）；SSE / Architect **完全没有 `pm` / `doc` 声明** | `agents/product-manager-agent/manifest.toml`、`.../software-architect-agent/manifest.toml` |
 | **E4** | 线上项目 `p-66e68d1a`（ACowork）：**56 个任务 / 12 个成员 / `项目管理/**` 下 0 个文档**。已完成的调研任务 `t-bcb6215e` 的交付物是 `E:\projects\tranxon\ACoworkAgentHub\docs\research\*.md`（本地路径 + commit），且**任务描述本身**就要求「写成文件、路径写进结果文本」 | `pm_get_project` / `doc_list` / `pm_get_task` 实测 |
 
@@ -42,7 +42,7 @@ grep -c 'name = "file_write"' agents/{product-manager,quality-assurance,senior-e
 
 ## 2. 设计原则
 
-1. **不管理，只参与。** 规划、拆解、排期、派工、跟踪是 PM agent 的职责。参与方只有四步：**承接 → 执行 → 发布 → 汇报**。边界不是文案自律，而是**工具白名单**（§5.2：不给 `pm_update_task` / `pm_create_project` / `pm_add_project_member` / `pm_list_agents`）。
+1. **不管理，只参与。** 规划、拆解、排期、派工、跟踪是 PM bot 的职责。参与方只有四步：**承接 → 执行 → 发布 → 汇报**。边界不是文案自律，而是**工具白名单**（§5.2：不给 `pm_update_task` / `pm_create_project` / `pm_add_project_member` / `pm_list_agents`）。
 2. **机制进 skill，规则进 prompt。** prompt 常驻上下文且被压缩吃掉；skill 按需加载、压缩后可重新 `load_skill`。所以 prompt 只放 ~34 行规则 + 一行指针，完整机制放 `project-participation`（与设计 32 §1.2 的同一个理由）。
 3. **不复述工具列表。** runtime 已经注入工具与 schema；写进文的是**schema 里看不出来的 5 条机制**（§3.3）。
 4. **不造 id、不造路径。** `project_id` / `task_id` / `doc_path` 一律从工具响应读回，路径只从 `pm_get_project().doc_path` 取，不从标题推导。
@@ -69,7 +69,7 @@ graph LR
     G -.-> K["pending_review<br/>+ request_id"]
 ```
 
-### 3.2 system prompt 增量（4 个 agent 共用，约 34 行）
+### 3.2 system prompt 增量（4 个 bot 共用，约 34 行）
 
 内容即共识的前文草稿，落地时只把 `{area}` 行按 §4.2 替换。要素与外显程度：
 
@@ -87,30 +87,30 @@ graph LR
 
 | # | 机制 | 代码出处 | 不写的后果 |
 |---|---|---|---|
-| M1 | agent 建的任务 `review_status=pending`，人未批准前 `claim` 必 409 | [tree.rs `ensure_creation_approved`](../../../core/acowork-pm/src/store/tree.rs) | 被派工后一直重试 claim |
+| M1 | bot 建的任务 `review_status=pending`，人未批准前 `claim` 必 409 | [tree.rs `ensure_creation_approved`](../../../core/acowork-pm/src/store/tree.rs) | 被派工后一直重试 claim |
 | M3 | `in_progress → done` 非法，必须经 `submitted`；`cancelled` 零出边 | [tree.rs `validate_transition`](../../../core/acowork-pm/src/store/tree.rs) | 撞 `invalid_state_transition` 后瞎试 |
 | M6 | 同一个 `doc_write`：自己建的文档直接生效，别人的文档返回 `pending_review` + `request_id`；结构操作只有创建人可做 | [policy.rs `gate_write` / `gate_owner`](../../../core/acowork-doc/src/service/policy.rs) · [acl.rs](../../../core/acowork-doc/src/service/acl.rs) | 把「提案」当失败重投，或盲 `overwrite` 覆盖他人改动 |
-| M7 | 创建/自领都要求调用方是项目成员（owner 或 member） | [tree.rs `ensure_assignee_is_member` / `ensure_author_has_voice`](../../../core/acowork-pm/src/store/tree.rs#L620) | 对着目录里存在的 agent 建单，被 `AuthorNotProjectMember` 挡死且不自解释 |
+| M7 | 创建/自领都要求调用方是项目成员（owner 或 member） | [tree.rs `ensure_assignee_is_member` / `ensure_author_has_voice`](../../../core/acowork-pm/src/store/tree.rs#L620) | 对着目录里存在的 bot 建单，被 `AuthorNotProjectMember` 挡死且不自解释 |
 | M-新 | **`assignee` 是 instance UUID**：同包双实例（`SSE.Kevin` / `SSE.Cassie`）互不相认；自己被重装后 UUID 变化，旧任务无人可领 | [tools.rs `ensure_assignee`](../../../core/acowork-pm/src/mcp/tools.rs#L166) | 把 `forbidden` 当 bug 重试，或建重复任务绕过 |
 
 ---
 
-## 4. 逐 agent 改造
+## 4. 逐 bot 改造
 
 ### 4.1 范围
 
-| Agent | 包名 | 改 prompt | 新增 skill | 改既有 skill | 改 manifest |
+| Bot | 包名 | 改 prompt | 新增 skill | 改既有 skill | 改 manifest |
 |---|---|---|---|---|---|
 | Product | `com.acowork.product-manager` | ✅ | `project-participation` | 7 | ✅ |
 | QA | `com.acowork.quality-assurance` | ✅ | `project-participation` | 6 | ✅ |
 | SSE | `com.acowork.senior-engineer` | ✅ | `project-participation` | 6 | ✅ |
 | Architect | `com.acowork.software-architect` | ✅ | `project-participation` | 4 | ✅ |
 | **合计** | — | **4** | **4** | **23** | **4** |
-| ~~Ponytail~~ | `github.ponytail` | ❌ **排除**：第三方开源 agent（作者 DietrichGebert），persona（「最好的代码是没写的代码」/「不要没人要求的样板」）与「留痕、发布、提交」天然张力，改造它会等于改写别人的产品定位 | | | |
+| ~~Ponytail~~ | `github.ponytail` | ❌ **排除**：第三方开源 bot（作者 DietrichGebert），persona（「最好的代码是没写的代码」/「不要没人要求的样板」）与「留痕、发布、提交」天然张力，改造它会等于改写别人的产品定位 | | | |
 
 ### 4.2 角色差异（只差 3 行，其余共用）
 
-| Agent | `{area}` | 交付物 | 特化规则 |
+| Bot | `{area}` | 交付物 | 特化规则 |
 |---|---|---|---|
 | Product | `验收/` `调研/` | 验收报告、用户调研、PRD 提案、发布计划 | PM 的 `PRD.md` 只读；要改就 `doc_write`（→ `pending_review`），把 `request_id` 写进 `pm_add_activity` |
 | QA | `测试/` | 测试计划、测试报告、回归报告、缺陷证据 | 缺陷用 `pm_create_task(type="bug")`（提交后**必过人工验收**），**不指派**，疑似责任人写进 activity |
@@ -139,7 +139,7 @@ doc_list_requests  doc_check_request
 mcp_memory__memory_recall  mcp_memory__memory_store
 ```
 
-**刻意不给**：`doc_mkdir`（见 D-7）、`doc_remove` / `doc_rmdir`（删除与目录裁剪是 owner 或 Docs agent 的事）、`pm_update_task` / `pm_create_project` / `pm_update_project` / `pm_add_project_member` / `pm_list_agents`（管理面）。
+**刻意不给**：`doc_mkdir`（见 D-7）、`doc_remove` / `doc_rmdir`（删除与目录裁剪是 owner 或 Docs bot 的事）、`pm_update_task` / `pm_create_project` / `pm_update_project` / `pm_add_project_member` / `pm_list_agents`（管理面）。
 
 ### 4.4 23 个既有 skill 的统一改法（每个 2–3 行，不新增散文）
 
@@ -153,7 +153,7 @@ mcp_memory__memory_recall  mcp_memory__memory_store
 
 **`file_write` 只保留在「产物是仓库源码」的 3 个 skill**（判定标准：该 skill 的交付物是仓库里的代码/测试文件，不是文档）：
 
-| Agent | skill | 理由 |
+| Bot | skill | 理由 |
 |---|---|---|
 | SSE | `debugging` | 修复落在源码 |
 | SSE | `refactoring` | 改造落在源码 |
@@ -189,7 +189,7 @@ mcp_memory__memory_recall  mcp_memory__memory_store
 | 项 | 动作 |
 |---|---|
 | 重打包 | `./dev/common/build-agent.ps1 -All`，但**只有 5 个包的字节允许变化**：4 个参与方 + `project-manager`（D-2 联动的直接后果——改了 `project-setup` 不重打包等于没改）。`github.ponytail` 与 `document-manager` 的 `.agent` 必须**逐字节不变**，作为打包守卫断言 |
-| 设计文档 | 设计 32 新增 **§6.3「其余原生 Agent：参与契约」**（一句话 + 指向本文），并把 §5.5 词汇表改成 §6 的扩展版 |
+| 设计文档 | 设计 32 新增 **§6.3「其余原生 Bot：参与契约」**（一句话 + 指向本文），并把 §5.5 词汇表改成 §6 的扩展版 |
 | 词汇表契约测试 | `acowork_core::doc_layout` 增加 5 个 area 常量 + 断言（PM 渲染、Doc 侧测试引用同一常量） |
 | en 版 | 设计 32 **当前没有 en 版本**（`docs/design/en/` 从 31 跳到 33）——本次不补全整篇，只在 §6.3 落地时同步补该节，并把「32 缺 en」记为独立缺口 |
 
@@ -216,11 +216,11 @@ mcp_memory__memory_recall  mcp_memory__memory_store
 
 | # | 缺口 | 证据 | 建议 | 优先级 |
 |---|---|---|---|---|
-| **G1** | **无法自领任务**：未指派的任务 `pm_claim_task` 直接 `forbidden: task has no assignee`；`pm_submit_task` / `pm_update_task` 同样要求 `actor == assignee`；`pm_create_task` 不解析 `assignee="me"`（只有 `pm_list_tasks` 解析，且代码注释直言 agent **读不到自己的 instance id**）。**实测更严重**：`pm_update_task` 连**创建者 + 项目 owner** 都拒（同一 `ensure_assignee`），即未指派的单对 agent **完全冻结**——连改一个错字都做不到 | [tools.rs:166](../../../core/acowork-pm/src/mcp/tools.rs#L166)、[:956](../../../core/acowork-pm/src/mcp/tools.rs#L956)；实测：PM 建 G1 总卡时设错父级，两次修复调用全被拒 | ① `pm_create_task` 支持 `assignee="me"`；② 允许**项目成员** claim 未指派任务（同一审批 + 依赖闸）；③ 孤儿任务（重装后 UUID 变化）需要 owner 级 `pm_update_task(assignee=…)` 收养；④ **创建者可改自己任务的非状态字段**（标题/描述/父级），状态机路径仍受限 | **P0** |
+| **G1** | **无法自领任务**：未指派的任务 `pm_claim_task` 直接 `forbidden: task has no assignee`；`pm_submit_task` / `pm_update_task` 同样要求 `actor == assignee`；`pm_create_task` 不解析 `assignee="me"`（只有 `pm_list_tasks` 解析，且代码注释直言 bot **读不到自己的 instance id**）。**实测更严重**：`pm_update_task` 连**创建者 + 项目 owner** 都拒（同一 `ensure_assignee`），即未指派的单对 bot **完全冻结**——连改一个错字都做不到 | [tools.rs:166](../../../core/acowork-pm/src/mcp/tools.rs#L166)、[:956](../../../core/acowork-pm/src/mcp/tools.rs#L956)；实测：PM 建 G1 总卡时设错父级，两次修复调用全被拒 | ① `pm_create_task` 支持 `assignee="me"`；② 允许**项目成员** claim 未指派任务（同一审批 + 依赖闸）；③ 孤儿任务（重装后 UUID 变化）需要 owner 级 `pm_update_task(assignee=…)` 收养；④ **创建者可改自己任务的非状态字段**（标题/描述/父级），状态机路径仍受限 | **P0** |
 | **G2** | 参与方产出物在树下无位置（同 §6） | 设计 32 §5.5 | 扩 5 个 area + PM bootstrap + 契约测试 | **P0**（文案侧已按 §6 写，需 PM 联动） |
-| **G3** | 派工 playbook 没有 doc 腿：`build_assignment_brief` 明说「do the work in the repository attached to this conversation」「text=<result summary>」——它是 prompt **之后**注入的最高显著度指令，对所有 agent（含用户自建）生效 | [dispatch.rs:52](../../../core/acowork-pm/src/dispatch.rs#L52) | 加一步：发布到 `pm_get_project.doc_path` 并在 submit 文本带 path；没有 path 就说明没有，而不是落本地文件。**改一个字符串，覆盖全平台** | **P0**（成本最低、收益最广） |
+| **G3** | 派工 playbook 没有 doc 腿：`build_assignment_brief` 明说「do the work in the repository attached to this conversation」「text=<result summary>」——它是 prompt **之后**注入的最高显著度指令，对所有 bot（含用户自建）生效 | [dispatch.rs:52](../../../core/acowork-pm/src/dispatch.rs#L52) | 加一步：发布到 `pm_get_project.doc_path` 并在 submit 文本带 path；没有 path 就说明没有，而不是落本地文件。**改一个字符串，覆盖全平台** | **P0**（成本最低、收益最广） |
 | **G4** | `pm_submit_task` 无产物字段：`attachment_ids` 只能由人在桌面上传，doc path 只活在自由文本里，桌面任务面板无法把交付物做成链接 | `pm_submit_task` manifest | 增加 `doc_refs: [doc_id\|path]`，doc 侧校验存在性，面板渲染成链接 | P1 |
-| **G5** | `pending_review` 无面向 agent 的回执、无 push：`acowork/doc/tree/changed` 只是 UI 事件 | [mqtt_publisher.rs](../../../core/acowork-doc/src/mqtt_publisher.rs) | 短期：skill 里固化为「`request_id` 写进 `pm_add_activity`」；中期：审批落地时向发起方发一条 intent | P1 |
+| **G5** | `pending_review` 无面向 bot 的回执、无 push：`acowork/doc/tree/changed` 只是 UI 事件 | [mqtt_publisher.rs](../../../core/acowork-doc/src/mqtt_publisher.rs) | 短期：skill 里固化为「`request_id` 写进 `pm_add_activity`」；中期：审批落地时向发起方发一条 intent | P1 |
 | **G6** | `pm_list_tasks` 无 `updated_since`：「我上次之后变了什么」只能全量重读 | manifest | 加时间过滤 | P2 |
 | **G7** | `type` 枚举三处不一致：创建/更新可传 `chore`·`milestone`，筛选只能传 `epic`·`checkpoint`（筛不出 chore，却筛得出从来建不了的 epic） | `pm_list_tasks` vs `pm_create_task` / `pm_update_task` | 归并一套枚举（D2 同类缺陷） | P2 |
 
@@ -233,12 +233,12 @@ mcp_memory__memory_recall  mcp_memory__memory_store
 | S1 | 人派给 SSE 一个「出技术方案」任务 | `pm_claim_task` 成功 → `doc_write` 落 `项目管理/{pid}/技术方案/*.md` → `pm_submit_task` 的 text 里有该路径 → 人可在文档库打开 |
 | S2 | 人派给 QA 一个「回归验证」任务，验证失败 | QA 建 `type="bug"` 任务（**不指派**）+ `测试/回归报告.md` → 提交后停在 `submitted`（等人工验收），QA 明确说出「等验收」而非「已完成」 |
 | S3 | Product 想改 PM 的 `PRD.md` | `doc_write` 返回 `pending_review` + `request_id`；Product 把 `request_id` 写进 `pm_add_activity`，**不重投、不覆盖** |
-| S4 | Architect 收到一个指派给孪生实例的任务（`SSE.Kevin` vs `SSE.Cassie`） | `pm_claim_task` 返回 `forbidden`；agent 报告给人并停止，**不建重复任务** |
-| S5 | 分支：agent 没被邀请进项目 | `pm_create_task` 返回 `AuthorNotProjectMember`；agent 用 `intent_send` 找 PM 或直接告诉人，**不绕道**建本地文件 |
+| S4 | Architect 收到一个指派给孪生实例的任务（`SSE.Kevin` vs `SSE.Cassie`） | `pm_claim_task` 返回 `forbidden`；bot 报告给人并停止，**不建重复任务** |
+| S5 | 分支：bot 没被邀请进项目 | `pm_create_task` 返回 `AuthorNotProjectMember`；bot 用 `intent_send` 找 PM 或直接告诉人，**不绕道**建本地文件 |
 
 文案侧的自动化检查（可进 CI，不需要活体服务）。**两种用途，不要混淆**：① 当作未来的 CI 守卫；② **当作本批卡（T1–T4）的兜底回归闸** —— 它们跑红就意味着有卡照错口径落了地，代价是**返工三张卡 + 一次重打包**，不是事故。断言是最后一道网，不是第一道：**卡描述错了，网再密也已经晚了**。
 
-1. `file_write` **只允许出现在 3 个 (agent, skill) 对**：`senior-engineer/{debugging,refactoring,testing}`（§4.4）。名单写成 CI 常量，出现第 4 个即红。
+1. `file_write` **只允许出现在 3 个 (bot, skill) 对**：`senior-engineer/{debugging,refactoring,testing}`（§4.4）。名单写成 CI 常量，出现第 4 个即红。
 2. `doc_mkdir` **不得出现在 4 个参与方的 `tool_deps` 与白名单**（D-7）。这是 T2 描述里那句「必须正好 19 项」的兜底：照 19 项做会在 T5 变红。
 3. 每个 skill 的 `tool_deps` ⊆ manifest 的 `[[tools]] ∪ [[mcp_servers]].tools`（把 `validate_graph` 的 warning 变成测试断言）。
 4. 4 个 manifest 的 `capabilities.*.skills` 都能在包内解析（既有 `validate_capability_skills` 已是 error）。
@@ -266,11 +266,11 @@ G1 / G3 属 core 改动，单独一张计划（建议排在 T1 之前或并行�
 
 | 项 | 原因 |
 |---|---|
-| Ponytail（`github.ponytail`） | 第三方开源 agent，persona 与「留痕 / 发布 / 提交」有张力；已确认不改 |
+| Ponytail（`github.ponytail`） | 第三方开源 bot，persona 与「留痕 / 发布 / 提交」有张力；已确认不改 |
 | `document-manager` 的 `document-collection` skill 里残留的 `file_read`/`file_write` | 属前序计划已交付范围，本次不回头改 |
 | 设计 32 的 en 全篇（含新 §6.3 节） | **独立缺口**：`docs/design/en/` 从 31 跳到 33。T5 不补全、也不补 §6.3 节——单独立卡跟进；缺口记录只在这一行（设计 32 的 v1.10 变更记录只指向本行，不另写半份） |
 | G1–G7 的代码实现 | §7，单独排期 |
-| 用户自建 agent | prompt 覆盖不到；G3 的 dispatch 文案是唯一能覆盖它们的杠杆 |
+| 用户自建 bot | prompt 覆盖不到；G3 的 dispatch 文案是唯一能覆盖它们的杠杆 |
 
 ---
 
@@ -283,7 +283,7 @@ G1 / G3 属 core 改动，单独一张计划（建议排在 T1 之前或并行�
 | D-3 | 参与方建单**不指派**（`pm_create_task` 无 `assignee`），且必须在 activity 里写明「此单等人指派」 | 指派需要成员校验 + 孪生实例 UUID，参与方没有这份名册的治理权。**代价（实测）**：未指派的任务连创建者都改不动（G1），所以在 G1-a 落地前，这类单只有人类能处理——它是一份「交给人的报告」，不是一张能自己推进的卡。G1-a 之后优先走 `assignee="me"` 自领 |
 | D-4 | 机制进 skill、规则进 prompt，prompt 增量 ≤ 40 行 | 常驻上下文成本 vs 抗压缩；同时满足「节省 token」要求 |
 | D-5 | 不给 `doc_remove` / `doc_rmdir` | 删除是 owner 的权利；参与方要下架自己的半成品，用 `doc_move` 换名或找人 |
-| D-6 | 4 份 `project-participation` 同名同构，只特化 `{area}` 与 3 行角色规则 | 人只需学一次；agent 之间可互相引用同一个 skill 名 |
+| D-6 | 4 份 `project-participation` 同名同构，只特化 `{area}` 与 3 行角色规则 | 人只需学一次；bot 之间可互相引用同一个 skill 名 |
 | D-7 | **`doc_mkdir` 也不给参与方** | 与 D-2 同一理由：给了 `doc_mkdir` 就不是「靠工具强制边界」而是「靠 skill 文案自律」——而文案会被压缩吃掉。area 缺失 → `pm_add_activity` 报缺口，PM 补树。代价：多一次往返 |
 | D-8 | 重打包是 **5 个包**（4 参与方 + `project-manager`），不是 4 个 | 改了 PM 的 `project-setup` 不重打包等于没改。守卫：`github.ponytail` 与 `document-manager` 的 `.agent` 逐字节不变 |
 
@@ -294,6 +294,6 @@ G1 / G3 属 core 改动，单独一张计划（建议排在 T1 之前或并行�
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v1.3 | 2026-11-11 | §10 的「设计 32 的 en 全篇」行改为独立缺口：T5 落地 §6.3 时不补 en（既不全篇也不补该节），单独立卡跟进；缺口记录只留本行一份（设计 32 v1.10 变更记录只指向本行）。T5 契约测试按任务卡落地 3 条（§8 的 1/3/4 条），§8 第 2 条（`doc_mkdir` 禁现）未进测试——现状 grep 核验为干净（4 参与方 `tool_deps` 与白名单均无 `doc_mkdir`），留作后续 |
-| v1.0 | 2026-11-09 | 首版：证据（E1–E4）、参与契约、4 agent 改造范围、词表扩展、G1–G7 缺口、验收场景、任务卡 |
+| v1.0 | 2026-11-09 | 首版：证据（E1–E4）、参与契约、4 bot 改造范围、词表扩展、G1–G7 缺口、验收场景、任务卡 |
 | v1.2 | 2026-11-09 | §8 断言定位改为双用途（未来 CI 守卫 + 本批 T1–T4 的兜底回归闸），并明确「断言是最后一道网，不是第一道：卡描述错了，网再密也已晚了」。起因：本文件 v1.1 已含「`doc_mkdir` 不得出现在参与方 `tool_deps`」的断言，故「19 项不会被任何测试发现」的判断是错的——修正为「现有测试没有，T5 的计划断言才会红，且红在 T2–T4 已完成之后」 |
 | v1.1 | 2026-11-09 | 按 PM 建卡反馈收敛 5 项：G2 由 T4+T5 覆盖（不单独立卡）；重打包改 5 个包（D-8）；`doc_mkdir` 从参与方白名单删除（D-7）；`file_write` 白名单点名为 3 个 SSE skill 且 Architect 不声明；D-3 补「未指派单只有人类能动」的实测代价，G1 追加「创建者可改非状态字段」 |

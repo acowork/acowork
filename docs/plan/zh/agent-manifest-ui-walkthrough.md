@@ -1,6 +1,6 @@
-# Agent manifest 改造 —— UI 走查稿
+# Bot manifest 改造 —— UI 走查稿
 
-> 配套方案：[agent-manifest-declaration-plan.md](agent-manifest-declaration-plan.md)（§7 推荐 MCP 交互、§8 Create Agent 5 步）
+> 配套方案：[agent-manifest-declaration-plan.md](agent-manifest-declaration-plan.md)（§7 推荐 MCP 交互、§8 Create Bot 5 步）
 > 本文只描述**屏幕、状态、文案、交互**，不含实现细节。文案以 zh-CN 为准，5 个 locale 同步。
 
 ---
@@ -97,20 +97,20 @@
 
 ### A.5 骨架 / 加载
 
-面板首屏 `recommended` 尚未返回时，分组标题显示为「Agent 包建议的 MCP …」，行不渲染（不用骨架屏——返回通常在 100ms 内，闪骨架更吵）。
+面板首屏 `recommended` 尚未返回时，分组标题显示为「Bot 包建议的 MCP …」，行不渲染（不用骨架屏——返回通常在 100ms 内，闪骨架更吵）。
 
 ### A.6 安装去向提示（必须写进 UI）
 
 从本面板安装的服务器进入**本机共享的 MCP 目录**，因此：
 
-- 安装成功后，该行右侧出现一行 text-9 提示：「已加入本机 MCP 目录；其他 Agent 也能看到，但只在本 Agent 激活。」
-- 分组说明（标题下方一行）：「由 Agent 包声明、需要你确认的 MCP 服务器。安装后进入本机 MCP 目录。」
+- 安装成功后，该行右侧出现一行 text-9 提示：「已加入本机 MCP 目录；其他 Bot 也能看到，但只在本 Bot 激活。」
+- 分组说明（标题下方一行）：「由 Bot 包声明、需要你确认的 MCP 服务器。安装后进入本机 MCP 目录。」
 
-不写这条提示，用户会在别的 Agent 工具面板里发现"凭空多出来的服务器"。
+不写这条提示，用户会在别的 Bot 工具面板里发现"凭空多出来的服务器"。
 
 ---
 
-## 屏 B：Agent 列表卡片
+## 屏 B：Bot 列表卡片
 
 ```
 ┌──────────────────────────┐
@@ -127,13 +127,13 @@
 
 ## 屏 C：创建成功后的落点
 
-`onCreated` 回调里：右侧面板切到「工具」标签；若该 Agent 的 `recommended` 非空，展开该分组并滚动到可见区。否则保持默认标签（对话）。
+`onCreated` 回调里：右侧面板切到「工具」标签；若该 Bot 的 `recommended` 非空，展开该分组并滚动到可见区。否则保持默认标签（对话）。
 
 一次性动作，不写 localStorage —— 用户自己换了标签页就不再干预。
 
 ---
 
-## 屏 D：Create Agent 向导（5 步）
+## 屏 D：Create Bot 向导（5 步）
 
 ### D.0 步骤条
 
@@ -179,7 +179,7 @@ Agent ID *            com.example.myagent
 ```
 
 - 每一行右侧显示平台兜底值（灰字），让"空"有明确含义。
-- 温度用滑杆（与 Agent 设置面板一致），其余为数字输入。
+- 温度用滑杆（与 Bot 设置面板一致），其余为数字输入。
 - 每个输入下方一行 text-9 说明（复用 `agentSetup.*Desc` 文案）。
 - 允许全部留空 → 预览里不出现 `[config]` 段。
 
@@ -240,7 +240,7 @@ Agent ID *            com.example.myagent
 
 - 技能行新增一行小字「依赖工具：…」；依赖未被第 3 步覆盖时追加黄色「未在工具/MCP 中声明（不阻断）」。
 - capability 行三个字段：动作名（`[a-z0-9_]` 校验）、描述、关联技能（多选：仅本步已上传的技能）。
-- 空态：「未声明对外动作。仅在希望其他 Agent 调用它时才需要。」
+- 空态：「未声明对外动作。仅在希望其他 Bot 调用它时才需要。」
 - 高级折叠「输入/输出 schema（JSON）」→ 两个 textarea，内容必须是合法 JSON。
 
 `下一步` 可用条件：技能全部解析成功、动作名合法且唯一、引用的技能存在、JSON（若填）合法。
@@ -266,7 +266,7 @@ manifest.toml                              [复制]
 ```
 
 - TOML 由后端 `preview_manifest` 返回（与创建用同一构造函数），前端不再手拼。
-- 校验结果分两级：**错误**（红，禁用「创建 Agent」）；**提示**（黄，可继续）。
+- 校验结果分两级：**错误**（红，禁用「创建 Bot」）；**提示**（黄，可继续）。
 
 ---
 
@@ -274,9 +274,9 @@ manifest.toml                              [复制]
 
 | key | 文案 |
 |---|---|
-| `agentSetup.recommendedMcp` | Agent 包建议的 MCP（{{count}}） |
-| `agentSetup.recommendedMcpHint` | 由 Agent 包声明、需要你确认的 MCP 服务器。安装后进入本机 MCP 目录 |
-| `agentSetup.recommendedInstalledShared` | 已加入本机 MCP 目录；其他 Agent 也能看到，但只在本 Agent 激活 |
+| `agentSetup.recommendedMcp` | Bot 包建议的 MCP（{{count}}） |
+| `agentSetup.recommendedMcpHint` | 由 Bot 包声明、需要你确认的 MCP 服务器。安装后进入本机 MCP 目录 |
+| `agentSetup.recommendedInstalledShared` | 已加入本机 MCP 目录；其他 Bot 也能看到，但只在本 Bot 激活 |
 | `agentSetup.recommendedInstallAndEnable` | 安装并启用 |
 | `agentSetup.recommendedInstalling` | 安装中… |
 | `agentSetup.recommendedRetry` | 重试 |
@@ -303,29 +303,29 @@ manifest.toml                              [复制]
 | `createWizard.labelsInvalid` | 标签只能包含小写字母、数字和连字符（2–32 字符） |
 | `createWizard.configHint` | 以下参数会作为出厂默认值写入 manifest；留空则使用平台默认值 |
 | `createWizard.defaultValue` | 默认 {{value}} |
-| `createWizard.mcpHint` | 声明该 Agent 建议使用的 MCP 服务器。安装后会出现在工具面板，由用户确认 |
+| `createWizard.mcpHint` | 声明该 Bot 建议使用的 MCP 服务器。安装后会出现在工具面板，由用户确认 |
 | `createWizard.mcpHosted` | 平台托管 |
 | `createWizard.mcpPresets` | 预设 |
 | `createWizard.mcpWhyLabel` | 说明（展示给用户） |
 | `createWizard.mcpRequired` | 必需 |
 | `createWizard.mcpToolsLater` | 具体工具在启用后于工具面板勾选 |
-| `createWizard.capabilityHint` | 声明其他 Agent 可通过 intent 寻址的动作；技能是内部流程，能力是对外契约 |
+| `createWizard.capabilityHint` | 声明其他 Bot 可通过 intent 寻址的动作；技能是内部流程，能力是对外契约 |
 | `createWizard.capabilityAdd` | 添加动作 |
-| `createWizard.capabilityEmpty` | 未声明对外动作。仅在希望其他 Agent 调用它时才需要 |
+| `createWizard.capabilityEmpty` | 未声明对外动作。仅在希望其他 Bot 调用它时才需要 |
 | `createWizard.skillToolDeps` | 依赖工具：{{tools}} |
 | `createWizard.skillDepsUndeclared` | 未在工具/MCP 中声明（不阻断） |
 | `createWizard.previewErrors` | {{count}} 个错误（无法创建） |
 | `createWizard.previewWarnings` | {{count}} 条提示（可继续） |
 
 需要**改写**的旧文案：
-- `createWizard.skillsHint`：现为「每个 SKILL.md 会成为 manifest 的一个 capability」→ 改为「拖入技能 ZIP 包加入此 Agent。技能是内部流程，不对外暴露；需要对外暴露的动作请在下一步声明。」
+- `createWizard.skillsHint`：现为「每个 SKILL.md 会成为 manifest 的一个 capability」→ 改为「拖入技能 ZIP 包加入此 Bot。技能是内部流程，不对外暴露；需要对外暴露的动作请在下一步声明。」
 
 ---
 
 ## 6. 走查待拍板
 
-1. **`必需` 开关在向导里默认关**（推荐）还是默认开？默认开会让新 Agent 一装上就带红角标。
-2. 创建成功后**自动切到工具标签**并展开建议分组（推荐是）；还是只弹一条 toast「该 Agent 建议配置 1 个 MCP」？
+1. **`必需` 开关在向导里默认关**（推荐）还是默认开？默认开会让新 Bot 一装上就带红角标。
+2. 创建成功后**自动切到工具标签**并展开建议分组（推荐是）；还是只弹一条 toast「该 Bot 建议配置 1 个 MCP」？
 3. 推荐全部处理完后，这个分组是**保持显示**（变成全部「已启用」的静态行），还是自动收起只留标题？推荐：保持显示，但默认折叠，标题显示「已全部启用」。
 
 确认后按 Phase 4a / 4b 实施。

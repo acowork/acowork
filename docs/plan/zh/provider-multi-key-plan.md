@@ -30,7 +30,7 @@ MQTT ProviderRef[] → extract_provider_keys (透传 account_id)
 |---|---|---|
 | Provider | catalog 级（`provider_id` 如 `alibaba-cn`）：base_url / 协议 / 模型元数据 | `provider_list.json` |
 | Account | 凭据级（`account_id` 全局唯一 UUID + `alias` 用户可改显示名） | Vault `<provider>__<account_id>.enc` |
-| manifest / `.agent` 包 | 纯声明意图，**不含** account 信息 | — |
+| manifest / `.bot` 包 | 纯声明意图，**不含** account 信息 | — |
 
 - `account_id`（UUID，系统生成）承担唯一性与寻址；
 - `alias` 无唯一性约束，纯显示层，用户可任意重命名；
@@ -54,7 +54,7 @@ MQTT ProviderRef[] → extract_provider_keys (透传 account_id)
 | `agent_provider.json`（`AgentProviderConfig`） | **不改** | `providers: Vec<ProviderListItem>` 本就是 provider 级（id/base_url/models/compact_model/custom），无 account 维度；provider/model 只维护一份 |
 | session `meta.json`（`SessionMeta`） | **改** | 加 `account_id: Option<String>`（已有 `model`/`provider` 字段，紧邻）。**不存 alias**（可变会 stale，显示时用 account_id 解析） |
 | `provider_list.json` | 不改 | provider 级元数据 |
-| manifest / `.agent` 包 | 不改 | 不含 account |
+| manifest / `.bot` 包 | 不改 | 不含 account |
 | runtime `provider_key_vault` | 不落盘 | MQTT 内存态，多 account 仅影响内存结构 |
 
 **前端三级菜单数据源**：Gateway `GET /api/providers`（`list_providers` 已做 vault account × provider_list 的 1:N join，返回 `provider + account_id + alias + models` 展开行）。**不经过 `agent_provider.json`**。前端只需把 N 行折叠成 `provider → {accounts, models}`，模型去重一份。不需要新接口，也不需要 runtime 参与菜单数据。

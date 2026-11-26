@@ -54,13 +54,13 @@ Chat Router 一轮请求由三块组成：Block A（system prompt）、Block B�
 ### 1.3 实证（本机真实数据）
 
 - chat `218dff2a` 第 135 行，`message_id = cc83829e-428e-4aa9-8448-5d0493483edf`，正文为文字 + `screenshot-1793088253750.png (image/png, 134906B)`。
-- 同一 message_id 在该 agent 的 `logs/chat-router-decisions.jsonl` 中：`decision=dispatch:new`、`history_len=32`、`latency_ms=19464`、`model=MiniMax-M3.1-Flash`。
+- 同一 message_id 在该 bot 的 `logs/chat-router-decisions.jsonl` 中：`decision=dispatch:new`、`history_len=32`、`latency_ms=19464`、`model=MiniMax-M3.1-Flash`。
 - 结论：那一轮 router 拿到的是纯文本，图片的存在、文件名、类型全都不在上下文里。
 - 另：本机库中存在 body 为空的附件行（迁移行 4 条 + 若干空正文上传），证明「纯附件轮」是真实存在的输入形态。
 
 ### 1.4 已确认无误的部分（避免误修）
 
-- **执行侧是完好的**：[session_task.rs:1520-1640](core/acowork-runtime/src/agent/session/session_task.rs#L1520) 用 `chat_attachment_ids` 经 Gateway 拉字节、materialize 到 agent-home `files/`、图片走多模态 `ContentPart`、其余走 `build_attachment_hint`。
+- **执行侧是完好的**：[session_task.rs:1520-1640](core/acowork-runtime/src/agent/session/session_task.rs#L1520) 用 `chat_attachment_ids` 经 Gateway 拉字节、materialize 到 bot-home `files/`、图片走多模态 `ContentPart`、其余走 `build_attachment_hint`。
 - **id 传递两条路都通**：[runner.rs:655](core/acowork-runtime/src/agent/chat_router/runner.rs#L655)（dispatch）与 [gateway_loop.rs:1615](core/acowork-runtime/src/startup/gateway_loop.rs#L1615)（fallback）。
 - 缺陷只在「谁来决定这个活归谁」这一环，以及「用户看到/点到的那个胶囊」。
 
@@ -167,7 +167,7 @@ Chat Router 一轮请求由三块组成：Block A（system prompt）、Block B�
 4. Block A 增加固定字节的一段：router 无法读取文件内容、附件通常意味着「有活要干」、纯附件轮要路由、交接时点一句文件名。注意两点：
    - 这是一次性的缓存前缀变更（可接受，设计 29 §6.4 的 `prefix_hash` 会变一次）。
    - 群聊 `chat.md` 覆盖体**不会**继承这段（seed 来自旧字节）——需要在文档中注明。
-   - 生效范围（`prompt_builder.rs::seed_chat_prompt`）：seed **只在文件不存在时写盘**。因此这段新指令只对**新装 agent** 生效；存量安装（本机已装 agent 的 `prompts/chat.md` 均为改动前副本）不会自动获得。要生效只有两条路：删掉该文件让 seed 重跑，或由用户/agent 自己改写覆盖体。这不是漂移，是"升级不重写用户可编辑文件"的既有语义 —— 但必须写清楚，否则会被误读成"改常量即全局生效"。
+   - 生效范围（`prompt_builder.rs::seed_chat_prompt`）：seed **只在文件不存在时写盘**。因此这段新指令只对**新装 bot** 生效；存量安装（本机已装 bot 的 `prompts/chat.md` 均为改动前副本）不会自动获得。要生效只有两条路：删掉该文件让 seed 重跑，或由用户/agent 自己改写覆盖体。这不是漂移，是"升级不重写用户可编辑文件"的既有语义 —— 但必须写清楚，否则会被误读成"改常量即全局生效"。
 
 **测试边界**
 
@@ -395,7 +395,7 @@ ADR-046 §2.5 的点击表只列了 file / selection / folder（工作区引用�
 
 这就是 M2（Gateway 从落库行投影元数据并写进 delivery params）+ M3（Runtime 解析 `chat_attachments`、纯附件轮占位）+ M4（日志字段）合起来的端到端证据——改动前这三行都会是"没有这个字段"。
 
-**Block C 的真实提示词字节（同一隔离实例，配了本地 mock provider）**：`POST /api/providers` 注册一个 `openai` 兼容端点指向 `dev/e2e/mock_openai.py`（127.0.0.1:29999，把每次请求体落盘），并在 agent 的 `config/agent_config.json` 里写 `chat_router: {model:"mock-model", provider:"openai"}`，重启该 agent。于是路由真的发出了模型请求，抓到两条 Block C（逐字节，取自 LLM 请求体）：
+**Block C 的真实提示词字节（同一隔离实例，配了本地 mock provider）**：`POST /api/providers` 注册一个 `openai` 兼容端点指向 `dev/e2e/mock_openai.py`（127.0.0.1:29999，把每次请求体落盘），并在 bot 的 `config/agent_config.json` 里写 `chat_router: {model:"mock-model", provider:"openai"}`，重启该 bot。于是路由真的发出了模型请求，抓到两条 Block C（逐字节，取自 LLM 请求体）：
 
 ```
 [user message]

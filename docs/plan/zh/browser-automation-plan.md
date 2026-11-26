@@ -15,10 +15,10 @@
 
 | 平面 | 跑在哪 | 干什么 | 远程拓扑下 |
 |---|---|---|---|
-| 页面预览（ADR-118 子 webview） | 用户 PC 的 desktop 进程内 | 给人看网页，绕开 `X-Frame-Options` / `frame-ancestors` 对 iframe 的封锁 | 与 agent 无关，不需要 agent 在线 |
-| 浏览器自动化（Playwright MCP） | **agent 所在节点** | agent 自己调试、自动化、验证 | 不需要 desktop 在线 |
+| 页面预览（ADR-118 子 webview） | 用户 PC 的 desktop 进程内 | 给人看网页，绕开 `X-Frame-Options` / `frame-ancestors` 对 iframe 的封锁 | 与 bot 无关，不需要 bot 在线 |
+| 浏览器自动化（Playwright MCP） | **bot 所在节点** | bot 自己调试、自动化、验证 | 不需要 desktop 在线 |
 
-**agent 永远不向 desktop 请求浏览器。** desktop 关掉，agent 的自动化照跑；desktop 打开，只是能看到 agent 刚才干了什么。
+**bot 永远不向 desktop 请求浏览器。** desktop 关掉，bot 的自动化照跑；desktop 打开，只是能看到 bot 刚才干了什么。
 
 ## 3. 今天用户看到什么（沿代码路径核对，不是推测）
 
@@ -53,7 +53,7 @@
 [▣][▣][▣]  report.pdf  page.tsx  +3
 ```
 
-- **图像产物** → 缩略图；点开**编辑器图片查看器 tab**（可缩放/平移、区域回投给 agent），与右侧工作区点图片完全一致，零新增查看器
+- **图像产物** → 缩略图；点开**编辑器图片查看器 tab**（可缩放/平移、区域回投给 bot），与右侧工作区点图片完全一致，零新增查看器
 - **非图像产物** → 文件胶囊（复用 `DocumentChip` / `AttachmentCapsule`）
 - 上限：图像 8 张、文件 8 个，超出显示 `+n`；按路径去重，同路径多次改只留最后一次
 - 本轮没有产物 → **整行不渲染**（不是渲染一个空行）
@@ -83,9 +83,9 @@ pub struct ProducedFile {
 
 #### 计入条件（四条同时成立）
 
-1. **本轮内由本 agent 的某次工具调用写出**，而不是"轮开始时它已经存在"；
+1. **本轮内由本 bot 的某次工具调用写出**，而不是"轮开始时它已经存在"；
 2. **动作是 created** —— 写前不存在。改写已存在的文件不计入（那是过程）；
-3. **落在本轮用过的工作区根内**（含 agent home），且不在排除表：`artifacts/`、`logs/`、`conversations/`、`config/`、`.git/`、`node_modules/`、以及仓库既有 ignore 规则；
+3. **落在本轮用过的工作区根内**（含 bot home），且不在排除表：`artifacts/`、`logs/`、`conversations/`、`config/`、`.git/`、`node_modules/`、以及仓库既有 ignore 规则；
 4. **可打开**：能判出 mime、大小 ≤ 上限、数量 ≤ 上限（图像 8 + 文件 8）。
 
 同一路径一轮内先 create 后 modify → 保留 create，只出一条；按首次产出顺序。
@@ -98,7 +98,7 @@ pub struct ProducedFile {
 | 全树 mtime/尺寸快照 diff | 远端节点 IO 不可控，一轮扫两遍大仓不划算 |
 | 解析工具结果文本里的路径 | 文本是给人的，不是给机器解析的；一句 "wrote foo.ts" 里可能有相对/绝对/引用三种写法 |
 | 按 mtime 判"是不是新文件" | checkout / 拷贝 / 恢复 都会让 mtime 说谎 |
-| 让 agent 自称交付物 | 幻觉，且把耦合塞进 prompt |
+| 让 bot 自称交付物 | 幻觉，且把耦合塞进 prompt |
 
 #### 已知的洞：`bash` 写文件看不见
 
@@ -124,7 +124,7 @@ pub struct ProducedFile {
 
 `work_dir` 下已有 `conversations/` `config/` `files/` `logs/` `memory/`，没有给"工具产物"留位置，所以新增 `artifacts/`。名字必须中性：叫 `browser-artifacts` 就等于把 Playwright 写进了目录结构。
 
-写进用户的代码目录是错的——污染 git status、被 agent 自己的搜索命中、还可能被误提交。agent home 下既在既有反代的可达范围内，又不属于任何项目。
+写进用户的代码目录是错的——污染 git status、被 bot 自己的搜索命中、还可能被误提交。bot home 下既在既有反代的可达范围内，又不属于任何项目。
 
 **当作可丢弃的缓存**：按会话分目录，不需要回收机制。图在了就显示，被清掉就少几行——截图不是资产，不该进附件库。
 
@@ -155,7 +155,7 @@ pub struct ProducedFile {
 - 实时画面、实时流、分块快照推送
 - 把过程画面塞进对话流（折叠头缩略图、块下画面条、tool_result 行内缩略图）——理由见 §4.1
 - 右栏"过程时间线"面板：过程可见是另一个需求，等交付物行跑过真实任务再定，不先做
-- 让远程 agent 借用 desktop 的 webview 做自动化
+- 让远程 bot 借用 desktop 的 webview 做自动化
 - 给 preview webview 开 CDP 端口（它加载任意外部站点，端口一开就是给页面一个执行面）
 - 跨机器 webview 协作
 
@@ -167,8 +167,8 @@ pub struct ProducedFile {
 
 ## 8. 存档：两版被推翻的方案
 
-- **v1 桌面托管 loopback MCP**：把 MCP 端点放在 desktop 上。错在 agent 与 desktop 是远程关系，`127.0.0.1` 在远端节点上不指向用户 PC。
-- **v2 Gateway 端点 + 设备编址**：把端点搬到 Gateway，靠 presence 找一台有桌面的机器。错在把"agent 需要浏览器"绑到了"某台 desktop 必须在线"——桌面是投影，不应是依赖。
+- **v1 桌面托管 loopback MCP**：把 MCP 端点放在 desktop 上。错在 bot 与 desktop 是远程关系，`127.0.0.1` 在远端节点上不指向用户 PC。
+- **v2 Gateway 端点 + 设备编址**：把端点搬到 Gateway，靠 presence 找一台有桌面的机器。错在把"bot 需要浏览器"绑到了"某台 desktop 必须在线"——桌面是投影，不应是依赖。
 
 两版的共同错误：**把投影平面当成了执行平面的输入**。
 

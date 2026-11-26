@@ -2,7 +2,7 @@
 
 > 版本：v1.0 | 日期：2026-11-09
 >
-> **一句话**：聊天里的执行块已经能读人类投影（`RoundProjection.user.display`），但**执行会话视图**（`ChatPanel` 的气泡流）读的是 `GET /sessions/{sid}/messages` 返回的**持久化 DTO 本身**，其 `content` 是机器信封、人类投影藏在 `metadata.intent` 里——前端转换时又把非 turn-part 的 `metadata` 丢掉，于是 agent↔agent 的 intent 在执行会话里只剩 `[intent:…:create_dev_tasks] {"project_id":…}`。本计划按"先定数据模型、业务在后端、前端只显示"的原则收口：人类投影收敛成**一个类型 + 一条读取规则**，由传输层**显式**返回 `display` 字段，前端只搬运与渲染。
+> **一句话**：聊天里的执行块已经能读人类投影（`RoundProjection.user.display`），但**执行会话视图**（`ChatPanel` 的气泡流）读的是 `GET /sessions/{sid}/messages` 返回的**持久化 DTO 本身**，其 `content` 是机器信封、人类投影藏在 `metadata.intent` 里——前端转换时又把非 turn-part 的 `metadata` 丢掉，于是 bot↔bot 的 intent 在执行会话里只剩 `[intent:…:create_dev_tasks] {"project_id":…}`。本计划按"先定数据模型、业务在后端、前端只显示"的原则收口：人类投影收敛成**一个类型 + 一条读取规则**，由传输层**显式**返回 `display` 字段，前端只搬运与渲染。
 >
 > 前置调查已完成，证据带 file:line（§1）。§3 是数据模型，§4 是三个模块（+ 一个可后置项），§5 明确不做，§7 记录已知瑕疵。
 
@@ -19,7 +19,7 @@
 3. 桌面 [chatStore.ts:3865](../../../apps/acowork-desktop/src/stores/chatStore.ts#L3865) `convertConversationEntry` 转成 `ChatMessage`：`content` 原样带走（[chatStore.ts:3905](../../../apps/acowork-desktop/src/stores/chatStore.ts#L3905)），`metadata` **只对 turn-part / tool 行保留**（[chatStore.ts:3933](../../../apps/acowork-desktop/src/stores/chatStore.ts#L3933)），普通 user 行丢弃。
 4. [MessageBubble.tsx:300](../../../apps/acowork-desktop/src/components/chat/MessageBubble.tsx#L300) 的 user 分支渲染 `message.content` → 信封被当正文画出来。
 
-**这条路为什么没被上次的改动覆盖**：上次改的是 `RoundProjection.user.display`（聊天块，走 `/chat-blocks` + [ChatExecutionBlock.tsx](../../../apps/acowork-desktop/src/components/chat/ChatExecutionBlock.tsx)）；执行会话视图是另一条读模型（`/sessions/{sid}/messages` + [ChatPanel.tsx](../../../apps/acowork-desktop/src/components/chat/ChatPanel.tsx) → `MessageBubble`）。agent 从自己的执行会话发起的 intent 不进任何 chat（`turn_surface.echo_chat()` 为空时 [loop_.rs:970](../../../core/acowork-runtime/src/agent/loop_.rs#L970) 不写引用行），所以它**只在**这条链上出现。
+**这条路为什么没被上次的改动覆盖**：上次改的是 `RoundProjection.user.display`（聊天块，走 `/chat-blocks` + [ChatExecutionBlock.tsx](../../../apps/acowork-desktop/src/components/chat/ChatExecutionBlock.tsx)）；执行会话视图是另一条读模型（`/sessions/{sid}/messages` + [ChatPanel.tsx](../../../apps/acowork-desktop/src/components/chat/ChatPanel.tsx) → `MessageBubble`）。bot 从自己的执行会话发起的 intent 不进任何 chat（`turn_surface.echo_chat()` 为空时 [loop_.rs:970](../../../core/acowork-runtime/src/agent/loop_.rs#L970) 不写引用行），所以它**只在**这条链上出现。
 
 ---
 
@@ -82,9 +82,9 @@
 - 类型：`lib/types.ts` 的 `ConversationEntry` 加 `display?: IntentDisplay`；`IntentDisplay` 只在这一处定义，`chatBlocks.ts` 的 `RoundUserDisplay` 改为 import 它（不保留第二个同名形状；这是改 import，不是重构）。移动端同改（[types.ts:222](../../../apps/acowork-mobile/src/lib/types.ts#L222)）。
 - 搬运：`convertConversationEntry` 加一行 `base.display = entry.display`；不做校验、不做瘦身、不看 metadata。移动端 `mapConversationEntries` 同理。
 - 渲染（桌面）：`MessageBubble` user 分支 `message.display ? <ChatMarkdown content={display.body}/> + truncated 提示 + <details>原始信封(content)</details> : content`。复用现有 i18n key `chatView.block.rawEnvelope` / `displayTruncated`。
-  - **要主动破一条现有规则**：`speakerRendersMarkdown("user") === false`（[speakerBubble.ts:56](../../../apps/acowork-desktop/src/components/chat/speakerBubble.ts#L56)），即 user 行一律纯文本。intent 的 `display.body` 是 agent 写的 markdown，必须按 markdown 渲染。规则写成"`display` 优先于 speaker 判定"，而不是改 `speakerRendersMarkdown`（那会把人类输入也变成 markdown，[speakerBubble.test.ts:22](../../../apps/acowork-desktop/src/components/chat/speakerBubble.test.ts#L22) 明确守着的断言）。
+  - **要主动破一条现有规则**：`speakerRendersMarkdown("user") === false`（[speakerBubble.ts:56](../../../apps/acowork-desktop/src/components/chat/speakerBubble.ts#L56)），即 user 行一律纯文本。intent 的 `display.body` 是 bot 写的 markdown，必须按 markdown 渲染。规则写成"`display` 优先于 speaker 判定"，而不是改 `speakerRendersMarkdown`（那会把人类输入也变成 markdown，[speakerBubble.test.ts:22](../../../apps/acowork-desktop/src/components/chat/speakerBubble.test.ts#L22) 明确守着的断言）。
   - `UserWithAttachmentsBubble` 走同一判定，但 display 行按构造不带附件，不动它；万一将来带上了，退化成纯文本是可接受的降级。
-- 渲染（移动）：气泡当前对 user 轮传 `literal`（纯文本），intent 轮因此把信封当纯文本画出来（[ChatDetailScreen.tsx:387](../../../apps/acowork-mobile/src/screens/chat/ChatDetailScreen.tsx#L387)）。规则改为：**有 `display` 时按 markdown 渲染 `display.body`（`literal` 不适用，它是 agent 写的），信封折叠**；无 `display` 走原 `literal` 行为。同桌面：`literal` 优先于 `display` 的反向覆盖是不允许的，且 [chat-row-text.test.tsx](../../../apps/acowork-mobile/src/__tests__/chat-row-text.test.tsx) 里"人类输入按纯文本"的断言保持不变，另加一条"带 display 的 user 行按 markdown"。
+- 渲染（移动）：气泡当前对 user 轮传 `literal`（纯文本），intent 轮因此把信封当纯文本画出来（[ChatDetailScreen.tsx:387](../../../apps/acowork-mobile/src/screens/chat/ChatDetailScreen.tsx#L387)）。规则改为：**有 `display` 时按 markdown 渲染 `display.body`（`literal` 不适用，它是 bot 写的），信封折叠**；无 `display` 走原 `literal` 行为。同桌面：`literal` 优先于 `display` 的反向覆盖是不允许的，且 [chat-row-text.test.tsx](../../../apps/acowork-mobile/src/__tests__/chat-row-text.test.tsx) 里"人类输入按纯文本"的断言保持不变，另加一条"带 display 的 user 行按 markdown"。
 - 验收：转换器测试（有 display 保留 / 无 display 为 undefined）；气泡渲染测试（有 display 渲染 markdown 且信封折叠 / 旧行不变）。
 
 ### M4（runtime，等待队列预览）
@@ -132,7 +132,7 @@
 
 ### 未做（范围外，另行安排）
 
-1. **气泡署名与朝向**：执行会话里 user 行的昵称来自"人类"，而 agent-origin intent 的发送者其实是另一个 agent，于是 Lucy 的消息被画成"你自己的消息"。正解是给投影加一条 `from` 事实（生产侧已持有 `env.from`，前端不解析信封），属于模型加字段，单独一轮。
+1. **气泡署名与朝向**：执行会话里 user 行的昵称来自"人类"，而 agent-origin intent 的发送者其实是另一个 bot，于是 Lucy 的消息被画成"你自己的消息"。正解是给投影加一条 `from` 事实（生产侧已持有 `env.from`，前端不解析信封），属于模型加字段，单独一轮。
 
 ---
 

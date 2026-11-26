@@ -243,7 +243,7 @@ grep -rn "SessionControlService" core/acowork-runtime/src/
 - 为什么算违规：ADR-040 §2.1 的架构图明确要求 `gateway_loop dispatch` 与 axum handler **都**经 `Arc<dyn SessionControlService>`；现状是两侧都拿到具体 `SessionManager`，所有 create/close/delete/visibility/workspace/tool-policy 的业务不变式（状态机、生命周期事件、所有权）都写在 handler + `SessionManager` 之间，adapter 一旦分支（HTTP / MQTT / CLI），规则就会各写一遍——ADR-040 记录的 `list_sessions` token bug 正是这个模式的产物。
 - 建议改法：给 `SessionManager` 的 mutation 面加内部可变性（或用 `&self` + `Mutex` 字段），实现 `RuntimeSessionControlService`；handler 只保留 `authorize_*`（授权属于 adapter，因为 header 只有 adapter 看得见）+ 调 trait。`dispatch_session_action`（[server.rs:2959](core/acowork-runtime/src/http/server.rs#L2959)）应收敛为 `SessionControlService::send_message/stop/…`。
 
-### 4.2 Agent 配置 / MCP / RAG / Shell 规则（8 项）
+### 4.2 Bot 配置 / MCP / RAG / Shell 规则（8 项）
 
 | 违规点 | 为什么算违规 | 建议改法 |
 |---|---|---|
@@ -287,7 +287,7 @@ grep -rn "SessionControlService" core/acowork-runtime/src/
 [usecases/session_config_impl.rs:16](core/acowork-runtime/src/usecases/session_config_impl.rs#L16) `use crate::http::SharedAgentCore;`，字段 [session_config_impl.rs:53](core/acowork-runtime/src/usecases/session_config_impl.rs#L53) `core_slot: SharedAgentCore`。
 
 - 为什么算违规：`SharedAgentCore` 是**HTTP adapter 模块定义**的类型；usecase 层反向依赖 adapter，ADR-040「adapter 依赖 trait」的方向被倒置。同时 `get_config` 每次外部读都要穿透到活的 `AgentCore` 取有效 `reasoning_effort`，等于 usecase 依赖了运行时全局单例。
-- 建议改法：把 `SharedAgentCore` 提升到中立模块（如 `agent::agent_core` 或 `usecases::ports`），并定义窄接口 `ReasoningEffortResolver`，impl 只注入该接口。
+- 建议改法：把 `SharedAgentCore` 提升到中立模块（如 `bot::agent_core` 或 `usecases::ports`），并定义窄接口 `ReasoningEffortResolver`，impl 只注入该接口。
 
 ### 5.3 usecase impl 反向依赖另一个 impl 的内部函数
 [usecases/git_query_impl.rs:34](core/acowork-runtime/src/usecases/git_query_impl.rs#L34) `use crate::usecases::workspace_mutation_impl::{resolve_within_static, resolve_workspace_root};`

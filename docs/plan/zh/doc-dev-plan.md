@@ -43,7 +43,7 @@
 |------|-------------|-------------|
 | 存储 | 目录树任务（children/ 物理嵌套 + task.json） | 目录树文档库（每目录 library.json + .md 文件） |
 | 并发 | 无版本号（审核状态机） | **乐观版本号**（version + 409，DOC-09） |
-| 写保护 | 人类/Agent 审核流（pm_create_task → pending） | **PR 式审核流**（Agent 改已有文档须 approve 后合并，设计 §5） |
+| 写保护 | 人类/Agent 审核流（pm_create_task → pending） | **PR 式审核流**（Bot 改已有文档须 approve 后合并，设计 §5） |
 | 附件/依赖图/父子树 | ✅ 已有 | ❌ 本版不做 |
 | Desktop 复杂度 | 看板 + DnD + TaskCard + Drawer（重） | 目录树 + 编辑器（复用 MarkdownPreviewView）（轻） |
 | 新增概念 | — | `.requests/` 审核请求模型、`.trash/` 回收站、`doc_pull` 本地缓存副本 |
@@ -67,7 +67,7 @@
 | **D0 骨架** | crate + axum + Gateway `[doc]` 配置 + 拉起/监督/反代 | 1-1.5d | 服务可起停、可监督、`/api/doc/*` 可达 |
 | **D1 存储 + REST** | 目录树存储（library.json + .md）+ 版本号并发 + 审核流服务端 + 回收站 + REST API | 5-6d | 服务端完整，人类可用 REST 调试 |
 | **D2 Desktop docs 视图** | 目录树 + 编辑器（复用 MarkdownPreviewView）+ 审核队列 UI + 状态管理 + 离线 + a11y | 4-6d | 人类可用基础在线文档（替换 AppLayout TODO） |
-| **D3 MCP + 审核闭环** | doc MCP HTTP Server（8 工具）+ 身份校验 + catalog 自动注入 | 2-3d | Agent 可读写文档；PR 式审核全链路 |
+| **D3 MCP + 审核闭环** | doc MCP HTTP Server（8 工具）+ 身份校验 + catalog 自动注入 | 2-3d | Bot 可读写文档；PR 式审核全链路 |
 | **D4 远程 + 验证** | advertise endpoint 下发 + 远程 Runtime 集成 + 端到端测试 + 文档 v1.0 | 1-2d | 全链路可用，文档收口 |
 | **合计** | — | **13-19d** | — |
 
@@ -109,7 +109,7 @@
 | D1-4 | 文档 CRUD：新建（`POST /api/docs`，含 `import` 来源标记）/ 读取（`GET /api/docs/:id`）/ 重命名 / 移动（`POST /api/docs/:id/move`，源/目标 library.json 双写，目标先写源后写，失败回滚）/ 删除（入 `.trash/`） | 1d | D1-3 | 移动跨目录原子性；删除进回收站可恢复；`import` 元数据正确 |
 | D1-5 | 版本号乐观并发：每文档 `version`，`PUT /api/docs/:id` 携带 `version`，不匹配返回 409 + 当前版本（DOC-09） | 0.5d | D1-4 | 并发写冲突返回 409；匹配则 version+1 |
 | D1-6 | 回收站：`.trash/` 管理 + `GET /api/trash` / `POST /api/trash/:id/restore` + 30 天定时清理（OD-4 纳入 v1） | 0.5d | D1-4 | 恢复后版本/元数据完整；过期自动清理 |
-| D1-7 | 更新请求服务端（设计 §5）：`.requests/{request_id}.json` 模型 + `POST /api/requests`（Agent 提交，校验 base_version）+ `GET /api/requests?status=` + `POST /api/requests/:id/approve`（再次校验 base_version 仍最新，冲突拒绝合并）+ `reject`（附 note）+ `request_ttl_hours` 过期标记 | 1d | D1-3, D1-5 | approve 后写库 version+1；base_version 被抢占返回 409；expired 自动标记 |
+| D1-7 | 更新请求服务端（设计 §5）：`.requests/{request_id}.json` 模型 + `POST /api/requests`（Bot 提交，校验 base_version）+ `GET /api/requests?status=` + `POST /api/requests/:id/approve`（再次校验 base_version 仍最新，冲突拒绝合并）+ `reject`（附 note）+ `request_ttl_hours` 过期标记 | 1d | D1-3, D1-5 | approve 后写库 version+1；base_version 被抢占返回 409；expired 自动标记 |
 | D1-8 | 关键字检索：`GET /api/search?keyword=`（标题 + 内容，跨目录；本版不做向量索引） | 0.5d | D1-4 | 命中标题/内容；空结果正确 |
 | D1-9 | REST API 全量端点实现（设计 §4 表格：tree/dirs/docs/search/requests/trash）+ 统一错误处理 `{"error":{"code","message","details"}}` + 正确状态码（400/403/404/409/413/422/500） | 1d | D1-4~D1-8 | 每个端点 happy path 通过；错误格式一致 |
 | D1-10 | 集成测试：`tests/integration/`（目录树 CRUD、移动回滚、409 并发、审核流 approve/reject/expired、回收站、路径注入） | 1d | D1-9 | 测试套件全绿 |
@@ -132,7 +132,7 @@
 | D2-5 | **状态管理**：`@tanstack/react-query` setup + Query Key 规划（tree/docs/requests/trash）+ 乐观更新（保存/重命名/移动）+ Loading skeleton / Empty hero / Error toast 三态 | 0.5d | D2-1 | 三态齐全；缓存失效正确；staleTime 配置 |
 | D2-6 | **离线降级**：健康检查 useQuery（30s 轮询）+ `ServiceOfflineBanner`（复用 pm 组件）+ 写操作禁用（`pointer-events: none` + tooltip）+ 重试按钮 | 0.25d | D2-1 | 离线 banner 显示；重试工作；不白屏 |
 | D2-7 | **可访问性 + 性能**：键盘导航（目录树 ←→ 展开/折叠、Tab 顺序）+ ARIA 标签 + 大目录树虚拟化（>500 节点懒加载）+ 编辑器防抖保存 | 0.5d | D2-2~D2-4 | WCAG AA 基础项；千文档目录树流畅 |
-| D2-8 | **E2E 烟测**：人类新建文档 → 编辑保存 → 预览；Agent 提交更新 → 人类审核 → 内容刷新；离线 → 恢复 | 0.5d | D2-2~D2-7 | 全链路通过 |
+| D2-8 | **E2E 烟测**：人类新建文档 → 编辑保存 → 预览；Bot 提交更新 → 人类审核 → 内容刷新；离线 → 恢复 | 0.5d | D2-2~D2-7 | 全链路通过 |
 
 **D2 出口**：人类可完整使用基础在线文档（目录树 + 编辑/预览 + 审核队列 + 离线降级）。
 
@@ -145,12 +145,12 @@
 | ID | 任务 | 估时 | 依赖 | 验收 |
 |----|------|------|------|------|
 | D3-1 | doc MCP HTTP Server：`POST /mcp` 端点 + 复用 `McpTransport` HTTP 模式 + 工具注册（设计 §6 表格全量 8 工具） | 1d | D2, D1 | MCP 客户端可连接并列出工具 |
-| D3-2 | MCP 工具实现：`doc_list` / `doc_read` / `doc_pull`（落盘缓存副本 + base_version，设计 §5.5）/ `doc_add`（快照导入，同名 409）/ `doc_submit_update`（→ pending 请求）/ `doc_check_request` / `doc_mkdir` / `doc_search` | 0.75d | D3-1, D1 | 所有工具 happy path 通过；`doc_pull` 落盘路径正确（工作区 `.acowork/tmp/docs/`，agent home 例外走系统 tmp） |
+| D3-2 | MCP 工具实现：`doc_list` / `doc_read` / `doc_pull`（落盘缓存副本 + base_version，设计 §5.5）/ `doc_add`（快照导入，同名 409）/ `doc_submit_update`（→ pending 请求）/ `doc_check_request` / `doc_mkdir` / `doc_search` | 0.75d | D3-1, D1 | 所有工具 happy path 通过；`doc_pull` 落盘路径正确（工作区 `.acowork/tmp/docs/`，bot home 例外走系统 tmp） |
 | D3-3 | 身份校验（设计 §9）：MCP 调用携带 `agent_id`（`X-MCP-Actor`，复用 pm 模式）；写操作（add/submit_update/mkdir）必须可信 agent_id；匿名仅允许只读（list/read/search） | 0.5d | D3-2 | 匿名写返回 403；匿名只读通过；`submitted_by` 记录正确 |
-| D3-4 | catalog 自动注入：`build_available_mcps` 复制 pm 注入段，`doc_mcp_url`（`auto_inject_mcp=true` 时）→ `McpRef{id:"doc", transport:Http, headers:{X-MCP-Actor:{agent_id}}}`；Gateway `state.rs` 增加 `doc_mcp_url` 字段 | 0.25d | D3-1 | Agent 启动后自动获得 `doc_*` 工具列表（单测：注入/跳过两分支） |
-| D3-5 | 端到端测试（本地）：Agent `doc_add` → 人类可见；Agent `doc_pull` → 编辑 → `doc_submit_update` → 人类 approve → 文档 version+1 → Agent `doc_check_request` 收到 approved | 0.25d | D2-4, D3-1~D3-4 | 测试通过 |
+| D3-4 | catalog 自动注入：`build_available_mcps` 复制 pm 注入段，`doc_mcp_url`（`auto_inject_mcp=true` 时）→ `McpRef{id:"doc", transport:Http, headers:{X-MCP-Actor:{agent_id}}}`；Gateway `state.rs` 增加 `doc_mcp_url` 字段 | 0.25d | D3-1 | Bot 启动后自动获得 `doc_*` 工具列表（单测：注入/跳过两分支） |
+| D3-5 | 端到端测试（本地）：Bot `doc_add` → 人类可见；Bot `doc_pull` → 编辑 → `doc_submit_update` → 人类 approve → 文档 version+1 → Bot `doc_check_request` 收到 approved | 0.25d | D2-4, D3-1~D3-4 | 测试通过 |
 
-**D3 出口**：Agent 可经 MCP 读写文档；PR 式审核全链路打通；catalog 自动注入。
+**D3 出口**：Bot 可经 MCP 读写文档；PR 式审核全链路打通；catalog 自动注入。
 
 ---
 
@@ -162,7 +162,7 @@
 |----|------|------|------|------|
 | D4-1 | advertise endpoint 下发：复用 MQTT 全局资源与 AgentHello 回执，构造 `http://{advertise_host}:{gw_http_port}{doc.mcp_http_path}` 推送给远程 Runtime | 0.5d | D3-5 | `build_available_mcps` 注入 doc MCP 单测通过（`doc_mcp_url` 存在注入 / 不存在跳过） |
 | D4-2 | 远程 Runtime 集成：远程节点经 advertise endpoint 调用 doc MCP（含身份校验） | 0.5d | D4-1 | 远程匿名只读通过；匿名写失败 |
-| D4-3 | 端到端测试（远程）：远程 Agent `doc_add` → 本地人类可见；`doc_submit_update` → 审核 → 合并 | 0.5d | D4-1, D4-2, D2, D3 | `remote_e2e.rs` 全链路通过 |
+| D4-3 | 端到端测试（远程）：远程 Bot `doc_add` → 本地人类可见；`doc_submit_update` → 审核 → 合并 | 0.5d | D4-1, D4-2, D2, D3 | `remote_e2e.rs` 全链路通过 |
 | D4-4 | 文档收口：[`20-doc-online-document.md`](../../design/zh/20-doc-online-document.md) v0.1 → v1.0（开放问题表 → 决策记录表）+ ADR 起草（doc 目录树存储选型 + 独立进程） | 0.25d | D4-3 | 文档 v1.0 发布；ADR 定案 |
 
 **D4 出口**：远程节点全链路可用；文档 v1.0 发布。
@@ -235,10 +235,10 @@ gantt
 |------|--------|----------|------|
 | **library.json 与文件系统不一致** | 中 | 崩溃/手动改文件导致文件名与索引漂移 | 启动时 walkdir 校验修复（文件名为权威，设计 §3.3）；写库原子替换 |
 | **Windows `fs::rename` 跨盘失败** | 中 | 文档/目录移动跨盘（C→D） | 检测 `EXDEV` → fallback `copy + remove` + 原子化最佳努力（复用 pm 经验） |
-| **审核流 base_version 竞争** | 中 | 多 Agent 同时提交更新同一文档 | approve 时二次校验 base_version（git push 被拒语义）；冲突返回 409 引导重新提交 |
+| **审核流 base_version 竞争** | 中 | 多 Bot 同时提交更新同一文档 | approve 时二次校验 base_version（git push 被拒语义）；冲突返回 409 引导重新提交 |
 | **MCP 注入与 pm 冲突** | 低 | `id:"doc"` 与现有 catalog 重名 | 注入前查重；`doc_*` 工具前缀天然隔离；单测覆盖 |
 | **回收站清理误删** | 低 | 30 天定时任务边界 | 清理仅针对 `.trash/` 内超期项；恢复操作幂等 |
-| **`doc_pull` 缓存堆积** | 低 | Agent 频繁 pull 不清理 | 会话结束时清理 `.acowork/tmp/docs/`（OD-1）；agent home 例外走系统 tmp |
+| **`doc_pull` 缓存堆积** | 低 | Bot 频繁 pull 不清理 | 会话结束时清理 `.acowork/tmp/docs/`（OD-1）；bot home 例外走系统 tmp |
 | **目录树大文档库性能** | 低 | 千级文档目录树 | 每目录独立 library.json（无全局索引）；D2-7 懒加载/虚拟化 |
 
 ---
@@ -250,7 +250,7 @@ gantt
 | **D0** | Gateway 拉起 doc 子进程；`/api/doc/health` 经反代返回 200；kill 自动重启；端口冲突自动递增；503 + Retry-After 契约生效 |
 | **D1** | 全部 REST 端点 curl 测试通过；409 并发冲突正确；审核流 approve/reject/expired 全通过；回收站恢复/清理正确；集成测试套件全绿 |
 | **D2** | 目录树新建/重命名/删除/移动工作；编辑器编辑/预览 + 409 提示；审核队列 approve/reject；离线 banner + 写禁用；键盘导航 + ARIA；千文档目录树流畅；E2E 烟测通过 |
-| **D3** | Agent 经 MCP add/read/pull/submit_update 全链路；人类审核后 version+1；匿名只读通过、匿名写 403；catalog 自动注入 |
+| **D3** | Bot 经 MCP add/read/pull/submit_update 全链路；人类审核后 version+1；匿名只读通过、匿名写 403；catalog 自动注入 |
 | **D4** | 远程 Runtime 可访问 doc MCP；端到端测试通过；文档 v1.0 发布 |
 
 ---
@@ -263,9 +263,9 @@ gantt
 | Office 文档只读渲染（.docx/.pdf） | 用户上传 Office 需求 | 2d |
 | 文档链接/双向同步（非快照副本，DOC-14 后续） | add to doc 需要联动工作区 | 1d |
 | 全文向量检索（embed + FTS5） | 文档量超 1k 且关键字检索不足 | 2d |
-| 文档/项目 ACL（按文档设置可见范围） | 多用户/多 Agent 隔离需求 | 2d |
+| 文档/项目 ACL（按文档设置可见范围） | 多用户/多 Bot 隔离需求 | 2d |
 | 实时协同编辑（CRDT/OT） | 多人同时编辑需求 | 3d+ |
-| MQTT 变更事件推送（Agent 订阅文档变更） | Agent 需要感知文档更新 | 1d |
+| MQTT 变更事件推送（Bot 订阅文档变更） | Bot 需要感知文档更新 | 1d |
 
 ---
 
@@ -276,7 +276,7 @@ gantt
 | **D-1 部署形态** | **acowork-doc 独立进程**（`core/acowork-doc/` + `lifecycle/doc.rs` + `doc_proxy.rs`），**否决「与 acowork-pm 同进程」** | 见下方 §8.1 详细权衡 |
 | D-2 数据目录 | `$HOME/.acowork/acowork-doc/`（与 pm 平级，**偏离**设计 §2.2 的 `{data}/acowork-doc/`） | 与 ADR-064 pm 先例一致；独立目录备份/迁移清晰；Gateway 数据解耦 |
 | D-3 MCP transport | HTTP（`/mcp` 端点） | PRD Q3 已决；服务常驻、复用 `McpTransport` |
-| D-4 审核流 | Agent 不能直接 `PUT` 覆写已有文档，必须 `doc_submit_update` → 人类 approve 后合并；**新增文档（add to doc）直接生效不审核** | 设计 §5（PR 式）；Q4 已决 |
+| D-4 审核流 | Bot 不能直接 `PUT` 覆写已有文档，必须 `doc_submit_update` → 人类 approve 后合并；**新增文档（add to doc）直接生效不审核** | 设计 §5（PR 式）；Q4 已决 |
 | D-5 前端形态 | Desktop 本地 React 组件直连 REST（经 Gateway 反代），复用 `MarkdownPreviewView.tsx`，不 WebView 内嵌 | PRD Q1 已决；设计 §7 |
 | D-6 回收站 | 纳入 v1（`.trash/` + 30 天清理） | 设计 OD-4 倾向；成本低 |
 | D-7 add to doc | 快照副本（导入后与原工作区解耦） | PRD Q2 已决（DOC-14） |

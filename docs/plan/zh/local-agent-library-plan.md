@@ -1,11 +1,11 @@
-# Local 本机 agent 文件库 — 开发计划
+# Local 本机 bot 文件库 — 开发计划
 
 > 版本：**v1.0（可执行）** | 日期：2026-11-07
 >
 > 上游 PRD：[`prd-agent-hub-install-dialog.md`](../../prd/zh/prd-agent-hub-install-dialog.md) **§14（v0.2 增补，D9–D14 / REQ-021–034）是唯一需求来源**，本文只排期与拆卡，不重复需求。
 > 关联 ADR：[`ADR-073`](../../adr/zh/ADR-073-agent-instance-identity-decomposition.md)（实例身份 / `ensure`）· [`ADR-009`](../../adr/zh/ADR-009-gateway-workspace-isolation.md) §5（Gateway 不碰 node 文件系统）· [`ADR-104`](../../adr/zh/ADR-104-agent-manifest-declaration-surface.md)（`agent-packages/` 产物路径）
 >
-> **一句话**：把 Local tab 变成"本机 agent 文件库"——**T1** 列表 + 播种 + 幂等安装，**T2** publish 产物回写。合计 **2 人日**，两张卡无共享文件，可并行。
+> **一句话**：把 Local tab 变成"本机 bot 文件库"——**T1** 列表 + 播种 + 幂等安装，**T2** publish 产物回写。合计 **2 人日**，两张卡无共享文件，可并行。
 
 ---
 
@@ -16,7 +16,7 @@
 | **T1** | 库目录 + 播种 + 列表 UI + 末行添加入口 + `ensure` 安装 | 1.5d | 无（`agents/` 改名已完成） |
 | **T2** | publish 产物复制进库 + 向导收尾 + 列表刷新 | 0.5d | 依赖 T1 的库目录命令（`library_dir` / 复制函数） |
 
-T1 单独合入即可交付价值（用户能看到并安装 7 个内置 agent）；T2 是闭环增强，T1 不落地时无法进行。
+T1 单独合入即可交付价值（用户能看到并安装 7 个内置 bot）；T2 是闭环增强，T1 不落地时无法进行。
 
 **共享代码只有一个函数**：T1 建的 `copy_into_library(path) -> Result<PathBuf>`，T2 直接调用。所以 T1 必须先把该函数写成 `pub(crate)`。
 
@@ -24,9 +24,9 @@ T1 单独合入即可交付价值（用户能看到并安装 7 个内置 agent�
 
 ---
 
-## 2. T1 — 桌面端：本机 agent 文件库（列表 + 播种）
+## 2. T1 — 桌面端：本机 bot 文件库（列表 + 播种）
 
-**标题**：`feat(desktop): Local tab 列出本机 agent 文件并支持幂等安装`
+**标题**：`feat(desktop): Local tab 列出本机 bot 文件并支持幂等安装`
 **类型**：feature ｜ **优先级**：P0 ｜ **估时**：1.5d
 **覆盖需求**：REQ-021 ~ REQ-028、REQ-030 ~ REQ-032
 
@@ -81,7 +81,7 @@ pub(crate) fn copy_into_library(app: &AppHandle, src: &Path) -> Result<PathBuf>;
 | 文件 | 改动 |
 | --- | --- |
 | [`src/lib/agentHub.ts`](../../../apps/acowork-desktop/src/lib/agentHub.ts) | 加 `LocalAgentRow` 类型 + `listLocalAgentPackages()` / `ensureLocalAgent()` 包装 |
-| [`AgentLibraryDialog.tsx`](../../../apps/acowork-desktop/src/components/agent-list/AgentLibraryDialog.tsx) | `useState<Tab>("library")` → `"local"`（[:87](../../../apps/acowork-desktop/src/components/agent-list/AgentLibraryDialog.tsx#L87)）；open 时 `void listLocalAgentPackages()` + `void fetchHubIndex()`（不 await、失败静默，REQ-022）；`LocalPane` 换成列表组件 + 末行 `+ 添加 agent 文件` |
+| [`AgentLibraryDialog.tsx`](../../../apps/acowork-desktop/src/components/agent-list/AgentLibraryDialog.tsx) | `useState<Tab>("library")` → `"local"`（[:87](../../../apps/acowork-desktop/src/components/agent-list/AgentLibraryDialog.tsx#L87)）；open 时 `void listLocalAgentPackages()` + `void fetchHubIndex()`（不 await、失败静默，REQ-022）；`LocalPane` 换成列表组件 + 末行 `+ 添加 bot 文件` |
 | 行组件 | 文件名 / name / version / `agent_id` / 大小 / 权限数；主按钮「安装」→ `ensureLocalAgent`；`⋯` →「再装一个实例」→ 现有 `installAgent` |
 | [`src/i18n/locales/*.json`](../../../apps/acowork-desktop/src/i18n/locales/) | 五个语言包同步：`tabLocal` 改「本地 / Local」，新增列表空态、行内文案、末行文案、损坏文件提示。`npm run check:i18n` 必须过 |
 
@@ -92,9 +92,9 @@ pub(crate) fn copy_into_library(app: &AppHandle, src: &Path) -> Result<PathBuf>;
 | A1 | 首次启动后 `%LOCALAPPDATA%\com.acowork.desktop\agent-library\` 出现 7 个 `.agent` | 目录可数 |
 | A2 | 打开对话框默认落在 Local，且**不发网络请求**就渲染出 7 行 | 断网（禁用网卡/改 hosts）后仍能打开并列出 |
 | A3 | 删掉库目录里一个文件、重启应用，**不会复活** | 手动删 → 重启 → 行数 6 |
-| A4 | 列表为空时显示空态 + 可点的「+ 添加 agent 文件」 | 清空目录后验证 |
+| A4 | 列表为空时显示空态 + 可点的「+ 添加 bot 文件」 | 清空目录后验证 |
 | A5 | 末行入口选一个外部 `.agent` 后行为与旧版一致（直接装，不落库） | 装完后库目录文件数不变 |
-| A6 | 同一行连点两次「安装」只产生 1 个实例 | 侧栏该 agent 实例数不变 |
+| A6 | 同一行连点两次「安装」只产生 1 个实例 | 侧栏该 bot 实例数不变 |
 | A7 | `⋯` →「再装一个实例」后实例数 +1 | ADR-073 多实例合法，不报错 |
 | A8 | 往库目录塞一个坏文件（非 zip），其余行照常可用，坏行显示原因 | 不整列表失败 |
 | A9 | 同一 `agent_id` 两个版本各占一行 | 手工复制改版本后验证（REQ-030） |
@@ -106,15 +106,15 @@ F12 硬编码 match 必须死 ｜ F13 批量命令、前端一次调用 ｜ F14 
 
 ### 2.5 提交粒度建议
 
-1. `feat(desktop): add local agent library dir with idempotent seeding`
-2. `feat(desktop): list local agent packages in the install dialog`（含 i18n）
-3. `feat(desktop): install local agent files through ensure`
+1. `feat(desktop): add local bot library dir with idempotent seeding`
+2. `feat(desktop): list local bot packages in the install dialog`（含 i18n）
+3. `feat(desktop): install local bot files through ensure`
 
 ---
 
 ## 3. T2 — publish 产物回写本地库
 
-**标题**：`feat(desktop): copy published .agent into the local agent library`
+**标题**：`feat(desktop): copy published .agent into the local bot library`
 **类型**：feature ｜ **优先级**：P1 ｜ **估时**：0.5d
 **覆盖需求**：REQ-029 ｜ **依赖 T1**（`copy_into_library` / `library_dir`）
 
@@ -139,7 +139,7 @@ publish 向导已经能产出 `.agent`（node 侧写 `{agent_id}-{version}.agent
 
 | # | 验收 |
 | --- | --- |
-| B1 | 对一个已装 agent 走完 publish（含 sign），库目录出现 `{agent_id}-{version}.agent` |
+| B1 | 对一个已装 bot 走完 publish（含 sign），库目录出现 `{agent_id}-{version}.agent` |
 | B2 | 再次 publish 同一版本 → **覆盖**，库目录不出现第二个文件 |
 | B3 | 改了 version 再 publish → 库目录两行都在（不按 `agent_id` 去重） |
 | B4 | 回写后打开安装对话框，新文件出现在 Local 列表并可 `ensure` 安装 |

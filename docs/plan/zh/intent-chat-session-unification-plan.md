@@ -2,7 +2,7 @@
 
 > 版本：v1.1（定稿）| 日期：2026-10-18
 >
-> v1.1 修订：设计文档升级到 **v2.1（user-agent 单聊微信模型）**后，同步作废 D-B/1.5（Chat history 入口撤销）、重写 Wave 5（固定 Chat tab + exec tab 共存）、新增 §10 决策 8；其余 Wave 不变。历史决策原文保留不删。
+> v1.1 修订：设计文档升级到 **v2.1（user-bot 单聊微信模型）**后，同步作废 D-B/1.5（Chat history 入口撤销）、重写 Wave 5（固定 Chat tab + exec tab 共存）、新增 §10 决策 8；其余 Wave 不变。历史决策原文保留不删。
 >
 > 关联设计：[`docs/design/zh/27-intent-messaging-and-group-chat.md`](../../design/zh/27-intent-messaging-and-group-chat.md)（**v2.1**，章节已重排）
 > 关联计划：[`intent-delivery-tech-debt-plan.md`](intent-delivery-tech-debt-plan.md)（v0.1，投递与身份链路前置技术债）
@@ -22,7 +22,7 @@
 | 不在范围 | 设计语义本身的再讨论；文档 §10 的 23 条开放问题（除阻塞项外）；全局搜索线（ADR-093/095，工作区有未提交改动，勿碰） |
 | 与既有技术债计划的关系 | 那份计划处理**投递与身份链路的既有缺陷**（信箱、权限执行点、`IntentRouter` 死代码等 8 项）。本文的 Wave 0 依赖其 **D1/D2**（权限执行点、身份来源），其余 Wave 与之无依赖，可并行 |
 | 判据 | 每项以「可观测行为 + 测试」验收，不以「代码改了」验收 |
-| 硬约束 | 不引入任务状态机；Chat session 不含思考与工具调用；Gateway 不承载业务逻辑、不直读 Agent home（ADR-009 §5 红线，`dev/ci.sh` 的 `run_gateway_fs_redline` 强制） |
+| 硬约束 | 不引入任务状态机；Chat session 不含思考与工具调用；Gateway 不承载业务逻辑、不直读 Bot home（ADR-009 §5 红线，`dev/ci.sh` 的 `run_gateway_fs_redline` 强制） |
 
 ---
 
@@ -33,7 +33,7 @@
 | 文档说法 | 复核结论 | 证据 |
 |---|---|---|
 | P0-2「`ensure_pair` 将 kind 硬编码」 | **服务端已不阻塞**。`chat_sessions::ensure_pair` 与 `SystemPairRequest` 都已接受 `kind` 参数，只有 Gateway 客户端写死 `"agent_agent"`。工作量从「改两层」降为**改一行** | [chat_sessions.rs](../../../core/acowork-user/src/chat_sessions.rs) `ensure_pair(.., kind: SessionKind, ..)`；[chat_sessions_api.rs:244](../../../core/acowork-user/src/http/chat_sessions_api.rs#L244) `pub kind: String` + `default_pair_kind()`；[chat_client.rs:68](../../../core/acowork-gateway/src/intent/chat_client.rs#L68) 写死 |
-| P0-3「Agent 页 Chat history 非管理员必 403」 | **成立，但正确修法不是放宽鉴权**。前端把 `agentId` 当 participant 查询才是病根；用户以自己 id 查询已能通过。若按字面「放开鉴权」会把 `list_sessions` 变成越权读取面 | [ChatHistoryDropdown.tsx:91](../../../apps/acowork-desktop/src/components/chat/ChatHistoryDropdown.tsx#L91) `/api/chat-sessions/${agentId}`；[chat_sessions_api.rs](../../../core/acowork-user/src/http/chat_sessions_api.rs) `list_sessions`：`!ctx.is_admin() && ctx.effective_user_id() != participant → 403` |
+| P0-3「Bot 页 Chat history 非管理员必 403」 | **成立，但正确修法不是放宽鉴权**。前端把 `agentId` 当 participant 查询才是病根；用户以自己 id 查询已能通过。若按字面「放开鉴权」会把 `list_sessions` 变成越权读取面 | [ChatHistoryDropdown.tsx:91](../../../apps/acowork-desktop/src/components/chat/ChatHistoryDropdown.tsx#L91) `/api/chat-sessions/${agentId}`；[chat_sessions_api.rs](../../../core/acowork-user/src/http/chat_sessions_api.rs) `list_sessions`：`!ctx.is_admin() && ctx.effective_user_id() != participant → 403` |
 | P1「代码仍是旧三分类 kind」 | **成立且比文档描述更严重**：新词汇表的 `agent_message` / `interaction_request` / `system_notice` 在**整个代码库中出现 0 次**——不是部分实现，是完全未开工。这是本文最大的一块 gap | `grep -rn "turn_started\|interaction_request\|system_notice" core/ apps/` → 0 命中；[chat_sessions.rs:46-48](../../../core/acowork-user/src/chat_sessions.rs#L46) 仅 `KIND_USER_MESSAGE` / `KIND_INTENT_REQUEST` / `KIND_INTENT_RESPONSE` |
 
 另外两处**已具备**、文档未充分肯定的基础，值得记下来（它们让后续 Wave 变轻）：
@@ -66,7 +66,7 @@
 | §8.1 | participants 身份类型校验 | ❌ `Vec<String>`，无类型 | chat_sessions.rs:152 |
 | §8.2 | 参与者派生可见性 | ❌ `SessionVisibility` 只有 Public / Private | [session_meta.rs:188](../../../core/acowork-memory/src/session_meta.rs#L188) |
 | §8.3 | 踢人即失既往执行记录 | ❌ 无 participants 变更 API，也无派生判据 | chat_sessions.rs 只有 `set_repo`，无 add/remove participant |
-| §6.1 | Agent 页主视图 = 默认 Chat session（v2.1：固定 Chat tab 与 exec tab 共存，见 §10 决策 8） | ❌ 前端 `createSession` 直接建 execution session | [agentStore.ts:1160](../../../apps/acowork-desktop/src/stores/agentStore.ts#L1160) |
+| §6.1 | Bot 页主视图 = 默认 Chat session（v2.1：固定 Chat tab 与 exec tab 共存，见 §10 决策 8） | ❌ 前端 `createSession` 直接建 execution session | [agentStore.ts:1160](../../../apps/acowork-desktop/src/stores/agentStore.ts#L1160) |
 | §4.6 | unread 计数 | ❌ 新存储丢了旧能力 | `grep -c unread` → chat_sessions.rs 0 / chat.rs 32 |
 | §4.6 | `list_for` per-participant index | ❌ 全目录扫描 | chat_sessions.rs `list_for` `fs::read_dir` |
 
@@ -89,16 +89,16 @@
 
 选定理由：唯一写入口不变量不受扰动；旧行永不改写，回滚等于删掉一个读侧纯函数。
 
-### D-B：Agent 页历史入口 —— 选定 **B1「改前端传参，不动鉴权」**（**v2.1 作废**）
+### D-B：Bot 页历史入口 —— 选定 **B1「改前端传参，不动鉴权」**（**v2.1 作废**）
 
 | 方案 | 做法 | 结论 |
 |---|---|---|
-| **B1** | 前端以**当前用户 id** 查询，按 `kind == user_agent && participants 含该 agent` 过滤；服务端加可选 `?agent=` 避免拉全量 | ✅ **选定** |
-| B2 | 放宽 `list_sessions`，允许以 agent id 作 participant 查询 | ❌ 等于给任意登录用户一个「枚举他人会话」的探针面，与 §8.4 最小暴露原则相反 |
+| **B1** | 前端以**当前用户 id** 查询，按 `kind == user_agent && participants 含该 bot` 过滤；服务端加可选 `?bot=` 避免拉全量 | ✅ **选定** |
+| B2 | 放宽 `list_sessions`，允许以 bot id 作 participant 查询 | ❌ 等于给任意登录用户一个「枚举他人会话」的探针面，与 §8.4 最小暴露原则相反 |
 
 选定理由：现有鉴权规则（`!is_admin && effective_user_id != participant → 403`）本身正确，不该为一个传参错误开安全洞。
 
-> **v1.1 注**：设计 v2.1 撤销了 Agent 页 Chat history 按钮（user-agent 单聊就是固定 Chat tab，无列表入口），本决策与其验收对象一并作废；「鉴权规则本身正确、不得靠放宽修」的结论仍成立，其它 kind 会话的读取照旧受参与者作用域约束。
+> **v1.1 注**：设计 v2.1 撤销了 Bot 页 Chat history 按钮（user-bot 单聊就是固定 Chat tab，无列表入口），本决策与其验收对象一并作废；「鉴权规则本身正确、不得靠放宽修」的结论仍成立，其它 kind 会话的读取照旧受参与者作用域约束。
 
 ### D-C：写回触发点 —— 选定 **C1「拆分角色判定与写回判定」**
 
@@ -112,10 +112,10 @@
 | 方案 | 做法 | 结论 |
 |---|---|---|
 | **C1** | 拆成两个字段：`chat_writeback: Option<ChatWritebackContext>`（入站带 `source_chat_session_id` 即构造，只决定写回）与 `pending_intent`（仅入站为待答 Intent request 时构造，只决定角色与 tool set）。Gateway 侧人类消息可登记在途追踪，但**不以 request 形态投递** | ✅ **选定** |
-| C2 | Gateway 收到 agent 输出后代为写回 | ❌ 违反 ADR-009 §5 红线；`install_path` 是 node-local，跨机部署必失败 |
+| C2 | Gateway 收到 bot 输出后代为写回 | ❌ 违反 ADR-009 §5 红线；`install_path` 是 node-local，跨机部署必失败 |
 | C3 | 人类消息也走 `kind: "request"` 投递，复用现有 responder 写回链路 | ❌ **陷阱**：会置 `pending_intent`，摘掉 `ask_user_question` / `intent_send`，单聊直接失效——正是 §4.2 警告的「人类消息必须是 `user_message` 而非 request 语义」 |
 
-选定理由与附带收益：`MailboxEntry` **已有 `source_chat_session_id` 与 `answered_at` 字段**，且已支持非 Agent 发起方（`from_instance` 注释明确写了 cron 与 user 来源为空 session）。因此 C1 不需要新建机制，且**超时兜底 sweeper 自动覆盖 1:1**——直接满足 §3.3「不允许存在发完消息永久无响应的状态」。
+选定理由与附带收益：`MailboxEntry` **已有 `source_chat_session_id` 与 `answered_at` 字段**，且已支持非 Bot 发起方（`from_instance` 注释明确写了 cron 与 user 来源为空 session）。因此 C1 不需要新建机制，且**超时兜底 sweeper 自动覆盖 1:1**——直接满足 §3.3「不允许存在发完消息永久无响应的状态」。
 
 > 实现约束：「登记为在途追踪」与「以 request 形态投递」必须解耦。前者是 Gateway 侧的可靠性事实，后者是 Runtime 侧的角色语义。
 
@@ -137,21 +137,21 @@
 
 | ID | 任务 | 涉及 | 验收标准 |
 |---|---|---|---|
-| 1.1 | `create_session` 允许 `user_agent` / `agent_agent` 两类 2 参与者会话 | chat_sessions_api.rs | 非管理员用户能创建自己 + 某 agent 的会话；**同批**加入 1.2，否则越权 |
-| 1.2 | participants 携带身份类型并按 kind 校验写入者 | chat_sessions.rs:152, `append` | agent token 写 `user_message` → 4xx；人类 token 写 `agent_message` → 4xx |
-| 1.3 | `ensure_pair` 客户端 kind 参数化 | chat_client.rs:68 | 同一对 user+agent 二次调用返回同一 session_id（幂等） |
-| 1.4 | 默认会话解析端点 `GET /api/chat-sessions/default?pair=` | chat_sessions_api.rs | 打开 Agent 页能在 1 次请求内拿到默认会话 id |
-| 1.5 | ~~Agent 页历史入口按 **D-B/B1** 修~~（**v2.1 作废**：Chat history 入口撤销，任务随 D-B 一并关闭） | — | — |
+| 1.1 | `create_session` 允许 `user_agent` / `agent_agent` 两类 2 参与者会话 | chat_sessions_api.rs | 非管理员用户能创建自己 + 某 bot 的会话；**同批**加入 1.2，否则越权 |
+| 1.2 | participants 携带身份类型并按 kind 校验写入者 | chat_sessions.rs:152, `append` | bot token 写 `user_message` → 4xx；人类 token 写 `agent_message` → 4xx |
+| 1.3 | `ensure_pair` 客户端 kind 参数化 | chat_client.rs:68 | 同一对 user+bot 二次调用返回同一 session_id（幂等） |
+| 1.4 | 默认会话解析端点 `GET /api/chat-sessions/default?pair=` | chat_sessions_api.rs | 打开 Bot 页能在 1 次请求内拿到默认会话 id |
+| 1.5 | ~~Bot 页历史入口按 **D-B/B1** 修~~（**v2.1 作废**：Chat history 入口撤销，任务随 D-B 一并关闭） | — | — |
 
 ### Wave 2A · 让 1:1 真正能对话（沿用现有词汇表，低风险）
 
-**这是第一个可演示里程碑**：不碰词汇表换代，只修「写回不触发」这一条，就把「打开 Agent 就能说话」跑通。
+**这是第一个可演示里程碑**：不碰词汇表换代，只修「写回不触发」这一条，就把「打开 Bot 就能说话」跑通。
 
 | ID | 任务 | 涉及 | 验收标准 |
 |---|---|---|---|
 | 2a.1 | `message_id` 全 kind 必填、服务端分配 | chat_sessions.rs:326-331 | 不带 id 的 `user_message` 被接受且服务端补齐；重复 id 不产生第二行 |
-| 2a.2 | 去掉 `intent_response` 对 `in_reply_to` 的硬约束 | chat_sessions.rs:337 | 1:1 中 agent 回复能指向触发它的人类消息 |
-| 2a.3 | 拆分 `pending_intent` 与写回判定（**D-C/C1**） | runtime: loop_.rs:442, session_task.rs:1286, loop_tools.rs:1321, intent_turn.rs | 人类在 1:1 会话发消息 → 会话出现 agent 终态行，**且该轮 `ask_user_question` 可用** |
+| 2a.2 | 去掉 `intent_response` 对 `in_reply_to` 的硬约束 | chat_sessions.rs:337 | 1:1 中 bot 回复能指向触发它的人类消息 |
+| 2a.3 | 拆分 `pending_intent` 与写回判定（**D-C/C1**） | runtime: loop_.rs:442, session_task.rs:1286, loop_tools.rs:1321, intent_turn.rs | 人类在 1:1 会话发消息 → 会话出现 bot 终态行，**且该轮 `ask_user_question` 可用** |
 | 2a.4 | 人类触发消息登记在途追踪（不置 responder 角色） | gateway: intent_api.rs, mailbox.rs | 1:1 超时无响应 → sweeper 产出兜底回执，不静默 |
 
 **为什么能独立交付**：2a.3 写回的行仍是旧 `intent_response` 形态，Wave 2B 的读侧归一化（2b.2）之后会把它们与新生成行一并渲染成 `agent_message`。旧行永不改写，所以 2A 先上线不会造成需要二次迁移的数据。
@@ -162,7 +162,7 @@
 |---|---|---|---|
 | 2b.1 | 引入四类 kind，`intent_request`/`intent_response` 降级为字段 | chat_sessions.rs:46-48 | 新写入只产生四类；旧常量仅存在于读侧归一化函数内 |
 | 2b.2 | 读侧归一化（**D-A/A1**） | chat_sessions.rs 读路径 | 含旧行的会话渲染结果与新行逐字段一致（黄金样例） |
-| 2b.3 | R1 判定改为「会话内是否存在人类参与者」 | runtime: loop_tools.rs, inbound.rs | 纯 agent↔agent 会话不创建 `ask_user_question`；群聊里被 @ 的 agent 仍可用 |
+| 2b.3 | R1 判定改为「会话内是否存在人类参与者」 | runtime: loop_tools.rs, inbound.rs | 纯 bot↔bot 会话不创建 `ask_user_question`；群聊里被 @ 的 bot 仍可用 |
 
 **2A 与 2B 之间设一个观察点**：2A 上线后确认 1:1 写回量、兜底回执频率、无重复行，再启动 2B。词汇表换代是全计划唯一会触碰存量数据读取语义的改动，不应与行为修复同批验证。
 
@@ -171,7 +171,7 @@
 | ID | 任务 | 涉及 | 验收标准 |
 |---|---|---|---|
 | 3.1 | `interaction_request` 卡片落 Chat session（提问 / 工具审批 / 暂停续跑 / 重试） | chat_sessions.rs, runtime | 卡片在群聊与 1:1 均可见；未决 = 无 `in_reply_to` 指向它 |
-| 3.2 | 卡片回答通道：`user_message + in_reply_to` 转交执行侧 | gateway/intent, runtime | 回答后 agent 本轮继续（不重放） |
+| 3.2 | 卡片回答通道：`user_message + in_reply_to` 转交执行侧 | gateway/intent, runtime | 回答后 bot 本轮继续（不重放） |
 | 3.3 | `system_notice / turn_started` 指针行 | runtime（**由 Runtime 写**，非 Gateway） | 每轮一条；不落 live_state；重复投递不产生第二行 |
 | 3.4 | 状态读时投影：`GET /sessions/{sid}` → 卡片状态 | 前端 | 收尾判据是聊天终态行，非 Runtime `Idle` |
 | 3.5 | 附件支持（对齐旧 chat.rs 能力） | chat_sessions.rs | `user_message`/`agent_message` 可带附件；blob 与 sidecar 分离 |
@@ -191,7 +191,7 @@
 
 | ID | 任务 | 涉及 | 验收标准 |
 |---|---|---|---|
-| 5.1 | Agent 页统一标签栏：**固定 Chat tab**（标题 = Agent 名，不可关闭/删除）+ 可开关的 execution session tab | AgentPage.tsx, SessionTabBar.tsx, chatSessionStore.ts | 打开 Agent 必落在 Chat tab；exec tab 可随意开关，关掉最后一个回落 Chat tab |
+| 5.1 | Bot 页统一标签栏：**固定 Chat tab**（标题 = Bot 名，不可关闭/删除）+ 可开关的 execution session tab | AgentPage.tsx, SessionTabBar.tsx, chatSessionStore.ts | 打开 Bot 必落在 Chat tab；exec tab 可随意开关，关掉最后一个回落 Chat tab |
 | 5.2 | chat 与 exec 两个表面**共存**：`mode` 只切换活动 tab，不销毁对方 tab | chatSessionStore.ts, SessionTabBar.tsx | 打开 chat 不再关闭全部 exec tab；切换表面后台 tab 与状态保持 |
 | 5.3 | ~~execution session 降级为后台，仅经状态卡片进入~~（**v2.1 撤销**：exec 是平权 tab；状态卡片点击跳转到对应 exec tab） | 前端 | 卡片可跳转到对应执行 tab（受 4.1 权限约束） |
 | 5.4 | 历史渲染自 Chat session + 在途轮次读时投影（`projectInFlight`） | AgentChatView.tsx, ChatPanel.tsx | 终态行到达后替换瞬时视图，无重复气泡；doorbell `chat/changed` 触发重读 |
@@ -203,7 +203,7 @@
 |---|---|---|---|
 | 6.1 | per-participant index 取代 `list_for` 全扫描 | chat_sessions.rs | 会话数增长时列表读取不再线性扫目录 |
 | 6.2 | 旧 `chat.rs` 布局收敛（ADR-084 遗留） | acowork-user | 聊天域只剩一套权威写入口 |
-| 6.3 | Agent 重装换 instance id 的会话孤儿处理 | 设计 §10.19 | 有明确策略（重绑或标记），不静默丢历史 |
+| 6.3 | Bot 重装换 instance id 的会话孤儿处理 | 设计 §10.19 | 有明确策略（重绑或标记），不静默丢历史 |
 
 
 ---
@@ -233,7 +233,7 @@ graph TD
 
 | 组合 | 原因 |
 |---|---|
-| **1.1 + 1.2** | 只放开 kind 校验而不校验参与者身份类型，等于给 agent 一个冒充人类写 `user_message` 的入口 |
+| **1.1 + 1.2** | 只放开 kind 校验而不校验参与者身份类型，等于给 bot 一个冒充人类写 `user_message` 的入口 |
 | **2a.1 + 2a.2 + 2a.3** | `message_id` 全 kind 必填、去掉 `in_reply_to` 硬约束、写回与角色判定解耦——三者共同构成「1:1 能正常对话」，缺任一都表现为会话恒空或回复无处可指 |
 | **2b.1 + 2b.2** | 新 kind 上线时读侧归一化必须同步，否则旧行在前端直接消失 |
 | **4.3 + 4.4** | 只有 participants 变更 API 而 PM 不回传，踢人失权仍是空谈 |
@@ -253,7 +253,7 @@ graph TD
 |---|---|---|
 | **存储单测** | chat_sessions.rs 现有 10 个测试为基线，每个 Wave 追加 | 幂等（重复 `message_id` 不产生第二行）、seq 单调、身份类型校验拒绝路径、pairs 幂等 |
 | **黄金样例** | 固定一组含旧 `intent_request`/`intent_response` 的 `messages.jsonl` 样例 | D-A 读侧归一化的输出与新行逐字段一致 |
-| **端到端** | 三条形态各一条：① 1:1 人类消息 → 会话出现 agent 终态行；② 群聊 @ 两个 agent → 两条独立终态行；③ agent↔agent → 落在 pair 会话且不污染 1:1 | Wave 2/3 的「可观测行为」判据 |
+| **端到端** | 三条形态各一条：① 1:1 人类消息 → 会话出现 bot 终态行；② 群聊 @ 两个 bot → 两条独立终态行；③ bot↔bot → 落在 pair 会话且不污染 1:1 | Wave 2/3 的「可观测行为」判据 |
 | **鉴权负例** | 非参与者查别人会话 → 403；群执行会话非成员读 → **404**（不区分不存在与无权） | §8.2 / §8.4 |
 | **红线守卫** | `dev/ci.sh` 的 `run_gateway_fs_redline` 必须全程绿 | 防止有人把写回塞回 Gateway（D-C 的 C2 反例） |
 | **回滚演练** | 每个 Wave 完成后演练一次「关掉新路径」 | §8 回滚条目可执行；杠杆、演练步骤与 6.2 导出配方见 [回滚演练手册](../runbooks/intent-chat-session-rollback.md) |
@@ -266,11 +266,11 @@ graph TD
 
 | 风险 | 影响 | 缓解 / 回滚 |
 |---|---|---|
-| Wave 2 改 `append` 校验逻辑，可能拒掉现存合法写入 | 群聊与 agent↔agent 投递中断 | 2b.1 + 2b.2 合为一个 PR，用现有 10 个单测 + 黄金样例守住；回滚 = revert 该 PR，旧行未被改写（A1 保证） |
+| Wave 2 改 `append` 校验逻辑，可能拒掉现存合法写入 | 群聊与 bot↔bot 投递中断 | 2b.1 + 2b.2 合为一个 PR，用现有 10 个单测 + 黄金样例守住；回滚 = revert 该 PR，旧行未被改写（A1 保证） |
 | 写回触发点解耦后，人类 turn 也开始写回 → 可能重复落行 | 会话出现重复气泡 | 依赖 `message_id` 幂等（2a.1 先行）；回滚 = 恢复单一 `pending_intent` 门，1:1 退回「不可用」但不产生脏数据 |
 | 放开 `create_session` 参与者校验 | 越权创建他人会话 | 1.2 同批；负例测试进 CI |
 | 派生可见性误用 `Public` | 群执行历史泄露给任意登录用户 | §8.2 明确禁止；4.1 的负例测试是硬门禁 |
-| 前端主视图切换（Wave 5）改动面大 | Agent 页不可用 | 5.1–5.4 与 5.5 分开；v1.1：回滚杠杆不是入口开关，而是 chat surface 不可达时自然退回旧 ChatPanel（无 feature flag，见回滚演练手册） |
+| 前端主视图切换（Wave 5）改动面大 | Bot 页不可用 | 5.1–5.4 与 5.5 分开；v1.1：回滚杠杆不是入口开关，而是 chat surface 不可达时自然退回旧 ChatPanel（无 feature flag，见回滚演练手册） |
 | 与全局搜索线（ADR-093/095）文件冲突 | 合并冲突、互相覆盖 | 本文**不触碰** `search*` / `summary*` / `PreviewPane` / `GlobalSearchDialog`；若必须改 `session_meta.rs`，与搜索线协调后再动 |
 
 ---
@@ -297,13 +297,13 @@ graph TD
 | # | 事项 | 决定 | 依据 |
 |---|---|---|---|
 | 1 | 旧消息行兼容 | **A1 写新读旧**，不做迁移、不双轨共存 | 保住 append-only 与「不迁移历史」，回滚面最小 |
-| 2 | Agent 页历史入口 | **B1 改前端传参**，不放宽 `list_sessions` | 鉴权规则本身正确；放宽会开出会话枚举面 |
+| 2 | Bot 页历史入口 | **B1 改前端传参**，不放宽 `list_sessions` | 鉴权规则本身正确；放宽会开出会话枚举面 |
 | 3 | 写回触发点 | **C1 拆分 `pending_intent` 与写回判定**；排除 C2（违红线）与 C3（角色陷阱） | 一个字段承载两个正交语义是 1:1 不可用的根因 |
 | 4 | Wave 顺序 | **先 2A 后 2B，中间设观察点**；不一次性做完 Wave 2 | 2A 是行为修复（低风险、可演示），2B 改存量读取语义（高风险）；两者同批会让故障归因失效 |
 | 5 | 英文版 plan | **不出** | `docs/plan/` 全仓仅中文集（见 AGENTS.md），单开 en 目录会制造第二套权威 |
 | 6 | 与全局搜索线的冲突 | Wave 4.1 排在**其提交之后**；本计划不触碰 `search*` / `summary*` / `PreviewPane` / `GlobalSearchDialog` | 同文件改动需串行；对方即将收口 |
 | 7 | 设计文档 §3.5 三处误判 | 已回写修正（中英同步），本计划不另立缺陷表 | 设计文档是缺陷事实的唯一来源，plan 只引用不复制 |
-| 8 | user-agent 单聊形态（设计 v2.1 微信模型） | **每 (user, agent) 恰好一条 Chat session**，固定 Chat tab（标题 = Agent 名）与 exec tab 同栏共存；撤销「`+` 建第二条同 pair 会话」「Chat history 列表按钮」及 D-B/1.5 | 用户反馈：聊天应对照微信——会话即联系人的唯一对话；多会话并行由 execution 层承载（ADR-086 决策 8） |
+| 8 | user-bot 单聊形态（设计 v2.1 微信模型） | **每 (user, bot) 恰好一条 Chat session**，固定 Chat tab（标题 = Bot 名）与 exec tab 同栏共存；撤销「`+` 建第二条同 pair 会话」「Chat history 列表按钮」及 D-B/1.5 | 用户反馈：聊天应对照微信——会话即联系人的唯一对话；多会话并行由 execution 层承载（ADR-086 决策 8） |
 
 ### 实现期不再讨论的事项
 
@@ -311,7 +311,7 @@ graph TD
 
 ### 仍需在设计层回答（不阻塞本计划 Wave 0–3）
 
-- §10.19 Agent 重装换 instance id 的会话重绑策略（Wave 6.3 前定）
+- §10.19 Bot 重装换 instance id 的会话重绑策略（Wave 6.3 前定）
 - 旧 `chat.rs` 布局的收敛路径（Wave 6.2 前定）
 - 附件与旧 `chat.rs` files/+sidecar 的复用边界（Wave 3.5 前定）
 

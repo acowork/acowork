@@ -27,7 +27,7 @@
 | **P0 骨架** | crate + axum + Gateway 拉起/监督 | 1-2d | 服务可起停、可监督 |
 | **P1 存储 + REST** | 目录树存储 + 数据模型 + 状态机 + 依赖图 + 附件 + REST API | 5-7d | 服务端完整，人类可用 REST 调试 |
 | **P2 Desktop 视图** | 视图布局 + 4 列看板 + TaskCard + Detail Drawer + Edit Dialog + 拖动 + Reparent + 父子树 + 附件 + 审核 UI + 状态管理 + 离线 + 可访问性 + 性能 | 6-8d | 人类可用基础项目管理（含 a11y/perf） |
-| **P3 MCP + 审核** | pm MCP HTTP Server + 工具鉴权 + 人类审核 UI + catalog 自动注入 | 2-3d | Agent 可自查/领/交；审核全链路 |
+| **P3 MCP + 审核** | pm MCP HTTP Server + 工具鉴权 + 人类审核 UI + catalog 自动注入 | 2-3d | Bot 可自查/领/交；审核全链路 |
 | **P4 远程 + 验证** | advertise endpoint + 远程 Runtime 集成 + 端到端测试 + 文档 v1.0 | 1-2d | 全链路可用，文档收口 |
 | **合计** | — | **17-21d** | — |
 
@@ -67,7 +67,7 @@
 | T1-8 | 依赖图校验：创建/编辑时 `depends_on` DFS 防环（深度 ≤ 10） + `is_blocked` / `blocked_by` 派生字段 | 0.5d | T1-1 | 自环 / A→B→A 返回 422；跨项目依赖允许 |
 | T1-9 | 附件存储：上传（multipart + sha256 + 大小限制 10MB / 50MB） + 图片缩略图生成（`image/*` → 256x256 JPG） + 元数据写 `task.json` | 1d | T1-1 | 图片有缩略图；超 10MB 返回 413；累计超 50MB 返回 413 |
 | T1-10 | 附件下载 + 删除：`GET /api/attachments/:id`（`?download=1` 强制下载） + `DELETE` 物理清理 | 0.25d | T1-9 | inline preview + 下载头正确；删除后元数据 + 文件双清 |
-| T1-11 | Agent 目录同步：启动拉全量 + 周期刷新（`agent_sync_interval_secs`） + 即时校验兜底（HTTP 调用 Gateway `/api/agents`） | 0.5d | T1-6 | 缓存命中；Agent 卸载后指派校验立即失败 |
+| T1-11 | Bot 目录同步：启动拉全量 + 周期刷新（`agent_sync_interval_secs`） + 即时校验兜底（HTTP 调用 Gateway `/api/agents`） | 0.5d | T1-6 | 缓存命中；Bot 卸载后指派校验立即失败 |
 | T1-12 | REST API 实现（§5 全量端点，扣除 P3 才需要的 `/api/reviews` / `/api/tasks/:id/approve` / `/api/tasks/:id/reject`） | 1d | T1-3~T1-10 | 每个端点 happy path 通过 |
 | T1-13 | 统一错误处理：`{"error": {"code": "...", "message": "...", "details": {...}}}` + 正确 HTTP 状态码 | 0.25d | T1-12 | 错误响应格式一致；关键错误码 400/403/404/409/413/422/500 |
 | T1-14 | 集成测试：`tests/integration/` 覆盖项目/任务 CRUD、子任务树、reparent、防环、附件、状态机 | 1d | T1-12, T1-13 | 测试套件全绿 |
@@ -113,13 +113,13 @@
 |----|------|------|------|------|
 | T3-1 | pm MCP HTTP Server：`POST /mcp` 端点 + 复用 `McpTransport` HTTP 模式 + 工具注册（§6 表格全量） | 1d | P2, T2-16 | MCP 客户端可连接并列出工具 |
 | T3-2 | MCP 工具实现：`pm_list_projects` / `pm_list_tasks` / `pm_get_task` / `pm_claim_task`（含依赖校验） / `pm_update_task` / `pm_submit_task` / `pm_create_task`（→ `review_status=pending`） / `pm_check_task` / `pm_reparent_task` | 0.5d | T3-1, P1 | 所有工具 happy path 通过；claim 时依赖未满足返回 `DependencyNotSatisfied` |
-| T3-3 | Agent 工具调用身份校验：每次调用携带 `agent_id`，状态变更工具校验 == 任务 `assignee`（§9.2）；MCP 匿名只允许只读工具（§9.3） | 0.5d | T3-2 | 非 assignee 调用 claim/submit 返回 403；无身份调用 list 也允许 |
-| T3-4 | catalog 自动注入：`auto_inject_mcp=true` 时 Gateway AgentHello / 资源下发携带 pm MCP 端点 | 0.25d | T3-1 | Agent 启动后自动获得 `pm_*` 工具列表 |
-| T3-5 | 端到端测试（本地）：Agent 通过 MCP claim → submit → 看板刷新；人类审核通过 → Agent 收到通知 | 0.25d | T2-11, T3-1~T3-4 | 测试通过 |
+| T3-3 | Bot 工具调用身份校验：每次调用携带 `agent_id`，状态变更工具校验 == 任务 `assignee`（§9.2）；MCP 匿名只允许只读工具（§9.3） | 0.5d | T3-2 | 非 assignee 调用 claim/submit 返回 403；无身份调用 list 也允许 |
+| T3-4 | catalog 自动注入：`auto_inject_mcp=true` 时 Gateway AgentHello / 资源下发携带 pm MCP 端点 | 0.25d | T3-1 | Bot 启动后自动获得 `pm_*` 工具列表 |
+| T3-5 | 端到端测试（本地）：Bot 通过 MCP claim → submit → 看板刷新；人类审核通过 → Bot 收到通知 | 0.25d | T2-11, T3-1~T3-4 | 测试通过 |
 
 > **调整说明**：原 v0.2 中 T3-4"待审核列表 UI"已合并到 P2 / T2-11（详见 §3.3 UX 对齐），P3 仅保留 MCP 服务端相关任务。
 
-**P3 出口**：Agent 可通过 MCP 自查 / 自领 / 提交任务；人类审核全链路打通。
+**P3 出口**：Bot 可通过 MCP 自查 / 自领 / 提交任务；人类审核全链路打通。
 
 ---
 
@@ -129,7 +129,7 @@
 |----|------|------|------|------|
 | T4-1 | advertise endpoint 下发：参考 ADR-055 §6.3/§6.8，复用 MQTT 全局资源与 AgentHello 回执，构造 `http://{advertise_host}:{gw_http_port}/api/pm/mcp` 推送给远程 Runtime | 0.5d | T3-5 | ✅ `build_available_mcps` 注入 pm MCP 单测通过（`pm_mcp_url` 存在注入 / 不存在跳过） |
 | T4-2 | 远程 Runtime 集成：远程节点通过 advertise endpoint 调用 pm MCP 工具（含身份校验） | 0.5d | T4-1 | ✅ `remote_e2e.rs` 非 assignee 鉴权失败（-32002）+ 匿名只读（-32001）通过 |
-| T4-3 | 端到端测试（远程）：人类 Desktop 建项目/任务 → 远程 Agent claim → submit → 看板刷新 | 0.5d | T4-1, T4-2, P2, P3 | ✅ `remote_e2e.rs` 全链路（真实 HTTP server + reqwest）通过 |
+| T4-3 | 端到端测试（远程）：人类 Desktop 建项目/任务 → 远程 Bot claim → submit → 看板刷新 | 0.5d | T4-1, T4-2, P2, P3 | ✅ `remote_e2e.rs` 全链路（真实 HTTP server + reqwest）通过 |
 | T4-4 | 文档收口：[`21-pm-project-management.md`](../../design/zh/21-pm-project-management.md) v0.2 → v1.0（移除开放问题表 → 决策记录表） + ADR 起草（PM 目录树存储选型） | 0.25d | T4-3 | ✅ 文档 v1.0 发布；ADR-061 已定案 |
 
 **P4 出口**：远程节点全链路可用；文档 v1.0 发布。✅ 已达成
@@ -219,7 +219,7 @@ gantt
 | **Desktop UI 拖动并发** | 中 | 多窗口同时拖动同一任务 | 后端状态机为权威 + 乐观更新失败回滚；前端去抖 |
 | **附件大文件上传超时** | 低 | 10MB 文件在慢网络下超时 | multipart 流式处理 + 客户端分块 + 服务端进度上报（可选 P2） |
 | **依赖图 DFS 性能** | 低 | 任务依赖深度超 10 | 已在 §3.5 限制；创建时校验；运行时依赖图走内存索引 |
-| **Agent 目录同步窗口期** | 低 | 周期刷新前 Agent 已卸载 | 创建/编辑任务时即时校验兜底（HTTP 调用 Gateway） |
+| **Bot 目录同步窗口期** | 低 | 周期刷新前 Bot 已卸载 | 创建/编辑任务时即时校验兜底（HTTP 调用 Gateway） |
 
 ---
 
@@ -230,7 +230,7 @@ gantt
 | **P0** | Gateway 拉起 pm 子进程；pm `/health` 返回 200；手动 kill 自动重启；端口冲突自动递增；配置项可改 |
 | **P1** | 所有 §5 REST 端点（扣除审核相关）curl 测试通过；集成测试套件全绿；目录树存储肉眼可读 |
 | **P2** | 4 列看板拖动工作；reparent 防环；父子树展开；附件图片预览 + 非图片下载；审核 UI inline + RejectDialog；react-query + 乐观更新；离线 banner + 写禁用；键盘拖动 + ARIA；千卡 60fps；E2E 烟测通过 |
-| **P3** | Agent 通过 MCP claim/submit 全链路；人类审核 UI 工作；catalog 自动注入 |
+| **P3** | Bot 通过 MCP claim/submit 全链路；人类审核 UI 工作；catalog 自动注入 |
 | **P4** | 远程 Runtime 可访问 pm MCP；端到端测试通过；文档 v1.0 发布 |
 
 ---
@@ -242,7 +242,7 @@ gantt
 | 附件 sha256 物理去重 | 任务量超 1k 且重复截图多 | 1d |
 | 全文检索（任务标题/描述） | 任务量超 5k | 1d |
 | SQLite 存储层切换（`SqliteTaskStore` 实现 trait） | 任务量超 10k 或启动重建 > 5s | 2d |
-| Webhook 通知（任务状态变更推外部） | PM Agent 接入需求 | 1d |
+| Webhook 通知（任务状态变更推外部） | PM Bot 接入需求 | 1d |
 | 时间线视图 / Gantt 图 | 多任务依赖可视化需求 | 3d |
 | 评论 / @提及 | 多人协作需求 | 2d |
 

@@ -13,9 +13,9 @@ ADR-073 三层身份迁移方向正确、覆盖面广（5 crate），lib/TS 测�
 
 | # | 级别 | 问题 | 证据位置 |
 |---|---|---|---|
-| P1-1 | 严重 | MQTT `client_id`/CONNECT 用户名仍为 `agent:{agent_id}`，同包双实例同 broker 互踢 | [client.rs:956](../../../core/acowork-runtime/src/mqtt/client.rs#L956)、[spawn.rs:151](../../../core/acowork-node/src/process/spawn.rs#L151) |
+| P1-1 | 严重 | MQTT `client_id`/CONNECT 用户名仍为 `bot:{agent_id}`，同包双实例同 broker 互踢 | [client.rs:956](../../../core/acowork-runtime/src/mqtt/client.rs#L956)、[spawn.rs:151](../../../core/acowork-node/src/process/spawn.rs#L151) |
 | P1-2 | 严重 | AgentRegistry envelope 解码分支以 `status.agent_id` 为 key，与 dispatch loopback（身份已放 `instance_id`、`agent_id` 置空）错位 → `""` 空 key 垃圾项、重启后 online 状态丢失 | [agent_registry.rs:143](../../../core/acowork-gateway/src/mqtt/agent_registry.rs#L143)、[dispatch.rs:424-430](../../../core/acowork-gateway/src/mqtt/dispatch.rs#L424) |
-| P1-3 | 严重 | `auto_install_bundled_agents` 每次启动 copy 系统 Agent 到新 UUID 目录且无清理 → 跨重启积累重复实例 | [gateway/mod.rs:193-213](../../../core/acowork-gateway/src/gateway/mod.rs#L193) |
+| P1-3 | 严重 | `auto_install_bundled_agents` 每次启动 copy 系统 Bot 到新 UUID 目录且无清理 → 跨重启积累重复实例 | [gateway/mod.rs:193-213](../../../core/acowork-gateway/src/gateway/mod.rs#L193) |
 | P2-1 | 架构 | `AgentInstanceId` opaque 类型生产代码 0 使用；HashMap key 全 String + resolve 兼容层，与 ADR 决策 1/2 不符 | [state.rs:205-207](../../../core/acowork-gateway/src/gateway/state.rs#L205) |
 | P2-2 | 安全 | Node 对入站 `instance_id` 无 UUID/路径校验，直接拼文件系统路径 | [install.rs:98](../../../core/acowork-node/src/package/install.rs#L98) |
 | P2-3 | 范围 | ADR 决策 5.1（两条安装流水线收敛）未实现 | [gateway/mod.rs:170-214](../../../core/acowork-gateway/src/gateway/mod.rs#L170) |
@@ -28,7 +28,7 @@ ADR-073 三层身份迁移方向正确、覆盖面广（5 crate），lib/TS 测�
 
 | 项 | 裁决 |
 |---|---|
-| P1-1 | 所有标识 agent 实例的场景一律 `instance_id`；`agent_id` 是"包类型"，使用场景极少；**standalone 也不回退 `agent_id`**——instance_id 是实例唯一标识，与 standalone 无关 |
+| P1-1 | 所有标识 bot 实例的场景一律 `instance_id`；`agent_id` 是"包类型"，使用场景极少；**standalone 也不回退 `agent_id`**——instance_id 是实例唯一标识，与 standalone 无关 |
 | P1-2 | 同意方案：registry 按 instance 为 key（envelope `instance_id` 优先、topic 兜底），补回归测试 |
 | P1-3 | 不搞复杂：只装自己的、**不删别家目录**、不做旧数据兼容/迁移（未上线，数据可手动清） |
 | P2-1 | 同理不做数据兼容，**代码不留旧物，按 ADR"新的"来**（即 opaque `AgentInstanceId` 类型模型） |
@@ -52,9 +52,9 @@ ADR-073 三层身份迁移方向正确、覆盖面广（5 crate），lib/TS 测�
 
 - [x] `runtime/src/cli.rs`：`--agent-instance-id` 必填（`String`，无 default/无 Option）
 - [x] `runtime/src/config.rs`：`agent_instance_id: String`；`validate()` 升级为 `AgentInstanceId::from_string`（UUID 形状校验，非仅空串）；`instance_id()` 无 fallback
-- [x] `runtime/src/mqtt/client.rs`：`client_id = agent:{instance_id}`（无 agent_id 回退）；`MqttConnectConfig.instance_id: &str` 必填；status/meta/config/ready/session 各 topic 全部 instance 化
+- [x] `runtime/src/mqtt/client.rs`：`client_id = bot:{instance_id}`（无 agent_id 回退）；`MqttConnectConfig.instance_id: &str` 必填；status/meta/config/ready/session 各 topic 全部 instance 化
 - [x] 测试 fixture 全部 UUID 化：client.rs 内部 broker 测试 ×2、http/server.rs 测试、agent_config_publisher_e2e（helper 返回 instance）、fs_watcher_e2e、mqtt_e2e_full（8 处 runtime + gw 控制 publish target + LWT 订阅/断言同步 instance）
-- [ ] **待验证项**：broker CONNECT/ACL 中 `agent:{id}` 用户名是否需要 instance 维度（§6.8）——保持打开，另行验证（ACL 测试 fixture 仍用 `agent:foo` 等包名）
+- [ ] **待验证项**：broker CONNECT/ACL 中 `bot:{id}` 用户名是否需要 instance 维度（§6.8）——保持打开，另行验证（ACL 测试 fixture 仍用 `bot:foo` 等包名）
 
 ### 阶段 3 — P1-3：auto_install 幂等且零清理（✅ 完成）
 

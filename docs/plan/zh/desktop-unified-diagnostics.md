@@ -6,7 +6,7 @@
 > 关联 ADR：[`ADR-036`](../../adr/zh/ADR-036-mqtt-connection-state.md)（MQTT 状态前端真相）、[`ADR-064`](../../adr/zh/ADR-064-pm-standalone-process.md)（sidecar 独立进程范式）、[`ADR-065`](../../adr/zh/ADR-065-desktop-sleep-wake-recovery.md)（桌面休眠唤醒）
 > 关联计划：[`pm-dev-plan.md`](./pm-dev-plan.md)（P0 骨架模式参照）、[`doc-dev-plan.md`](./doc-dev-plan.md)（P0 骨架模式参照）
 >
-> **一句话**：把 Desktop App 的"节点诊断"扩展为**全栈服务诊断面板**（Gateway + Node + Embed + PM + Doc + LSP），同时修掉"输入框永远卡在正在连接 Agent"的前端看门狗 bug；按 P0→P2 三个里程碑交付，预估总工期 **5-8 人日**（单人全职 1-1.5 周）。
+> **一句话**：把 Desktop App 的"节点诊断"扩展为**全栈服务诊断面板**（Gateway + Node + Embed + PM + Doc + LSP），同时修掉"输入框永远卡在正在连接 Bot"的前端看门狗 bug；按 P0→P2 三个里程碑交付，预估总工期 **5-8 人日**（单人全职 1-1.5 周）。
 
 ---
 
@@ -14,11 +14,11 @@
 
 ### 0.1 触发事件
 
-2026-09-14 用户报告：Desktop (192.168.3.61) 连远程 Gateway (192.168.3.67)，系统休眠唤醒后消息框**长时间**显示"正在连接 Agent"（10 小时+ 不恢复）。诊断日志（[desktop-app/logs/20260914_004033.log](../../../.acowork/desktop-app/logs/)）确认：
+2026-09-14 用户报告：Desktop (192.168.3.61) 连远程 Gateway (192.168.3.67)，系统休眠唤醒后消息框**长时间**显示"正在连接 Bot"（10 小时+ 不恢复）。诊断日志（[desktop-app/logs/20260914_004033.log](../../../.acowork/desktop-app/logs/)）确认：
 
 - **Rust 后端 MQTT 健康**：心跳持续发送 10 小时，仅启动一次 connecting→connected 状态切换，**无 disconnect / reconnect / wake_recovery** 日志
 - **Gateway HTTP 健康**：设置 → 网关设置 → 节点列表全部显示**在线**（HTTP `/api/nodes` 正常）
-- **前端 `chatStore.mqttConnected = false`**：导致 ChatPanel 输入框 placeholder 永远停在 "正在连接 Agent..."
+- **前端 `chatStore.mqttConnected = false`**：导致 ChatPanel 输入框 placeholder 永远停在 "正在连接 Bot..."
 
 **结论**：服务端**没有故障**；前端 Rust eventloop **没有故障**；前端 `chatStore` 状态**与 Rust 状态不一致**，且**没有任何自愈机制**。
 
@@ -54,7 +54,7 @@
 |---------|---------|-------|---------|
 | Gateway HTTP | `gateway` | 🔴 关键 | `/health`（已存在） |
 | Gateway MQTT | `mqtt` | 🔴 关键 | `get_mqtt_status`（已存在） |
-| Node Agent × N | `node-{id}` | 🔴 关键 | `/api/nodes`（已存在） |
+| Node Service × N | `node-{id}` | 🔴 关键 | `/api/nodes`（已存在） |
 | Embed | `embed` | 🟡 重要 | `127.0.0.1:{embed_port}/health` |
 | PM | `pm` | 🟡 重要 | `127.0.0.1:{pm_port}/health` |
 | Doc | `doc` | 🟢 可选 | `127.0.0.1:{doc_port}/health` |
@@ -78,7 +78,7 @@
 
 | 阶段 | 内容 | 估时 | 交付物 |
 |------|------|------|--------|
-| **P0 看门狗修复** | chatStore 5s 常驻 polling + 不一致自动同步 + 卡住超时强制重连 + `effectiveConnection` 综合字段 + ChatPanel placeholder 接入新字段 | 1.5-2d | 输入框永不卡死在"正在连接 Agent" |
+| **P0 看门狗修复** | chatStore 5s 常驻 polling + 不一致自动同步 + 卡住超时强制重连 + `effectiveConnection` 综合字段 + ChatPanel placeholder 接入新字段 | 1.5-2d | 输入框永不卡死在"正在连接 Bot" |
 | **P1 诊断面板** | 新增 Rust `diagnose_services` + `probe_service` 命令 + 前端 `servicesStore` + `GatewayTab` 改造为"全栈服务"卡片 + 原"节点管理"嵌入关键性分组 | 2-3d | 设置 → 网关设置 看到完整服务诊断 |
 | **P2 远程与集成** | 远程模式下 service 列表走 `/api/services` 反代；端到端烟测；文档收口 | 1-2d | 远程拓扑下诊断全链路可用 |
 | **合计** | — | **5-8d** | — |
@@ -100,7 +100,7 @@
 |-------------------|---------------------------|---------------------|
 | `Connected` 且前端 `mqttConnected=true` | `connected` | "输入消息..." |
 | `Connected` 但前端 `mqttConnected=false`（卡了 ≥10s） | `stale` | "连接状态异常，正在恢复..." |
-| `Connecting` 且持续 ≤30s | `connecting` | "正在连接 Agent..." |
+| `Connecting` 且持续 ≤30s | `connecting` | "正在连接 Bot..." |
 | `Connecting` 且持续 >30s | `stale`（自动触发 `force_reconnect_mqtt`） | "连接状态异常，正在恢复..." |
 | `Reconnecting` | `reconnecting` | "正在重新连接..." |
 | `Disconnected { reason }` | `disconnected` | "Gateway 未连接"（保留现有 placeholder 语义） |
@@ -117,7 +117,7 @@
 | P0-5 | vitest 单测覆盖：(a) Rust Connected + 前端 false → 5s 内自动同步；(b) Connecting 卡 30s → 触发 force_reconnect；(c) `effectiveConnection` 状态机正确 | 0.5d | P0-1~P0-4 | 单测全绿 |
 | P0-6 | 手工烟测：手动 `stop_local_gateway` → 输入框从 connected → disconnected → 启动 → connected；模拟唤醒（关闭 + 重开 webview） | 0.25d | P0-1~P0-5 | 5 种状态切换流畅，无卡死 |
 
-**P0 出口**：所有"输入框永远正在连接 Agent"场景 5 秒内自动恢复。
+**P0 出口**：所有"输入框永远正在连接 Bot"场景 5 秒内自动恢复。
 
 ---
 
