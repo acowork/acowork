@@ -352,7 +352,7 @@ class AdapterStore {
     await ss.loadSessionMessages(this.agentId, this.sessionId, tailOffset, PAGINATION_PAGE_SIZE, true);
     // A bare tail page can fold to a LONE explore block (see the helper) —
     // same treatment as the session-open/switch-back path.
-    await expandWindowToTurnBoundary(this.agentId, this.sessionId, PAGINATION_PAGE_SIZE);
+    await expandWindowToTurnBoundary(this.agentId, this.sessionId);
     this.cacheGeneration++;
     this.bumpVersion();
   };

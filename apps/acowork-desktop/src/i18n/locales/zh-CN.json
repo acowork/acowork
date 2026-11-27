@@ -1751,7 +1751,10 @@
     "running_one": "{{count}} 个运行中",
     "running_other": "{{count}} 个运行中",
     "cancelTool": "取消工具",
-    "cancelledByUser": "已由用户取消"
+    "cancelledByUser": "已由用户取消",
+    "loadingDetail": "加载详情…",
+    "detailLoadError": "详情加载失败",
+    "retryDetail": "重试"
   },
   "thinkBlock": {
     "thinking": "正在思考",

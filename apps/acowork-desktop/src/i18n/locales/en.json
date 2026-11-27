@@ -2025,7 +2025,10 @@
     "running_one": "{{count}} running",
     "running_other": "{{count}} running",
     "cancelTool": "Cancel tool",
-    "cancelledByUser": "Cancelled by user"
+    "cancelledByUser": "Cancelled by user",
+    "loadingDetail": "Loading detail…",
+    "detailLoadError": "Detail could not be loaded",
+    "retryDetail": "Retry"
   },
   "thinkBlock": {
     "thinking": "Thinking",

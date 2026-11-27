@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { ChevronRight, ChevronDown, Search, Wrench, Terminal, Check, X, Square } from "lucide-react";
-import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
+import type { ChatMessage, ExploreStubMeta, ToolApprovalNeededEvent } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cardButtonAccent, cardButtonNeutral } from "../../lib/ui-styles";
@@ -41,6 +41,26 @@ interface ExploreBlockProps {
    * ThinkBlock is the only way to show the streaming preview.
    */
   isLive?: boolean;
+  /**
+   * t-01412679: set when this block was folded from an explore-STUB row —
+   * the collapsed header renders from this metadata (`rawCount`, `tools`)
+   * and the run's raw rows are fetched lazily on first expand.
+   */
+  stub?: ExploreStubMeta;
+  /** The fetched raw rows (from the store's `exploreDetails` cache, keyed by
+   *  the stub id). When present, a stub block renders them exactly like a raw
+   *  run; while absent the block is LAZY and renders its metadata header. The
+   *  cache is the single source of the lazy state — `MessageBlock.lazy` is the
+   *  folder's "this block has no rows" flag, not a second copy of it. */
+  details?: ChatMessage[];
+  /** Request the detail rows for this stub (idempotent, in-flight deduped).
+   *  Called on first expand and on locate-inside auto-expand. */
+  onFetchDetail?: () => void;
+  /** A locate hit landed inside this lazy block — open it once. */
+  autoExpand?: boolean;
+  /** The last detail fetch failed; the block offers a retry instead of
+   *  pretending the rows are still on their way. */
+  detailError?: boolean;
 }
 
 const SHELL_TOOLS = ["bash", "powershell", "shell"];
@@ -304,7 +324,7 @@ function approvalMatchesSession(
  * - Open (manual): the reader may open it at any time; the fold stays open
  *   until they close it (or an authorization opens it and later closes it).
  */
-export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove, hasFollowUpReply, onCancelTool, toolProgress, isThinking, thinkingContent, thinkingStartTime, isLive }: ExploreBlockProps) {
+export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove, hasFollowUpReply, onCancelTool, toolProgress, isThinking, thinkingContent, thinkingStartTime, isLive, stub, details, onFetchDetail, autoExpand, detailError }: ExploreBlockProps) {
   const { t } = useTranslation();
   // Folded by default. `hasFollowUpReply` no longer decides the resting
   // shape — the reader opens the block when they want the detail.
@@ -318,13 +338,34 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
     }
   }, [expanded, items, thinkingContent]);
 
+  // t-01412679: a stub block whose detail rows have arrived renders them
+  // exactly like a raw run; one whose details are still missing (or never
+  // fetched) renders its metadata header only.
+  const isLazyStub = !!stub && !details;
+  const effectiveItems = details ?? items;
+
+  // Locate hit inside a collapsed block = the reader asked for that row:
+  // open and fetch without waiting for a click.
+  useEffect(() => {
+    if (autoExpand && stub && !details) {
+      setExpanded(true);
+      onFetchDetail?.();
+    }
+    // One-shot: `autoExpand` is set by the locate effect and the fetch is
+    // idempotent, so re-runs are harmless; deliberately not re-firing on
+    // every metadata re-render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoExpand, stub?.start]);
+
   // Memoized: the pending-authorization set below reads it, and a fresh
   // array identity every render would make that set recompute (and the
   // fold effect re-fire) on renders that changed nothing about the block.
-  const pairedItems = useMemo(() => buildPairedItems(items), [items]);
-  const stepCount = pairedItems.length;
-  const visualCanvasPath = useMemo(() => findVisualCanvasRelPath(items), [items]);
-  const visualCanvasShotSeqValue = useMemo(() => visualCanvasShotSeq(items), [items]);
+  const pairedItems = useMemo(() => buildPairedItems(effectiveItems), [effectiveItems]);
+  // A collapsed stub has no rows to count — the header reads the run's
+  // raw size straight off the stub metadata instead.
+  const stepCount = isLazyStub ? (stub?.rawCount ?? 0) : pairedItems.length;
+  const visualCanvasPath = useMemo(() => findVisualCanvasRelPath(effectiveItems), [effectiveItems]);
+  const visualCanvasShotSeqValue = useMemo(() => visualCanvasShotSeq(effectiveItems), [effectiveItems]);
 
   // Count tool_calls that have NOT yet been paired with a tool_result.
   // Derived once here so the collapsed-header "M running" badge can read
@@ -373,6 +414,12 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
   // folded, and the pending decision was invisible.
   const pendingApprovalKeys = useMemo(() => {
     if (!pendingApproval) return [] as string[];
+    // t-01412679 §9.5: a lazy stub has NO rows to pair approvals against —
+    // the set stays structurally empty, so the pending-driven force-expand
+    // below can never half-open an empty block. Today a pending can only
+    // live on the live tail (raw rows, never stubbed) and `pendingApproval`
+    // is cleared on session load; this guard is the invariant, not a patch.
+    if (isLazyStub) return [] as string[];
     const keys: string[] = [];
     for (const paired of pairedItems) {
       if (paired.kind !== "tool" || paired.result) continue;
@@ -383,7 +430,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
       if (ev && approvalMatchesSession(ev, currentSessionId)) keys.push(id);
     }
     return keys;
-  }, [pendingApproval, currentSessionId, pairedItems]);
+  }, [pendingApproval, currentSessionId, pairedItems, isLazyStub]);
 
   const hasPendingApproval = pendingApprovalKeys.length > 0;
 
@@ -453,6 +500,9 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
         onClick={() => {
           const next = !expanded;
           setExpanded(next);
+          // t-01412679: opening a lazy stub is the one moment its raw rows
+          // are worth a request. Idempotent + in-flight deduped store-side.
+          if (next && isLazyStub) onFetchDetail?.();
           // A manual toggle takes the block back from the authorization:
           // if the reader closes it by hand, the pending decision must not
           // re-open it behind their back — and if they open it by hand,
@@ -484,6 +534,19 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
           )}
           )
         </span>
+        {/* t-01412679: a collapsed stub shows the run's tool names straight
+            off its metadata — the chip line a raw run draws from its rows,
+            without the rows. First 3 unique names, "+N" for the rest. */}
+        {!expanded && isLazyStub && stub && stub.tools.length > 0 && (() => {
+          const uniq = Array.from(new Set(stub.tools));
+          const shown = uniq.slice(0, 3);
+          const rest = uniq.length - shown.length;
+          return (
+            <span className="text-text-tertiary opacity-80">
+              {" · "}{shown.join(", ")}{rest > 0 ? ` +${rest}` : ""}{stub.toolsTruncated ? "…" : ""}
+            </span>
+          );
+        })()}
         {expanded ? (
           <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0 text-text-tertiary" />
         ) : (
@@ -513,6 +576,29 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
           }}
         >
           <div className="flex flex-col gap-0.5">
+            {/* t-01412679: expanded but the detail fetch is still in flight —
+                the header already told the reader what this run is, so a
+                quiet line beats a spinner while the rows arrive. */}
+            {isLazyStub && (
+              <div
+                className="text-text-tertiary"
+                style={{ fontSize: EXPLORE_FONT_SIZE }}
+              >
+                {detailError ? (
+                  <span className="inline-flex items-center gap-2">
+                    {t("exploreBlock.detailLoadError")}
+                    <button
+                      onClick={onFetchDetail}
+                      className={cardButtonNeutral}
+                    >
+                      {t("exploreBlock.retryDetail")}
+                    </button>
+                  </span>
+                ) : (
+                  t("exploreBlock.loadingDetail")
+                )}
+              </div>
+            )}
             {pairedItems.map((paired, idx) => (
               <PairedExploreItem key={idx} item={paired} isStreaming={isStreaming} pendingApproval={pendingApproval} currentSessionId={currentSessionId} onApprove={handleApprove} onCancelTool={onCancelTool} toolProgress={toolProgress} />
             ))}
@@ -553,7 +639,15 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
     && prev.isThinking === next.isThinking
     && prev.thinkingContent === next.thinkingContent
     && prev.thinkingStartTime === next.thinkingStartTime
-    && prev.isLive === next.isLive;
+    && prev.isLive === next.isLive
+    // t-01412679: stub identity — the block must re-render when its detail
+    // rows land (the whole point of the lazy path) and when the locate hint
+    // arrives. `onFetchDetail` is excluded like `onApprove`: inline callback,
+    // its identity changing means nothing about this block's data.
+    && prev.stub === next.stub
+    && prev.details === next.details
+    && prev.detailError === next.detailError
+    && prev.autoExpand === next.autoExpand;
 });
 
 /** Pair tool_call with its corresponding tool_result.

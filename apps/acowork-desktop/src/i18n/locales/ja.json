@@ -1463,7 +1463,10 @@
     "running_one": "{{count}} 件実行中",
     "running_other": "{{count}} 件実行中",
     "cancelTool": "ツールをキャンセル",
-    "cancelledByUser": "ユーザーによりキャンセル"
+    "cancelledByUser": "ユーザーによりキャンセル",
+    "loadingDetail": "詳細を読み込み中…",
+    "detailLoadError": "詳細を読み込めませんでした",
+    "retryDetail": "再試行"
   },
   "thinkBlock": {
     "thinking": "思考中",

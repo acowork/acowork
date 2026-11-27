@@ -1464,7 +1464,10 @@
     "running_one": "{{count}}개 실행 중",
     "running_other": "{{count}}개 실행 중",
     "cancelTool": "도구 취소",
-    "cancelledByUser": "사용자에 의해 취소됨"
+    "cancelledByUser": "사용자에 의해 취소됨",
+    "loadingDetail": "세부 정보 로딩 중…",
+    "detailLoadError": "세부 정보를 불러오지 못했습니다",
+    "retryDetail": "다시 시도"
   },
   "thinkBlock": {
     "thinking": "생각 중",

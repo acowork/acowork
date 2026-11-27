@@ -10,8 +10,8 @@
  * existing block, which is the foundation for stable scroll anchoring.
  */
 
-import type { ChatMessage } from "../../lib/types";
-import { isUserTurnPart } from "./messageParts";
+import type { ChatMessage, ExploreStubMeta } from "../../lib/types";
+import { isExploreRunRow, isUserTurnPart } from "./messageParts";
 
 /** The part registry lives in `messageParts` because the JSONL loader needs the
  *  same definition (it decides which rows keep their `metadata` at all). Keeping
@@ -66,6 +66,26 @@ export interface MessageBlock {
    * remain functional during streaming.  Default false (history-only).
    */
   isLive: boolean;
+  /**
+   * t-01412679: set when this `explore_group` came from an explore-STUB row
+   * (`groups=stub` page projection) — the block renders its collapsed header
+   * from `stub` metadata and fetches the run's raw rows on first expand.
+   *
+   * `items` stays EMPTY for the block's whole life: the detail rows live in
+   * the store's `exploreDetails` cache (keyed by `stubId`) and reach the
+   * component as its `details` prop. The folder is a pure function of
+   * `messages[]`, and those rows are deliberately not in it — so `lazy` means
+   * "this block holds no rows", never "a re-fold is coming".
+   */
+  stub?: ExploreStubMeta;
+  /** The stub ROW's id — the detail cache key and the fetch argument.
+   *  Equal to `blockId.slice("block-".length)` by construction; carried
+   *  explicitly so no consumer re-derives it from the key's format. */
+  stubId?: string;
+  /** True for a folded stub block: it carries no `items`, its rows come from
+   *  the store's detail cache. Every consumer that needs "does this block have
+   *  rows?" reads this, not `items.length`. */
+  lazy?: boolean;
 }
 
 /**
@@ -181,11 +201,32 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
       continue;
     }
 
-    if (
-      msg.type === "tool_call" ||
-      msg.type === "tool_result" ||
-      msg.type === "thought"
-    ) {
+    // t-01412679: an explore-STUB row is already a folded group server-side.
+    // It becomes a lazy `explore_group` block: the header renders from `stub`
+    // metadata and `items` stays empty for the block's whole life — the detail
+    // rows are the STORE's (`exploreDetails`, keyed by this row's id) and reach
+    // the component as its `details` prop. The folder stays a pure function of
+    // `messages[]`; nothing re-folds when a fetch lands. Like a live run, a
+    // stub closes any raw run still open above it.
+    if (msg.type === "explore_stub" && msg.exploreStub) {
+      flushExplore();
+      const stub = msg.exploreStub;
+      blocks.push({
+        blockId: `block-${msg.id}`,
+        type: "explore_group",
+        items: [],
+        rawCount: stub.rawCount,
+        anchorToLatest: i === lastIdx,
+        hasFollowUpReply: false,
+        isLive: false,
+        stub,
+        stubId: msg.id,
+        lazy: true,
+      });
+      continue;
+    }
+
+    if (isExploreRunRow(msg.type)) {
       if (exploreStartMsgIdx < 0) exploreStartMsgIdx = i;
       exploreBuffer.push(msg);
     } else {
@@ -248,17 +289,46 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
 }
 
 /**
- * ADR-081 §4.2: index of the folded block containing the raw
- * `messages[]` entry `rawIdx`, or -1 when the target is not inside any
- * block (e.g. a live-buffer entry that predates the loaded window).
- * Blocks are consecutive spans of `items`, so a linear accumulate is
- * exact — no per-block index bookkeeping needed.
+ * ADR-081 §4.2: index of the folded block containing the raw coordinate
+ * `rawIdx`, or -1 when the target is not inside any block (e.g. a live-buffer
+ * entry that predates the loaded window).
+ *
+ * `rawIdx` (and `rawBase`, the window's first coordinate) are measured in RAW
+ * JSONL entries — the same unit as `messageOffset` / `messageLimit` and as a
+ * stub's `start` / `end`. Blocks are consecutive spans in that dimension: a
+ * plain block covers `rawCount` entries from the cursor, a lazy stub block
+ * covers its advertised `[start, end)` and moves the cursor to `end`. Array
+ * indices cannot be used here (t-01412679): a stub is one array row over N
+ * entries, so array math lands every later block at the wrong coordinate.
  */
-export function blockIndexOfRawMessage(blocks: readonly MessageBlock[], rawIdx: number): number {
-  let acc = 0;
+export function blockIndexOfRawMessage(
+  blocks: readonly MessageBlock[],
+  rawIdx: number,
+  rawBase: number,
+): number {
+  // The walk carries a cursor over the window's raw file coordinates. A
+  // non-lazy block consumes `rawCount` consecutive rows; a stub block
+  // consumes *its own span* — the cursor must jump to `stub.end` after it,
+  // or every later block sits at the wrong coordinate (the stub row is one
+  // window row but N file entries).
+  let cursor = rawBase;
   for (let i = 0; i < blocks.length; i++) {
-    if (rawIdx < acc + blocks[i].items.length) return i;
-    acc += blocks[i].items.length;
+    const b = blocks[i];
+    // t-01412679: one walk over RAW file coordinates. A stub block
+    // addresses its span from server metadata — `[start, end)` are ABSOLUTE
+    // file indices (the Runtime stamps them off the log index, and the
+    // locate's `messageIndex` is in the same system), so they are compared
+    // directly, never rebased. Mixing array indices with coordinates is
+    // what put a locate hit on the wrong block: the stub's own `items` is
+    // empty, so an index walk silently skips its whole span and lands the
+    // next block one position too early.
+    if (b.lazy && b.stub) {
+      if (rawIdx >= b.stub.start && rawIdx < b.stub.end) return i;
+      cursor = Math.max(cursor, b.stub.end);
+      continue;
+    }
+    if (rawIdx >= cursor && rawIdx < cursor + b.rawCount) return i;
+    cursor += b.rawCount;
   }
   return -1;
 }

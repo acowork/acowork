@@ -537,15 +537,15 @@ describe("blockIndexOfRawMessage — ADR-081 locate", () => {
       raw("a1", "assistant"),
     ]);
     expect(blocks).toHaveLength(3); // user / explore_group / assistant
-    expect(blockIndexOfRawMessage(blocks, 0)).toBe(0); // user
-    expect(blockIndexOfRawMessage(blocks, 1)).toBe(1); // thought
-    expect(blockIndexOfRawMessage(blocks, 3)).toBe(1); // tool_result
-    expect(blockIndexOfRawMessage(blocks, 4)).toBe(2); // assistant
+    expect(blockIndexOfRawMessage(blocks, 0, 0)).toBe(0); // user
+    expect(blockIndexOfRawMessage(blocks, 1, 0)).toBe(1); // thought
+    expect(blockIndexOfRawMessage(blocks, 3, 0)).toBe(1); // tool_result
+    expect(blockIndexOfRawMessage(blocks, 4, 0)).toBe(2); // assistant
   });
 
   it("returns -1 for an index outside every block", () => {
     const blocks = foldMessages([raw("a1", "assistant")]);
-    expect(blockIndexOfRawMessage(blocks, 5)).toBe(-1);
-    expect(blockIndexOfRawMessage([], 0)).toBe(-1);
+    expect(blockIndexOfRawMessage(blocks, 5, 0)).toBe(-1);
+    expect(blockIndexOfRawMessage([], 0, 0)).toBe(-1);
   });
 });

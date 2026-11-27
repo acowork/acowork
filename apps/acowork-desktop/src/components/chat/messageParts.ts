@@ -103,3 +103,27 @@ export function isStandalonePart(msg: ChatMessage): boolean {
 export function isUserTurnPart(msg: ChatMessage): boolean {
   return isAttachmentPart(msg) || isMessageRefPart(msg);
 }
+
+// ── explore rows (t-01412679) ────────────────────────────────────────────
+//
+// Two predicates, deliberately distinct:
+//
+//  - `isExploreRunRow` — the rows that FOLD into one explore block. This is the
+//    frontend half of a cross-process contract: the Runtime's `groups=stub`
+//    projection collapses exactly this set (`conversation.rs::is_explore_entry`,
+//    recorded in docs/protocols/{zh,en}/http.md §5.2.1). Change one side and the
+//    other must change with it, or a page ships a run the folder cannot fold.
+//  - `isExploreBlockRow` — anything RENDERED inside an explore block, i.e. the
+//    above plus `explore_stub` (a run the server already folded). Use this for
+//    "is this row's block an explore block?" questions (window boundary
+//    alignment, locate), never for folding.
+
+/** Roles that fold into one `explore_group` block. */
+export function isExploreRunRow(type: string | undefined | null): boolean {
+  return type === "thought" || type === "tool_call" || type === "tool_result";
+}
+
+/** Any row whose block is an explore block (raw run row, or a server stub). */
+export function isExploreBlockRow(type: string | undefined | null): boolean {
+  return isExploreRunRow(type) || type === "explore_stub";
+}

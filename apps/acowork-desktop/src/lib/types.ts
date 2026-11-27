@@ -601,7 +601,34 @@ export interface TodoItem {
 }
 
 /** Chat message types */
-export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result" | "thought" | "error" | "compaction";
+export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_result" | "thought" | "error" | "compaction" | "explore_stub";
+
+/**
+ * Metadata of an explore-stub row (t-01412679): the `groups=stub` projection
+ * replaces a contiguous thought / tool_call / tool_result run with ONE row
+ * carrying these facts, so a history page ships bubbles plus block metadata
+ * and the block's raw rows are fetched lazily on expand.
+ *
+ * `start` / `end` are **data-index coordinates** (same dimension as the
+ * `/messages` offset/limit/total; `end` exclusive) — the address of the
+ * `GET /sessions/{sid}/messages/detail?start&end` read. The stub's message id
+ * is the run's FIRST row id, so the frontend block cache key
+ * (`block-${items[0].id}`) is stable across the stub / raw / live paths.
+ */
+export interface ExploreStubMeta {
+  start: number;
+  end: number;
+  rawCount: number;
+  /** tool_call names in log order, duplicates kept (presentation dedupe is a
+   *  UI concern). Truncated by the Runtime past 50 entries — see
+   *  `toolsTruncated`; the detail read is unbounded by that cap. */
+  tools: string[];
+  toolsTruncated: boolean;
+}
+// NB: the run's raw rows are NOT carried here. They live in the store's
+// `exploreDetails` cache (keyed by stub id) and reach the block as its
+// `details` prop, so a stub row's metadata is exactly what the Runtime sent —
+// one shape, one source, no second copy to keep in sync.
 
 // ──────────────────────────────────────────────────────────────────────
 // ADR-046: Unified attachment entry types
@@ -955,6 +982,9 @@ export interface ChatMessage {
   /** Raw metadata from the JSONL entry. Used by system entries to carry
    *  attachment metadata (ADR-046 §2.5: 5 metadata.type branches). */
   metadata?: Record<string, unknown>;
+  /** Set when `type === "explore_stub"` (t-01412679): the collapsed explore
+   *  run's coordinates and cheap scalars. See {@link ExploreStubMeta}. */
+  exploreStub?: ExploreStubMeta;
   /** Internal flag: this entry is an optimistic (unconfirmed) insert from
    *  the frontend. Set by `sendMessage` on attachment system entries and
    *  cleared when the HTTP window lands (same id → server copy wins).
@@ -1973,6 +2003,10 @@ export interface PaginatedMessages {
   limit: number;
   /** Total raw-entry line count in the session JSONL. */
   total: number;
+  /** t-01412679: `true` when the page went through the explore-stub
+   *  projection (`?groups=stub`). Absent on raw pages — the raw wire shape
+   *  must not drift for older/other consumers. */
+  grouped?: boolean;
 }
 
 /** A single streaming line from MQTT stream_delta (thought only). */

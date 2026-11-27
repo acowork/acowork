@@ -993,9 +993,19 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
       return;
     }
     // Map the raw messages[] index to the folded block that contains it.
-    const targetBlock = blockIndexOfRawMessage(messageBlocks, pendingLocate.targetArrayIdx);
+    // t-01412679: pass the RAW coordinate (+ the window's raw base) rather
+    // than the array index — a stub row compresses N raw entries into one
+    // array slot, so array math would land the locate on the wrong block.
+    const rawBase = sessionState?.messageOffset ?? 0;
+    const targetBlock = blockIndexOfRawMessage(messageBlocks, pendingLocate.messageIndex, rawBase);
     if (targetBlock >= 0) {
       vmlRef.current?.scrollToIndex(targetBlock);
+      // One fact, two consumers: `highlightBlock` draws the flash AND tells a
+      // collapsed lazy block to open itself (and pull its detail). Deriving
+      // the second from the first is why there is no "opened" bookkeeping to
+      // leak — the hint expires with `pendingLocate`, exactly like the flash,
+      // so a block the reader collapsed by hand stays collapsed on the next
+      // remount (t-01412679).
       setHighlightBlock(targetBlock);
       return;
     }
@@ -2169,6 +2179,15 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
               onRetryLoadSession={handleRetryLoadSession}
               messageBlocks={messageBlocks}
               highlightBlockIndex={highlightBlock}
+              // t-01412679: lazy explore-detail cache + fetch. A locate hit
+              // reuses `highlightBlockIndex` (already passed below) as its
+              // open hint, so the two never disagree.
+              exploreDetails={sessionState?.exploreDetails}
+              onFetchExploreDetail={(stubId, stub) => {
+                if (selectedAgentId && currentSessionId) {
+                  void useChatStore.getState().fetchExploreDetail(selectedAgentId, currentSessionId, stubId, stub);
+                }
+              }}
               sending={sending}
               pendingApproval={pendingApproval}
               currentSessionId={currentSessionId}

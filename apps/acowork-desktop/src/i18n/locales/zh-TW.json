@@ -1454,7 +1454,10 @@
     "running_one": "{{count}} 個執行中",
     "running_other": "{{count}} 個執行中",
     "cancelTool": "取消工具",
-    "cancelledByUser": "已由使用者取消"
+    "cancelledByUser": "已由使用者取消",
+    "loadingDetail": "載入詳情…",
+    "detailLoadError": "詳情載入失敗",
+    "retryDetail": "重試"
   },
   "thinkBlock": {
     "thinking": "正在思考",

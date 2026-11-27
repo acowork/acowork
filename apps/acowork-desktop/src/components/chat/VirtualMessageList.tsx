@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { clampedScrollToFn } from "../common/VirtualRowList";
-import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
+import type { ChatMessage, ExploreStubMeta, ToolApprovalNeededEvent } from "../../lib/types";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { ExploreBlock } from "./ExploreBlock";
 import { MessageBubble } from "./MessageBubble";
@@ -11,6 +11,7 @@ import { isDeliverablesRow } from "../../lib/deliverableFiles";
 import type { MessageBlock } from "./messageFolder";
 import { shouldShowAgentAvatar, shouldShowTrailingAgentHeader } from "./avatarAnchor";
 import type { ChatListAdapterV2 } from "./chatListAdapter";
+import type { ExploreDetailState } from "../../stores/chatStore";
 import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
 import { StreamingSourceBlock } from "./StreamingSourceBlock";
 import { EmptyState } from "./EmptyState";
@@ -93,6 +94,14 @@ interface VirtualMessageListProps {
   userAvatarUrl: string | null | undefined;
   /** User builtin avatar ID (for MessageBubble). */
   userBuiltinAvatarId: string | null | undefined;
+  /**
+   * t-01412679: lazy explore-run detail, keyed by stub id — straight from
+   * chatStore's `exploreDetails`. `rows` present → the block renders them like
+   * a raw run; `error` → it offers a retry.
+   */
+  exploreDetails?: Record<string, ExploreDetailState>;
+  /** Request one stub's detail rows (chatStore.fetchExploreDetail, bound per session). */
+  onFetchExploreDetail?: (stubId: string, stub: ExploreStubMeta) => void;
   /**
    * Whether the session's initiator — the speaker on this side — is an Agent
    * rather than a person. Drives the bubble's skin and whether its body is
@@ -218,6 +227,8 @@ export const VirtualMessageList = React.forwardRef<
     userDisplayName,
     userAvatarUrl,
     userBuiltinAvatarId,
+    exploreDetails,
+    onFetchExploreDetail,
     userSpeakerKind,
     userAgentId,
     userAgentVersion,
@@ -681,6 +692,16 @@ export const VirtualMessageList = React.forwardRef<
                         thinkingContent={liveThoughtAttaches ? thinkingContent : ""}
                         thinkingStartTime={liveThoughtAttaches ? thinkingStartTime : null}
                         isLive={item.isLive}
+                        // t-01412679: lazy-stub plumbing — cache lookup by
+                        // stub id, fetch bound to (stubId, stub) on the store.
+                        stub={item.stub}
+                        details={item.stubId ? exploreDetails?.[item.stubId]?.rows : undefined}
+                        detailError={item.stubId ? exploreDetails?.[item.stubId]?.error : undefined}
+                        onFetchDetail={item.stubId && item.stub ? () => onFetchExploreDetail?.(item.stubId!, item.stub!) : undefined}
+                        // A locate hit inside a collapsed lazy block is the
+                        // reader asking for that row: open it (its expand then
+                        // pulls the detail). Same lifetime as the highlight.
+                        autoExpand={highlightBlockIndex === virtualRow.index}
                       />
                     </div>
                   );

@@ -1,9 +1,9 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, SessionInfo, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount, VaultKeyEntry, AgentLifecycleState, ModelInfo, ModelCapabilitiesInfo } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, SessionInfo, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount, VaultKeyEntry, AgentLifecycleState, ModelInfo, ModelCapabilitiesInfo, ExploreStubMeta } from "../lib/types";
 import { toWireAttachedItems } from "../lib/types";
-import { isAtTail } from "../lib/paginationUtils";
+import { isAtTail, turnBoundaryStep, windowRawSpan } from "../lib/paginationUtils";
 import { useAgentStore } from "./agentStore";
 import { useGatewayStore, stopGatewayDeathWatch } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
@@ -81,6 +81,14 @@ function mergeContextUsage(
 // A single display group can occupy multiple slots here, which is fine:
 // the cache only bounds memory, the UI rendering handles folding.
 
+// ── Explore-detail in-flight dedup (t-01412679) ──────────────────────
+//
+// One promise per (agent, session, stub id) while a detail fetch is running,
+// so a double-click on the header (or a locate + a manual expand racing)
+// issues ONE request. Removed in the fetcher's `finally`; a failed fetch is
+// therefore retryable on the next expand.
+const exploreDetailInflight = new Map<string, Promise<ChatMessage[] | null>>();
+
 // ── Message window merge ──────────────────────────────────────────────
 //
 // Single source of truth for "what should `messages[]` look like after a
@@ -137,8 +145,25 @@ export function mergeMessageWindow(
   // window. These are older or otherwise out-of-window rows that the
   // server didn't echo back this round (e.g. a paginated window that
   // doesn't overlap the cache's older entries).
+  //
+  // t-01412679: ONE exception to "server wins". A stub row and the raw rows of
+  // its run share an id (the stub's id IS the run's first row id — that is what
+  // keeps the block key stable across stub / raw / live). So an id collision
+  // between a stub and a real row means "the same rows, compressed on one
+  // side", and the side holding the ACTUAL rows must win: `groups=stub` is a
+  // projection of the same log, so a refresh can legitimately describe a run
+  // the cache already holds raw (a run that was the trailing, un-collapsed run
+  // when it was first loaded and is interior by the time the page is
+  // re-fetched). Letting the stub overwrite `r1` would leave the stub chip
+  // standing next to `r2..rN` from the cache: one run rendered as two blocks,
+  // with the stub's step count double-counting it.
   for (const m of cache) {
-    if (!byId.has(m.id)) byId.set(m.id, m);
+    const existing = byId.get(m.id);
+    if (!existing) {
+      byId.set(m.id, m);
+    } else if (existing.type === "explore_stub" && m.type !== "explore_stub") {
+      byId.set(m.id, m);
+    }
   }
 
   // Step 3: stable sort by timestamp ascending. The merge Map preserves
@@ -355,22 +380,36 @@ export interface PendingIntent {
   from_chat: boolean;
 }
 
+/** State of one lazy explore-run detail read (t-01412679).
+ *
+ *  `rows` is present once the read succeeded — possibly EMPTY (a span whose
+ *  rows were compacted away), which is why the renderer tests presence, never
+ *  length. `error` marks a failed read so the block can offer a retry instead
+ *  of showing "loading" forever. */
+export interface ExploreDetailState {
+  rows?: ChatMessage[];
+  error?: boolean;
+}
+
 interface SessionChatState {
   messages: ChatMessage[];
   tokenUsage: TokenUsage | null;
   contextUsage: ContextUsageInfo | null;
   /**
    * One-shot locate request (ADR-081 §4.2 conversation hits): when set
-   * and matching the active session, ChatPanel scrolls the message list
-   * to `targetArrayIdx` (index into `messages[]`) and briefly
-   * highlights the block. Cleared after the highlight timeout — it is a
-   * transient hint, not persisted state.
+   * and matching the active session, ChatPanel maps `messageIndex` onto the
+   * folded block that contains it and briefly highlights it. Cleared after
+   * the highlight timeout — it is a transient hint, not persisted state.
+   *
+   * `messageIndex` is the raw JSONL line number, the SAME unit as
+   * `messageOffset` / `messageLimit`. It is deliberately NOT resolved to an
+   * array index here: under `groups=stub` (t-01412679) `messages[]` holds
+   * fewer rows than the window covers entries, so an array index is not a
+   * coordinate — `blockIndexOfRawMessage` does the mapping.
    */
   pendingLocate: {
     sessionId: string;
     messageIndex: number;
-    /** Resolved index into `messages[]` after window alignment. */
-    targetArrayIdx: number;
   } | null;
   /**
    * Pagination window coordinates returned by the last /messages HTTP
@@ -456,6 +495,16 @@ interface SessionChatState {
    */
   windowAuthoritative: boolean;
   pendingApproval: Record<string, ToolApprovalNeededEvent>;
+  /** t-01412679: lazy explore-run detail, keyed by stub id (= the run's first
+   *  row id, the same value the folder derives the block cache key from).
+   *
+   *  ONE map holds both outcomes on purpose: `rows` when the read landed,
+   *  `error` when it failed. A parallel "errors" map would be a second
+   *  structure with its own lifecycle to keep in step with this one — and the
+   *  failure IS a state of the same fetch. Filled by `fetchExploreDetail` on
+   *  first expand; cleared whenever the message window itself is cleared or
+   *  invalidated (the stub rows the keys address are gone with it). */
+  exploreDetails: Record<string, ExploreDetailState>;
   pendingQuestions: AskQuestionEvent[];
   isLoadingSession: boolean;
   /** Owner load-sequence of `isLoadingSession` (0 = no owner). Set when
@@ -574,6 +623,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   messagesStale: false,
   windowAuthoritative: false,
   pendingApproval: {},
+  exploreDetails: {},
   pendingQuestions: [],
   isLoadingSession: false,
   loadOwnerSeq: 0,
@@ -1272,6 +1322,21 @@ interface ChatStore {
     /** When true, REPLACE the cached window with the fetched page instead of merging. */
     replaceCache?: boolean,
   ) => Promise<{ offset: number; limit: number; total: number } | undefined>;
+  /**
+   * Lazy detail read for one explore stub (t-01412679). Fetches the run's raw
+   * rows from `GET .../messages/detail?start&end` the FIRST time the block is
+   * expanded, converts them through the same `convertConversationEntry` path
+   * as history rows, and caches them under the stub's id. Idempotent and
+   * in-flight-deduped: concurrent expands of the same block share one request.
+   * Returns the rows, or `null` when the fetch failed (the block keeps its
+   * metadata header and may retry on the next expand).
+   */
+  fetchExploreDetail: (
+    agentId: string,
+    sessionId: string,
+    stubId: string,
+    stub: ExploreStubMeta,
+  ) => Promise<ChatMessage[] | null>;
   /**
    * Open a session and locate a specific message (ADR-081 conversation
    * hit). `messageIndex` is the raw JSONL line number — the same unit
@@ -2395,6 +2460,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // The window is gone: the next load adopts the server's cursor.
         windowAuthoritative: false,
         pendingApproval: {},
+        // Stub ids die with the window that addressed them (t-01412679).
+        exploreDetails: {},
         loadError: null,
         hasMoreIncremental: false,
         abortController: null,
@@ -2427,6 +2494,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // any server window, so the next load must adopt one verbatim.
         windowAuthoritative: false,
         pendingApproval: {},
+        // Detail caches reset with everything else — half-cleaned fields
+        // would keep the stub runs' full text alive after the session is gone.
+        exploreDetails: {},
         pendingQuestions: [],
         loadError: null,
         sessionStatus: null,
@@ -2778,6 +2848,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // so nothing about the current coordinates is trustworthy: the next
         // load adopts the server's window verbatim.
         windowAuthoritative: false,
+        // Stub ids may address trimmed rows — drop the detail cache too.
+        exploreDetails: {},
       });
     });
   },
@@ -3152,6 +3224,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
+      // t-01412679: ask for the explore-stub projection. Bubbles arrive in
+      // full; a contiguous thought/tool run arrives as ONE light row the
+      // folder turns into a lazy explore block (detail on expand via
+      // `fetchExploreDetail`). The cursor units are unchanged (raw entries),
+      // so every offset computation in this file keeps working verbatim.
+      params.set("groups", "stub");
       // ADR-050: initial load uses `?tail=true` so the backend can return
       // the latest `limit` entries without the caller having to know
       // `total` yet.  Subsequent pagination calls pass an explicit offset.
@@ -3396,6 +3474,69 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }));
   },
 
+  /** t-01412679: lazy detail read for one explore stub, cached by stub id. */
+  fetchExploreDetail: async (agentId, sessionId, stubId, meta) => {
+    if (meta.end <= meta.start) return null;
+
+    const cached = getSessionState(get(), agentId, sessionId).exploreDetails[stubId];
+    // A successful read is final. A FAILED one is not: expanding again is the
+    // reader asking again, so an error entry must not short-circuit the retry.
+    if (cached?.rows) return cached.rows;
+
+    const inflightKey = `${agentId}/${sessionId}/${stubId}`;
+    const inflight = exploreDetailInflight.get(inflightKey);
+    if (inflight) return inflight;
+
+    const promise = (async (): Promise<ChatMessage[] | null> => {
+      const write = (entry: ExploreDetailState) =>
+        set((state) =>
+          updateSessionState(state, agentId, sessionId, {
+            exploreDetails: {
+              ...getSessionState(state, agentId, sessionId).exploreDetails,
+              [stubId]: entry,
+            },
+          }),
+        );
+      try {
+        const params = new URLSearchParams({
+          start: String(meta.start),
+          end: String(meta.end),
+        });
+        // Same transport contract as the page read next door: the chat
+        // endpoints 503 during the Gateway/Runtime boot window, and the
+        // expand happens exactly when a session is being (re)opened.
+        const resp = await with503Retry(
+          () =>
+            fetch(
+              `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/messages/detail?${params}`,
+            ),
+          { tag: `ChatStore.fetchExploreDetail(${agentId}/${sessionId})`, logger: log },
+        );
+        if (!resp.ok) {
+          log.warn(`[ChatStore] explore detail fetch failed (${resp.status}) for stub ${stubId}`);
+          write({ error: true });
+          return null;
+        }
+        const data = (await resp.json()) as { messages: ConversationEntry[] };
+        // Same conversion path as history rows; stub rows never come back
+        // here (the range addresses raw rows only), the filter is a guard.
+        const rows = mergeDocumentUploads(data.messages ?? [], agentId)
+          .filter((m) => m.type !== "explore_stub");
+        write({ rows });
+        return rows;
+      } catch (e) {
+        log.warn("[ChatStore] explore detail fetch threw:", e);
+        write({ error: true });
+        return null;
+      } finally {
+        exploreDetailInflight.delete(inflightKey);
+      }
+    })();
+
+    exploreDetailInflight.set(inflightKey, promise);
+    return promise;
+  },
+
   /** ADR-081 §4.2: open a session and locate one message (raw line). */
   locateMessage: async (agentId: string, sessionId: string, messageIndex: number) => {
     await get().openSession(agentId, sessionId);
@@ -3405,7 +3546,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // `messageOffset`; the window is contiguous by construction).
     const inWindow =
       messageIndex >= st.messageOffset &&
-      messageIndex < st.messageOffset + st.messages.length;
+      messageIndex < st.messageOffset + windowRawSpan(st);
     if (!inWindow) {
       try {
         await get().loadSessionMessages(agentId, sessionId, messageIndex, 50, true);
@@ -3415,19 +3556,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
     }
     st = getSessionState(get(), agentId, sessionId);
-    const targetArrayIdx = messageIndex - st.messageOffset;
-    if (targetArrayIdx < 0 || targetArrayIdx >= st.messages.length) {
+    // The window covers `windowRawSpan` RAW entries — not `messages.length`
+    // rows. Under `groups=stub` one row addresses `end - start` entries, so
+    // measuring with the array length would reject a hit that IS in the
+    // window and costs an extra whole-window reload (t-01412679 review I4).
+    const span = windowRawSpan(st);
+    if (messageIndex < st.messageOffset || messageIndex >= st.messageOffset + span) {
       log.warn("[chatStore] locateMessage out of bounds:", {
         sessionId,
         messageIndex,
         messageOffset: st.messageOffset,
+        rawSpan: span,
         loaded: st.messages.length,
       });
       return;
     }
     set((state) =>
       updateSessionState(state, agentId, sessionId, {
-        pendingLocate: { sessionId, messageIndex, targetArrayIdx },
+        pendingLocate: { sessionId, messageIndex },
       }),
     );
     // Transient highlight — clear it after the visual fade.
@@ -3504,7 +3650,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // The bare tail page may fold to a LONE explore block (see
         // expandWindowToTurnBoundary) — pull older pages until the window
         // starts on a turn boundary.
-        await expandWindowToTurnBoundary(agentId, sessionId, limit);
+        await expandWindowToTurnBoundary(agentId, sessionId);
       } finally {
         set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: false }));
       }
@@ -3532,6 +3678,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Cursor reset: the next load adopts the server's window verbatim
       // instead of unioning on top of a window that no longer exists.
       windowAuthoritative: false,
+      // Explore-stub detail cache goes with the window (t-01412679).
+      exploreDetails: {},
     }));
   },
 
@@ -3807,22 +3955,22 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 export async function expandWindowToTurnBoundary(
   agentId: string,
   sessionId: string,
-  limit: number,
 ): Promise<void> {
-  const MAX_EXPAND_PAGES = 20; // ponytail: bound; a >1000-entry explore run is pathological
+  // Bound, not a target: each step is a full server page (see
+  // `turnBoundaryStep`), so this covers 10k entries — a run longer than that
+  // is pathological and the window is left as-is instead of thrashing.
+  const MAX_EXPAND_PAGES = 20;
   for (let i = 0; i < MAX_EXPAND_PAGES; i++) {
     const cur = useChatStore.getState().getSessionState(agentId, sessionId);
-    const first = cur.messages[0];
-    if (!first || cur.messageOffset <= 0) break;
-    if (
-      first.type !== "tool_call" &&
-      first.type !== "tool_result" &&
-      first.type !== "thought"
-    ) {
-      break;
-    }
-    const prevOffset = Math.max(0, cur.messageOffset - limit);
-    await useChatStore.getState().loadSessionMessages(agentId, sessionId, prevOffset, limit);
+    // The walk's whole decision is pure and lives in `turnBoundaryStep`: stop
+    // at a bubble (or the head of the log), otherwise step back one server
+    // page. `explore_stub` counts as an explore row (t-01412679 review I4) —
+    // it is a run that started before this window, so stopping on one keeps a
+    // half-run block at the head and renders that run as two chips when the
+    // user scrolls up.
+    const step = turnBoundaryStep(cur.messages[0]?.type, cur.messageOffset);
+    if (!step) break;
+    await useChatStore.getState().loadSessionMessages(agentId, sessionId, step.offset, step.limit);
   }
 }
 
@@ -3949,6 +4097,31 @@ export function convertConversationEntry(
   // the row, and it was context for the model, never for the user: it
   // stays in the JSONL but must not become a chat bubble.
   if (entry.metadata?.rotation_handoff === true) return null;
+
+  // Explore stubs (t-01412679): the `groups=stub` page projection. Detected
+  // BEFORE role mapping because the row's role ("assistant") is deliberately
+  // legacy-safe — `kind` is the discriminator, same pattern as compaction.
+  // The row carries no content: the block renders from these scalars until
+  // the reader expands it and `fetchExploreDetail` pulls the raw run.
+  if (entry.kind === "explore_stub") {
+    const meta = (entry.metadata ?? {}) as Record<string, unknown>;
+    const agentInfo = getAgentSenderInfo(agentId);
+    return {
+      id: entry.id,
+      type: "explore_stub",
+      content: "",
+      timestamp: new Date(entry.ts).getTime(),
+      senderDisplayName: agentInfo.senderDisplayName,
+      senderRole: agentInfo.senderRole,
+      exploreStub: {
+        start: (meta.start as number) ?? 0,
+        end: (meta.end as number) ?? 0,
+        rawCount: (meta.raw_count as number) ?? 0,
+        tools: Array.isArray(meta.tools) ? (meta.tools as string[]) : [],
+        toolsTruncated: meta.tools_truncated === true,
+      },
+    };
+  }
 
   // Compaction events: rendered as a folded summary card. Mirrors the
   // backend `kind="compaction"` JSONL marker. Detected BEFORE role-based

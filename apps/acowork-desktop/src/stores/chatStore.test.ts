@@ -328,6 +328,57 @@ describe("mergeMessageWindow: backend-authoritative ts ordering", () => {
     expect(u1.timestamp).toBe(150);
   });
 
+  it("t-01412679: a stub row never overwrites the cache's own raw rows for the same run", () => {
+    // A run loaded while it was the trailing (hence un-collapsed) run sits in
+    // the cache as raw rows. By the time the page is re-fetched a bubble
+    // follows it, so the server now describes it as ONE stub row whose id is
+    // the run's first row id. Id collision ⇒ same rows, compressed on one
+    // side: the side holding the real rows must win, or the run renders as a
+    // stub chip PLUS its own tail.
+    const cache: ChatMessage[] = [
+      msg("r1", ts(100), "thought"),
+      msg("r2", ts(110), "tool_call"),
+      msg("r3", ts(120), "tool_result"),
+    ];
+    const server: ChatMessage[] = [
+      {
+        id: "r1",
+        type: "explore_stub",
+        content: "",
+        timestamp: ts(100),
+        exploreStub: { start: 0, end: 3, rawCount: 3, tools: ["bash"], toolsTruncated: false },
+      },
+      msg("a1", ts(200), "assistant"),
+    ];
+    const result = mergeMessageWindow(cache, server);
+    expect(result.messages.map((m) => m.id)).toEqual(["r1", "r2", "r3", "a1"]);
+    expect(result.messages.some((m) => m.type === "explore_stub")).toBe(false);
+  });
+
+  it("t-01412679: the server's raw rows still replace a cached stub (same rule, other direction)", () => {
+    // The mirror image: the cache holds the compressed row, the fresh page
+    // carries the run raw (it is the trailing run again — a new turn started
+    // and the window slid). Server rows win as usual, and no stub survives to
+    // render a second chip over rows that are already there.
+    const cache: ChatMessage[] = [
+      {
+        id: "r1",
+        type: "explore_stub",
+        content: "",
+        timestamp: ts(100),
+        exploreStub: { start: 0, end: 3, rawCount: 3, tools: ["bash"], toolsTruncated: false },
+      },
+    ];
+    const server: ChatMessage[] = [
+      msg("r1", ts(100), "thought"),
+      msg("r2", ts(110), "tool_call"),
+      msg("r3", ts(120), "tool_result"),
+    ];
+    const result = mergeMessageWindow(cache, server);
+    expect(result.messages.map((m) => m.id)).toEqual(["r1", "r2", "r3"]);
+    expect(result.messages.some((m) => m.type === "explore_stub")).toBe(false);
+  });
+
   it("P0-3: merges attachment system rows next to their owning user entry", () => {
     // ADR-046: attachments are persisted as separate `role: "system"`
     // JSONL lines that share the user's millisecond timestamp. They
