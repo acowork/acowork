@@ -618,7 +618,17 @@ export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_
 export interface ExploreStubMeta {
   start: number;
   end: number;
+  /** RAW span of the part this row covers (`end - start`) — a COORDINATE
+   *  width, not a rendered-entry count. A page boundary that cuts a run in two
+   *  yields two parts whose `rawCount`s add up; the frontend fuses them into
+   *  one block (see `foldMessages`). */
   rawCount: number;
+  /** Rendered-entry count of the covered part: one per thought, one per tool
+   *  invocation (a `tool_result` renders inside its call, adding no entry).
+   *  ADDITIVE across the parts of one run, which is what keeps the chip's
+   *  number stable whether the block is collapsed, expanded, or fused —
+   *  `rawCount` here was the bug behind the "8 steps → 4 on expand" report. */
+  steps: number;
   /** tool_call names in log order, duplicates kept (presentation dedupe is a
    *  UI concern). Truncated by the Runtime past 50 entries — see
    *  `toolsTruncated`; the detail read is unbounded by that cap. */

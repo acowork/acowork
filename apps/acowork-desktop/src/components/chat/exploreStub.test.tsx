@@ -26,11 +26,17 @@ vi.mock("../../i18n/useTranslation", () => ({
   }),
 }));
 
-function stubRow(start: number, end: number, tools: string[] = ["file_read", "bash"]): ChatMessage {
+function stubRow(
+  start: number,
+  end: number,
+  tools: string[] = ["file_read", "bash"],
+  steps: number = end - start,
+): ChatMessage {
   const exploreStub: ExploreStubMeta = {
     start,
     end,
     rawCount: end - start,
+    steps,
     tools,
     toolsTruncated: false,
   };
@@ -48,7 +54,7 @@ describe("convertConversationEntry — explore_stub", () => {
       role: "assistant",
       content: "",
       kind: "explore_stub",
-      metadata: { start: 1, end: 4, raw_count: 3, tools: ["bash"], tools_truncated: false },
+      metadata: { start: 1, end: 4, raw_count: 3, steps: 2, tools: ["bash"], tools_truncated: false },
     };
     const msg = convertConversationEntry(entry, "com.test.agent");
     expect(msg).not.toBeNull();
@@ -57,6 +63,7 @@ describe("convertConversationEntry — explore_stub", () => {
       start: 1,
       end: 4,
       rawCount: 3,
+      steps: 2,
       tools: ["bash"],
       toolsTruncated: false,
     });
@@ -81,13 +88,20 @@ describe("foldMessages — lazy explore blocks", () => {
     expect(group.blockId).toBe("block-stub-1");
   });
 
-  it("computes hasFollowUpReply across a lazy block like a raw one", () => {
+  // Bug report 2: one RUN was painted as two adjacent chips. The Runtime now
+  // pages by RECORD (page edges snap to run boundaries, protocol §5.2.1), so a
+  // run arrives either as one stub row or as its raw rows — never as a mix, and
+  // the folder has nothing to fuse. These two shapes must stay one block each.
+  it("folds two stub rows into two blocks — two runs, never one split", () => {
     const user: ChatMessage = { id: "u1", type: "user", content: "go", timestamp: 900 };
     const answer: ChatMessage = { id: "a1", type: "assistant", content: "done", timestamp: 1100 };
-    const blocks = foldMessages([user, stubRow(1, 3), stubRow(3, 5), answer]);
-    // Two adjacent stubs = two blocks (each is its own page record), and the
-    // FIRST must not claim a follow-up reply (the next block is still an
-    // explore group) — same rule the raw fold applies.
+    // Adjacent because the runs really are adjacent in the log: the row that
+    // would end the first run starts the second.
+    const blocks = foldMessages([user, stubRow(11, 13, ["bash"], 2), stubRow(13, 17, ["file_read"], 3), answer]);
+    expect(blocks.map((b) => b.type)).toEqual(["user", "explore_group", "explore_group", "assistant"]);
+    expect(blocks[1].stub?.steps).toBe(2);
+    expect(blocks[2].stub?.steps).toBe(3);
+    // Each closed by the next block, exactly like two raw runs.
     expect(blocks[1].hasFollowUpReply).toBe(false);
     expect(blocks[2].hasFollowUpReply).toBe(true);
   });
@@ -110,17 +124,62 @@ describe("blockIndexOfRawMessage — coordinate-aware locate", () => {
 });
 
 describe("ExploreBlock — lazy stub contract", () => {
-  const stub: ExploreStubMeta = { start: 1, end: 4, rawCount: 3, tools: ["file_read", "bash"], toolsTruncated: false };
+  const stub: ExploreStubMeta = { start: 1, end: 4, rawCount: 3, steps: 3, tools: ["file_read", "bash"], toolsTruncated: false };
 
   it("renders the collapsed header from stub metadata alone", () => {
     const { container } = render(
       <ExploreBlock items={[]} isStreaming={false} stub={stub} stubId="s2" lazy details={undefined} />,
     );
-    // "3 steps" straight off raw_count — no rows exist to count.
+    // "3 steps" straight off the Runtime's `steps` — no rows exist to count.
     expect(container.textContent).toContain("exploreBlock.step:3");
     expect(container.textContent).toContain("file_read");
     // Nothing from the run's body is on the page — that's the whole point.
     expect(container.textContent).not.toContain("let me look around");
+  });
+
+  // Bug report 1: the collapsed chip said 8 steps, expanding it said 4. The
+  // header must count what the body renders — one entry per thought and per
+  // tool invocation (`tool_result` renders inside its call) — so the number
+  // cannot move when the reader opens the block.
+  it("keeps the step count identical collapsed vs expanded", () => {
+    const rows: ChatMessage[] = [
+      { id: "d1", type: "thought", content: "look", timestamp: 1000 },
+      { id: "d2", type: "tool_call", content: "{}", timestamp: 1001, toolName: "bash", toolCallId: "c1" },
+      { id: "d3", type: "tool_result", content: "ok", timestamp: 1002, toolCallId: "c1" },
+      { id: "d4", type: "thought", content: "and", timestamp: 1003 },
+      { id: "d5", type: "tool_call", content: "{}", timestamp: 1004, toolName: "bash", toolCallId: "c2" },
+      { id: "d6", type: "tool_result", content: "ok", timestamp: 1005, toolCallId: "c2" },
+    ];
+    const wide: ExploreStubMeta = { start: 1, end: 7, rawCount: 6, steps: 4, tools: ["bash"], toolsTruncated: false };
+    const collapsed = render(<ExploreBlock items={[]} isStreaming={false} stub={wide} stubId="s2" />);
+    expect(collapsed.container.textContent).toContain("exploreBlock.step:4");
+    expect(collapsed.container.textContent).not.toContain("exploreBlock.step:6");
+    collapsed.unmount();
+    const expanded = render(<ExploreBlock items={[]} isStreaming={false} stub={wide} stubId="s2" details={rows} />);
+    fireEvent.click(expanded.container.querySelector("button")!);
+    expect(expanded.container.textContent).toContain("exploreBlock.step:4");
+  });
+
+  // A fused block carries raw window rows next to the stub, and the fetched
+  // detail spans the whole run — including those rows. They must render once.
+  it("dedupes rows that are both in the window and in the fetched span", () => {
+    const head: ChatMessage[] = [
+      { id: "r1", type: "thought", content: "the head reasoning", timestamp: 1000 },
+    ];
+    const detail: ChatMessage[] = [
+      { id: "r1", type: "thought", content: "the head reasoning", timestamp: 1000 },
+      { id: "d2", type: "tool_call", content: "{}", timestamp: 1001, toolName: "bash", toolCallId: "c1" },
+    ];
+    const { container } = render(
+      <ExploreBlock items={head} isStreaming={false} stub={stub} stubId="s2" details={detail} />,
+    );
+    fireEvent.click(container.querySelector("button")!);
+    // The thought row is itself a disclosure — open it to read its text.
+    Array.from(container.querySelectorAll("button"))
+      .slice(1)
+      .forEach((b) => fireEvent.click(b));
+    const occurrences = (container.textContent!.match(/the head reasoning/g) ?? []).length;
+    expect(occurrences).toBe(1);
   });
 
   it("fetches detail on first expand only", () => {

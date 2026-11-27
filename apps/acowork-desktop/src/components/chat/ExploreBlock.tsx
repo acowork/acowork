@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from "react"
 import { ChevronRight, ChevronDown, Search, Wrench, Terminal, Check, X, Square } from "lucide-react";
 import type { ChatMessage, ExploreStubMeta, ToolApprovalNeededEvent } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
+import { countExploreSteps } from "./messageParts";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cardButtonAccent, cardButtonNeutral } from "../../lib/ui-styles";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
@@ -340,8 +341,20 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
 
   // t-01412679: a stub block whose detail rows have arrived renders them
   // exactly like a raw run; one whose details are still missing (or never
-  // fetched) renders its metadata header only.
+  // fetched) renders its metadata header only — plus whatever RAW rows of the
+  // same run the window did deliver (the trailing run of a page that touches
+  // the log end is never collapsed, so a block can hold both).
   const isLazyStub = !!stub && !details;
+  // The union, deduped by row id: `details` covers the stub's span, `items`
+  // holds whatever RAW rows of the same run the window delivered (a fused
+  // block carries the run's live head or tail next to the stub). Those raw
+  // rows can already sit inside the fetched span, so concatenating blindly
+  // would paint them twice; `details` wins and the leftovers keep their
+  // coordinate order after it.
+  // A block is one record in one of two shapes — its raw rows, or a stub whose
+  // rows arrive here on expand — never both (the Runtime pages by record, so a
+  // stub never coexists with the rows it covers). Hence a plain choice, and no
+  // merge to get wrong.
   const effectiveItems = details ?? items;
 
   // Locate hit inside a collapsed block = the reader asked for that row:
@@ -363,7 +376,14 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
   const pairedItems = useMemo(() => buildPairedItems(effectiveItems), [effectiveItems]);
   // A collapsed stub has no rows to count — the header reads the run's
   // raw size straight off the stub metadata instead.
-  const stepCount = isLazyStub ? (stub?.rawCount ?? 0) : pairedItems.length;
+  // One number for this block, whatever its shape. A stub-described span
+  // contributes `stub.steps` — the Runtime's rendering-accounting of the rows
+  // it covers (one per thought, one per tool invocation) — plus the rows the
+  // window delivered raw. Reading `rawCount` here (the coordinate width) made
+  // a tool-heavy run show ~2x and drop by half on expand; reading
+  // `pairedItems.length` instead made the number change the moment the fetched
+  // rows landed. This sum is identical collapsed, expanded, and fused.
+  const stepCount = (stub?.steps ?? 0) + countExploreSteps(items);
   const visualCanvasPath = useMemo(() => findVisualCanvasRelPath(effectiveItems), [effectiveItems]);
   const visualCanvasShotSeqValue = useMemo(() => visualCanvasShotSeq(effectiveItems), [effectiveItems]);
 
@@ -419,7 +439,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
     // below can never half-open an empty block. Today a pending can only
     // live on the live tail (raw rows, never stubbed) and `pendingApproval`
     // is cleared on session load; this guard is the invariant, not a patch.
-    if (isLazyStub) return [] as string[];
+    if (isLazyStub && items.length === 0) return [] as string[];
     const keys: string[] = [];
     for (const paired of pairedItems) {
       if (paired.kind !== "tool" || paired.result) continue;
