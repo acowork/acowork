@@ -347,8 +347,15 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
                 (messages, page.offset, page.limit, page.total, false)
             }
             MessageGroups::Stub => {
-                let page =
-                    conversation::read_messages_paginated_indexed(&file_path, off, lim, from_tail)?;
+                // `Records`: this projection's unit is the record, so the page
+                // never cuts an explore run (docs/protocols/zh/http.md §5.2.1).
+                let page = conversation::read_messages_paginated_indexed(
+                    &file_path,
+                    off,
+                    lim,
+                    from_tail,
+                    conversation::PageUnit::Records,
+                )?;
                 // The page's trailing run stays raw when the window holds the
                 // newest rows — a pending authorization lives there, and an
                 // open run keeps growing (see `collapse_explore_runs`).

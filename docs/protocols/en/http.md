@@ -595,20 +595,42 @@ Gateway does not parse the Runtime response body; all reads and writes are verba
 
 #### 5.2.1 explore-stub projection and lazy detail read (t-01412679)
 
-`GET /sessions/{sid}/messages?groups=stub`: the pagination contract is
-**unchanged** — `offset` / `limit` / `total` always count raw entries (JSONL
-lines). `limit` is the window's span, never the number of records in
-`messages`; `count` is the record count, and the two differ under the stub
-projection. Only the row projection changes: a contiguous run of
+`GET /sessions/{sid}/messages?groups=stub`: **the record is the unit of
+pagination; the raw coordinate is its address.**
+
+- `offset` / `limit` / `total` still count raw entries (JSONL lines), so an
+  append never renumbers anything and `next_offset = offset + limit` holds at
+  every hop.
+- A page is a sequence of WHOLE RECORDS: if the requested window cuts into an
+  explore run, the Runtime expands it outward to that run's edges (start back to
+  the run's first row, end forward to its last) and **echoes the span it
+  actually covered** — `limit` may therefore exceed the requested value. So
+  `offset + limit` always lands on a record boundary and no record is ever
+  split, which is what makes "one run shown as two chips" and "the count changes
+  when you expand" impossible at the source instead of something every consumer
+  has to stitch back together.
+- `count` is the record count; it differs from `limit` (a span) by design.
+
+Projection: a contiguous run of
 `thought` / `tool_call` / `tool_result` rows (never an internal row) collapses
 into **one** `kind="explore_stub"` record with empty `content` and metadata
-`{ "start": 1, "end": 4, "raw_count": 3, "tools": ["bash"], "tools_truncated": false }`,
+`{ "start": 1, "end": 4, "raw_count": 3, "steps": 2, "tools": ["bash"], "tools_truncated": false }`,
 where `start` / `end` are the run's **data-index coordinates** (same dimension
-as `offset`; `end` exclusive). The stub's `id` is the run's first row id, so the
+as `offset`; `end` exclusive). `raw_count` is the segment's coordinate width
+(`end - start`, i.e. raw rows); `steps` is how many entries it **renders** (one
+per `thought`, one per tool invocation — a `tool_result` draws inside its
+`tool_call` and adds none). The two answer different questions: `raw_count`
+sizes and locates, `steps` is the "n steps" on the collapsed chip. Printing
+`raw_count` there made a tool-heavy run read about twice its expanded size.
+When the frontend fuses the segments a page boundary cut out of one run,
+`steps` / `raw_count` / `tools` add up across them. The stub's `id` is the run's first row id, so the
 frontend explore-block cache key (`block-${items[0].id}`) is the same value
 across the stub / raw / live paths. The response carries `grouped: true`; the
 default (`groups` omitted or not `stub`) returns stored rows verbatim with no
 `grouped` field, so existing consumers see an unchanged shape.
+
+Snapping is self-limiting for an oversized run: when the whole window falls
+inside one run, the page IS that one record (one stub on the wire — small).
 
 **Exception: the page's trailing run is not collapsed.** When the window touches
 the end of the log (`offset + limit >= total`), the last run on that page is

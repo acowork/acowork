@@ -67,24 +67,28 @@ export interface MessageBlock {
    */
   isLive: boolean;
   /**
-   * t-01412679: set when this `explore_group` came from an explore-STUB row
-   * (`groups=stub` page projection) — the block renders its collapsed header
-   * from `stub` metadata and fetches the run's raw rows on first expand.
+   * t-01412679: set when this `explore_group` was described by explore-STUB
+   * metadata (`groups=stub` page projection) — the collapsed header renders
+   * from it and the rows it covers are fetched on first expand.
    *
-   * `items` stays EMPTY for the block's whole life: the detail rows live in
-   * the store's `exploreDetails` cache (keyed by `stubId`) and reach the
-   * component as its `details` prop. The folder is a pure function of
-   * `messages[]`, and those rows are deliberately not in it — so `lazy` means
-   * "this block holds no rows", never "a re-fold is coming".
+   * A stub row IS one whole run, because the Runtime snaps page boundaries to
+   * record boundaries (§5.2.1), so a stub block's `items` is empty by
+   * construction. The other shape a run takes — its raw rows — is a plain
+   * block with no `stub`; a block never mixes the two.
+   *
+   * Fetched rows never land here — they live in the store's `exploreDetails`
+   * cache (keyed by `stubId`) and reach the component as its `details` prop.
+   * The folder stays a pure function of `messages[]`.
    */
   stub?: ExploreStubMeta;
-  /** The stub ROW's id — the detail cache key and the fetch argument.
-   *  Equal to `blockId.slice("block-".length)` by construction; carried
-   *  explicitly so no consumer re-derives it from the key's format. */
+  /** The stub ROW's id (the run's first row in this window) — the detail cache
+   *  key and the fetch argument. Equal to `blockId.slice("block-".length)` by
+   *  construction; carried explicitly so no consumer re-derives it from the
+   *  key's format. */
   stubId?: string;
-  /** True for a folded stub block: it carries no `items`, its rows come from
-   *  the store's detail cache. Every consumer that needs "does this block have
-   *  rows?" reads this, not `items.length`. */
+  /** True when the block holds no rows at all: everything it has is stub
+   *  metadata. Every consumer that asks "does this block have rows to render?"
+   *  reads this, not `items.length`. */
   lazy?: boolean;
 }
 
@@ -107,30 +111,51 @@ export interface MessageBlock {
 export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
   const blocks: MessageBlock[] = [];
   const lastIdx = messages.length - 1;
-  let exploreStartMsgIdx = -1; // index into messages[] where the explore group starts
-  let exploreBuffer: ChatMessage[] = [];
+
+  // ── the explore accumulator ──────────────────────────────────────────
+  //
+  // ONE block per record. A run reaches the client in one of two shapes and
+  // never a mixture, because the Runtime pages by RECORD (t-01412679 §5.2.1):
+  // the window edges are snapped to run boundaries, so a run is either here
+  // as its raw rows (the trailing run of a page at the log end) or as ONE stub
+  // row that describes it entirely. Nothing has to be fused, and a block can
+  // never be half of a run — that was the reported "one run, two chips".
+  let explore: { items: ChatMessage[]; stub?: ExploreStubMeta; stubId?: string } | null = null;
+  let exploreStartMsgIdx = -1; // index into messages[] where the run starts
+  let exploreEndMsgIdx = -1; // …and where the last row it consumed sits
 
   const flushExplore = () => {
-    if (exploreBuffer.length === 0) return;
-    const items = exploreBuffer;
-    // Content-derived blockId: use the first item's id.
-    const exploreBlockId = `block-${items[0].id}`;
+    if (!explore) return;
+    const { items, stub, stubId } = explore;
+    const first = messages[exploreStartMsgIdx];
     blocks.push({
-      blockId: exploreBlockId,
+      blockId: `block-${first.id}`,
       type: "explore_group",
       items,
-      rawCount: items.length,
-      anchorToLatest:
-        exploreStartMsgIdx + items.length - 1 === lastIdx,
+      // A raw block is exactly as wide as its rows; a stub block's width is the
+      // span it advertises — its rows never reach the client.
+      rawCount: stub ? stub.rawCount : items.length,
+      anchorToLatest: exploreEndMsgIdx === lastIdx,
       // Backfilled in the second pass below.
       hasFollowUpReply: false,
       // ADR-050 C3: set by the v2 adapter in a post-fold pass, never
       // by foldMessages itself.  Default to false here so the
       // legacy / pre-v2 callers keep working.
       isLive: false,
+      ...(stub ? { stub, stubId, lazy: true } : {}),
     });
-    exploreBuffer = [];
+    explore = null;
     exploreStartMsgIdx = -1;
+    exploreEndMsgIdx = -1;
+  };
+
+  const startExplore = (i: number) => {
+    if (!explore) {
+      exploreStartMsgIdx = i;
+      explore = { items: [] };
+    }
+    exploreEndMsgIdx = i;
+    return explore;
   };
 
   // ── Ownership pre-pass ────────────────────────────────────
@@ -201,34 +226,21 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
       continue;
     }
 
-    // t-01412679: an explore-STUB row is already a folded group server-side.
-    // It becomes a lazy `explore_group` block: the header renders from `stub`
-    // metadata and `items` stays empty for the block's whole life — the detail
-    // rows are the STORE's (`exploreDetails`, keyed by this row's id) and reach
-    // the component as its `details` prop. The folder stays a pure function of
-    // `messages[]`; nothing re-folds when a fetch lands. Like a live run, a
-    // stub closes any raw run still open above it.
+    // t-01412679: an explore-STUB row is the server's projection OF one whole
+    // run, so it is one block and it closes any open run first. There is no
+    // fusion here: the Runtime snaps page boundaries to record boundaries, so
+    // two stubs are two runs, never two halves of one.
     if (msg.type === "explore_stub" && msg.exploreStub) {
       flushExplore();
-      const stub = msg.exploreStub;
-      blocks.push({
-        blockId: `block-${msg.id}`,
-        type: "explore_group",
-        items: [],
-        rawCount: stub.rawCount,
-        anchorToLatest: i === lastIdx,
-        hasFollowUpReply: false,
-        isLive: false,
-        stub,
-        stubId: msg.id,
-        lazy: true,
-      });
+      exploreStartMsgIdx = i;
+      exploreEndMsgIdx = i;
+      explore = { items: [], stub: msg.exploreStub, stubId: msg.id };
+      flushExplore();
       continue;
     }
 
     if (isExploreRunRow(msg.type)) {
-      if (exploreStartMsgIdx < 0) exploreStartMsgIdx = i;
-      exploreBuffer.push(msg);
+      startExplore(i).items.push(msg);
     } else {
       flushExplore();
 
@@ -306,24 +318,20 @@ export function blockIndexOfRawMessage(
   rawIdx: number,
   rawBase: number,
 ): number {
-  // The walk carries a cursor over the window's raw file coordinates. A
-  // non-lazy block consumes `rawCount` consecutive rows; a stub block
-  // consumes *its own span* — the cursor must jump to `stub.end` after it,
-  // or every later block sits at the wrong coordinate (the stub row is one
-  // window row but N file entries).
+  // Two address schemes, both in RAW file coordinates:
+  //  - a stub block is addressed by the span its stub advertises — its rows are
+  //    not on the client at all, so only the coordinates know where it sits;
+  //  - a raw block covers `rawCount` consecutive entries from the cursor, which
+  //    is exactly its `items.length`.
+  // Array indices cannot be used for either: one stub record spans N entries,
+  // so array math lands every later block at the wrong coordinate (review I4).
   let cursor = rawBase;
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i];
-    // t-01412679: one walk over RAW file coordinates. A stub block
-    // addresses its span from server metadata — `[start, end)` are ABSOLUTE
-    // file indices (the Runtime stamps them off the log index, and the
-    // locate's `messageIndex` is in the same system), so they are compared
-    // directly, never rebased. Mixing array indices with coordinates is
-    // what put a locate hit on the wrong block: the stub's own `items` is
-    // empty, so an index walk silently skips its whole span and lands the
-    // next block one position too early.
-    if (b.lazy && b.stub) {
+    if (b.stub) {
       if (rawIdx >= b.stub.start && rawIdx < b.stub.end) return i;
+      // Resynchronise on the block's own coordinate: the array skipped a hole
+      // the cursor walk cannot see.
       cursor = Math.max(cursor, b.stub.end);
       continue;
     }

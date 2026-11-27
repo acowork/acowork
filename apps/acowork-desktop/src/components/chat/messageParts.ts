@@ -127,3 +127,25 @@ export function isExploreRunRow(type: string | undefined | null): boolean {
 export function isExploreBlockRow(type: string | undefined | null): boolean {
   return isExploreRunRow(type) || type === "explore_stub";
 }
+
+/**
+ * How many entries a set of explore rows RENDERS as: one per thought, one per
+ * tool invocation. A `tool_result` renders inside its call (see
+ * `buildPairedItems`), so it adds no entry of its own.
+ *
+ * The same accounting as the Runtime's stub `steps` counter
+ * (`conversation.rs::collapse_explore_runs`), and both are ADDITIVE over the
+ * pieces of a run: that is what lets a collapsed chip, an expanded block, and a
+ * block fused from several page-clipped stubs all read the same number.
+ * Deliberately NOT `rawCount` — counting rows made a tool-heavy run read ~2×
+ * its real size and drop by half the moment the reader expanded it.
+ */
+export function countExploreSteps(
+  rows: readonly { type: string | undefined | null }[],
+): number {
+  let steps = 0;
+  for (const row of rows) {
+    if (row.type === "thought" || row.type === "tool_call") steps += 1;
+  }
+  return steps;
+}

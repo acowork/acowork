@@ -23,7 +23,7 @@ import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "../lib/logger";
 import { blockRefOf } from "../lib/chatBlocks";
-import { isTurnPartMeta } from "../components/chat/messageParts";
+import { isExploreRunRow, isTurnPartMeta } from "../components/chat/messageParts";
 import { noteRoundState } from "./chatBlockStore";
 import type { LlmAvailability } from "../lib/llmAvailability";
 import { llmAvailabilityFromWire } from "../lib/llmAvailability";
@@ -89,6 +89,11 @@ function mergeContextUsage(
 // therefore retryable on the next expand.
 const exploreDetailInflight = new Map<string, Promise<ChatMessage[] | null>>();
 
+/** Rows per `/messages/detail` request — the Runtime's span ceiling
+ *  (`MESSAGES_PAGE_SPAN_MAX`). A block fused from several page-clipped stub
+ *  parts is wider than one part, so the read walks its span in these slices. */
+const EXPLORE_DETAIL_SLICE = 500;
+
 // ── Message window merge ──────────────────────────────────────────────
 //
 // Single source of truth for "what should `messages[]` look like after a
@@ -133,6 +138,9 @@ export interface MergedMessageWindow {
 export function mergeMessageWindow(
   cache: ChatMessage[],
   server: ChatMessage[],
+  /** Raw coordinate of `cache[0]`. When given, cached rows a server stub
+   *  already covers are dropped (see step 4). */
+  cacheBaseOffset?: number,
 ): MergedMessageWindow {
   // Step 1: server is authoritative for its ids. Build a Map<id, msg>
   // starting from server entries so duplicates in `server` itself are
@@ -146,24 +154,14 @@ export function mergeMessageWindow(
   // server didn't echo back this round (e.g. a paginated window that
   // doesn't overlap the cache's older entries).
   //
-  // t-01412679: ONE exception to "server wins". A stub row and the raw rows of
-  // its run share an id (the stub's id IS the run's first row id — that is what
-  // keeps the block key stable across stub / raw / live). So an id collision
-  // between a stub and a real row means "the same rows, compressed on one
-  // side", and the side holding the ACTUAL rows must win: `groups=stub` is a
-  // projection of the same log, so a refresh can legitimately describe a run
-  // the cache already holds raw (a run that was the trailing, un-collapsed run
-  // when it was first loaded and is interior by the time the page is
-  // re-fetched). Letting the stub overwrite `r1` would leave the stub chip
-  // standing next to `r2..rN` from the cache: one run rendered as two blocks,
-  // with the stub's step count double-counting it.
+  // t-01412679: a stub and the raw rows of its run share an id (the stub's id
+  // IS the run's first row id — that is what keeps the block key stable across
+  // stub / raw / live). Both sides describe the same log, so the collision is
+  // not a conflict; the server's projection is the one the reader asked for and
+  // it wins. The cached rows it covers are removed in step 4 — keeping them
+  // would render the run twice (once as the stub chip, once as raw rows).
   for (const m of cache) {
-    const existing = byId.get(m.id);
-    if (!existing) {
-      byId.set(m.id, m);
-    } else if (existing.type === "explore_stub" && m.type !== "explore_stub") {
-      byId.set(m.id, m);
-    }
+    if (!byId.has(m.id)) byId.set(m.id, m);
   }
 
   // Step 3: stable sort by timestamp ascending. The merge Map preserves
@@ -174,7 +172,35 @@ export function mergeMessageWindow(
     (a, b) => a.timestamp - b.timestamp,
   );
 
-  return { messages };
+  // Step 4: one record, one representation. A server stub stands for the whole
+  // coordinate range it advertises, so a cached row inside that range is the
+  // same row — the stub already speaks for it. This is the ordinary live path:
+  // `record_complete` writes a run's rows raw while it streams (it is the
+  // trailing run, so it is never collapsed), and a later page — the run now
+  // interior — projects those same coordinates as one stub. Without this the
+  // window would hold both and the reader would see the run twice.
+  let merged = messages;
+  if (cacheBaseOffset !== undefined) {
+    const spans = server
+      .filter((m) => m.type === "explore_stub" && m.exploreStub)
+      .map((m) => m.exploreStub!);
+    if (spans.length > 0) {
+      const coveredIds = new Set<string>();
+      const serverIds = new Set(server.map((m) => m.id));
+      cache.forEach((m, i) => {
+        if (m.type === "explore_stub" || !isExploreRunRow(m.type)) return;
+        // A cache row the server also carries is already resolved by id — the
+        // server's stub IS that row's representation, so dropping it here would
+        // delete the stub and leave the run with no block at all.
+        if (serverIds.has(m.id)) return;
+        const coord = cacheBaseOffset + i;
+        if (spans.some((s) => coord >= s.start && coord < s.end)) coveredIds.add(m.id);
+      });
+      if (coveredIds.size > 0) merged = messages.filter((m) => !coveredIds.has(m.id));
+    }
+  }
+
+  return { messages: merged };
 }
 
 /**
@@ -3312,7 +3338,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // confirmed so it can drop them from its overlay.
         const merged = replaceCache
           ? { messages: converted }
-          : mergeMessageWindow(ss.messages, converted);
+          : mergeMessageWindow(ss.messages, converted, ss.messageOffset);
         const confirmedIds = new Set(
           converted.map((m) => m.id),
         );
@@ -3498,30 +3524,44 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }),
         );
       try {
-        const params = new URLSearchParams({
-          start: String(meta.start),
-          end: String(meta.end),
-        });
-        // Same transport contract as the page read next door: the chat
-        // endpoints 503 during the Gateway/Runtime boot window, and the
-        // expand happens exactly when a session is being (re)opened.
-        const resp = await with503Retry(
-          () =>
-            fetch(
-              `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/messages/detail?${params}`,
+        // A stub describes ONE PAGE's part of a run, so one part always fits
+        // the Runtime's span ceiling — but the block a reader expands may be
+        // several fused parts (consecutive pages, each clipping its own piece),
+        // so the read walks the span in ceiling-sized slices. Sequential, not
+        // parallel: the slices are adjacent byte ranges of one file and the
+        // first slice already tells us whether the rest is worth reading (a
+        // 404/500 aborts the walk with the error state set).
+        const rows: ChatMessage[] = [];
+        for (let start = meta.start; start < meta.end; start += EXPLORE_DETAIL_SLICE) {
+          const end = Math.min(meta.end, start + EXPLORE_DETAIL_SLICE);
+          const params = new URLSearchParams({
+            start: String(start),
+            end: String(end),
+          });
+          // Same transport contract as the page read next door: the chat
+          // endpoints 503 during the Gateway/Runtime boot window, and the
+          // expand happens exactly when a session is being (re)opened.
+          const resp = await with503Retry(
+            () =>
+              fetch(
+                `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/messages/detail?${params}`,
+              ),
+            { tag: `ChatStore.fetchExploreDetail(${agentId}/${sessionId})`, logger: log },
+          );
+          if (!resp.ok) {
+            log.warn(`[ChatStore] explore detail fetch failed (${resp.status}) for stub ${stubId}`);
+            write({ error: true });
+            return null;
+          }
+          const data = (await resp.json()) as { messages: ConversationEntry[] };
+          // Same conversion path as history rows; stub rows never come back
+          // here (the range addresses raw rows only), the filter is a guard.
+          rows.push(
+            ...mergeDocumentUploads(data.messages ?? [], agentId).filter(
+              (m) => m.type !== "explore_stub",
             ),
-          { tag: `ChatStore.fetchExploreDetail(${agentId}/${sessionId})`, logger: log },
-        );
-        if (!resp.ok) {
-          log.warn(`[ChatStore] explore detail fetch failed (${resp.status}) for stub ${stubId}`);
-          write({ error: true });
-          return null;
+          );
         }
-        const data = (await resp.json()) as { messages: ConversationEntry[] };
-        // Same conversion path as history rows; stub rows never come back
-        // here (the range addresses raw rows only), the filter is a guard.
-        const rows = mergeDocumentUploads(data.messages ?? [], agentId)
-          .filter((m) => m.type !== "explore_stub");
         write({ rows });
         return rows;
       } catch (e) {
@@ -4117,6 +4157,10 @@ export function convertConversationEntry(
         start: (meta.start as number) ?? 0,
         end: (meta.end as number) ?? 0,
         rawCount: (meta.raw_count as number) ?? 0,
+        // A Runtime without the `steps` field (version skew: desktop talks to
+        // whatever runtime a node hosts) still described the run; fall back to
+        // the coordinate width so the chip keeps a number at all.
+        steps: (meta.steps as number) ?? (meta.raw_count as number) ?? 0,
         tools: Array.isArray(meta.tools) ? (meta.tools as string[]) : [],
         toolsTruncated: meta.tools_truncated === true,
       },
