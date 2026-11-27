@@ -659,6 +659,10 @@ async function uploadChatAttachment(
   }
 
   signal?.throwIfAborted();
+  // Checked here and not again: `crypto.subtle.digest` takes no signal, so a
+  // cancel clicked during the digest of a multi-hundred-MB file is honoured at
+  // the first chunk rather than stopping the hash. Nothing has reached the
+  // server by then, so the delay costs no transfer — only the wait.
   // The digest covers the whole file, so the bytes are in memory once — the
   // same footprint the multipart path above had, and the reason it is the
   // digest pass, not the transfer, that bounds this producer's peak.

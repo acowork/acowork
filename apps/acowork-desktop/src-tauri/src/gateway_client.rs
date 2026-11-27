@@ -372,48 +372,12 @@ pub struct EnsureAck {
 }
 
 /// Gateway HTTP client
-/// Files whose chunked upload the user asked to stop.
-///
-/// A cancel cannot abort an `invoke` already in flight, so the command records
-/// the intent and the upload loop honours it between chunks — the next chunk
-/// boundary is at most 2 MiB away, which is why nothing more elaborate is
-/// needed. Keyed by path, the one thing both sides know before the upload
-/// starts.
-///
-/// ponytail: entries are dropped on the cancel and on the file's next upload,
-/// so a cancel for an upload that had already ended is discarded rather than
-/// cancelling its successor. Chunks already on the server are released by the
-/// upload loop's own `DELETE`; a process that dies between the two leaves them
-/// to the 24 h TTL sweep (`UploadStore::sweep`), the same owner every
-/// abandoned upload has.
-#[derive(Default)]
-pub struct UploadCancels {
-    paths: std::sync::Mutex<std::collections::HashSet<String>>,
-}
-
-impl UploadCancels {
-    /// Record that the user wants this file's upload stopped.
-    pub fn request(&self, file_path: &str) {
-        if let Ok(mut paths) = self.paths.lock() {
-            paths.insert(file_path.to_string());
-        }
-    }
-
-    /// Consume the request: true at most once per `request`, so one cancel
-    /// cannot stop a later upload of the same file.
-    pub fn take(&self, file_path: &str) -> bool {
-        self.paths
-            .lock()
-            .map(|mut paths| paths.remove(file_path))
-            .unwrap_or(false)
-    }
-}
-
 pub struct GatewayClient {
     client: reqwest::Client,
     base_url: String,
-    /// Set by `cancel_upload`, read between chunks — see [`UploadCancels`].
-    cancels: std::sync::Arc<UploadCancels>,
+    /// Set by `cancel_upload`, read between chunks — see
+    /// [`crate::upload_cancel::UploadCancels`].
+    cancels: std::sync::Arc<crate::upload_cancel::UploadCancels>,
     /// Account-session mirror handed to the Tauri command layer — see
     /// [`GatewayAuth`]. Every request built through [`GatewayClient::send`]
     /// carries its token and replays once after a renewal.
@@ -464,18 +428,12 @@ fn default_upload_limit() -> u64 {
     acowork_core::upload::max_file_bytes()
 }
 
-impl Default for GatewayClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl GatewayClient {
     /// The cancel registry, shared with [`crate::state::AppState`] the same
     /// way [`Self::auth_handle`] shares the account session — so the cancel
     /// command never has to take the gateway lock the upload it cancels is
     /// holding.
-    pub fn cancel_handle(&self) -> std::sync::Arc<UploadCancels> {
+    pub(crate) fn cancel_handle(&self) -> std::sync::Arc<crate::upload_cancel::UploadCancels> {
         self.cancels.clone()
     }
 
@@ -497,7 +455,7 @@ impl GatewayClient {
         Self {
             client,
             base_url,
-            cancels: std::sync::Arc::new(UploadCancels::default()),
+            cancels: std::sync::Arc::new(crate::upload_cancel::UploadCancels::default()),
             auth: Arc::new(GatewayAuth::new()),
         }
     }
@@ -1088,11 +1046,15 @@ impl GatewayClient {
     ///
     /// Replaces the legacy `/api/sessions/:sid/documents` route (deleted as
     /// part of ADR-046 §Backend Storage).
-    #[allow(clippy::too_many_arguments)]
     ///
     /// `on_progress` reports bytes the server has accepted so far, on the same
     /// `Channel<u64>` contract `download_attachment` uses for the reverse
     /// direction, so one chip component can render either side of a transfer.
+    ///
+    /// `upload_token` names this transfer for `cancel_upload`: caller-minted
+    /// because the chunk route's own id does not exist yet when the user may
+    /// already want to stop.
+    #[allow(clippy::too_many_arguments)]
     pub async fn upload_file(
         &self,
         agent_id: &str,
@@ -1101,8 +1063,12 @@ impl GatewayClient {
         format: &str,
         width: Option<u32>,
         height: Option<u32>,
+        upload_token: &str,
         on_progress: Option<&tauri::ipc::Channel<u64>>,
     ) -> Result<FileUploadResponse> {
+        // Whatever this upload does — land, be refused, be cancelled, hit a
+        // `?` — its token is forgotten on the way out.
+        let _slot = self.cancels.hold(upload_token);
         let file_name = std::path::Path::new(file_path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -1136,6 +1102,7 @@ impl GatewayClient {
                     width,
                     height,
                     size,
+                    upload_token,
                     on_progress,
                 )
                 .await;
@@ -1203,6 +1170,7 @@ impl GatewayClient {
         width: Option<u32>,
         height: Option<u32>,
         size: u64,
+        upload_token: &str,
         on_progress: Option<&tauri::ipc::Channel<u64>>,
     ) -> Result<FileUploadResponse> {
         let file_name = std::path::Path::new(file_path)
@@ -1281,17 +1249,12 @@ impl GatewayClient {
             if let Some(report) = on_progress {
                 let _ = report.send(offset);
             }
-            if self.cancels.take(file_path) {
+            if self.cancels.take(upload_token) {
                 // Drop the chunks that did land instead of leaving the file's
                 // worth of them for the TTL sweep. Best effort: a failure here
                 // only means the sweep does it later.
                 let abort = format!("{base}/{upload_id}");
-                if let Ok(resp) = self
-                    .send(|| Ok(self.client.delete(&abort)))
-                    .await
-                {
-                    drop(resp);
-                }
+                let _ = self.send(|| Ok(self.client.delete(&abort))).await;
                 return Err(anyhow::anyhow!("upload cancelled"));
             }
         }

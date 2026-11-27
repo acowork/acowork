@@ -27,7 +27,8 @@
 
 pub mod browser;
 mod commands;
-pub mod gateway_client;
+mod gateway_client;
+pub mod upload_cancel;
 mod hub_client;
 mod mqtt_client;
 mod navigation_guard;

@@ -18,6 +18,11 @@ use crate::state::AppState;
 /// `download_attachment`'s channel so one chip can render either direction.
 /// Required rather than optional: `Option<Channel<_>>` does not implement
 /// `Deserialize`, and there is exactly one caller.
+///
+/// `upload_token` names this transfer so [`cancel_upload`] can stop it. Caller
+/// -minted rather than server-minted on purpose: the id the chunk route
+/// returns only exists after the create call, so an id-keyed cancel could not
+/// honour a click during the digest or that create.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn upload_file(
@@ -28,6 +33,7 @@ pub async fn upload_file(
     format: String,
     width: Option<u32>,
     height: Option<u32>,
+    upload_token: String,
     on_progress: tauri::ipc::Channel<u64>,
 ) -> Result<FileUploadResponse, String> {
     let client = state.gateway.read().await;
@@ -39,6 +45,7 @@ pub async fn upload_file(
             &format,
             width,
             height,
+            &upload_token,
             Some(&on_progress),
         )
         .await
@@ -53,10 +60,10 @@ pub async fn upload_file(
 /// cancelled". The caller removes the chip itself — waiting for the loop to
 /// come back would leave a frozen 40% on screen for a whole chunk.
 #[tauri::command]
-pub async fn cancel_upload(state: State<'_, AppState>, file_path: String) -> Result<(), String> {
+pub async fn cancel_upload(state: State<'_, AppState>, upload_token: String) -> Result<(), String> {
     // Deliberately not `state.gateway.read()`: the upload that is being
     // cancelled holds that read lock for its whole duration.
-    state.upload_cancels.request(&file_path);
+    state.upload_cancels.request(&upload_token);
     Ok(())
 }
 

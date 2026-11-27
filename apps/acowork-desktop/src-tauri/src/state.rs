@@ -135,7 +135,7 @@ pub struct AppState {
     /// with the [`GatewayClient`] held above, and held here as well so the
     /// cancel command does not have to queue behind the upload's own read
     /// lock — a cancel that waits for the upload it cancels is no cancel.
-    pub upload_cancels: Arc<crate::gateway_client::UploadCancels>,
+    pub upload_cancels: Arc<crate::upload_cancel::UploadCancels>,
     /// Active deployment mode. Set by `set_gateway_config` (called from frontend).
     pub gateway_mode: Arc<tokio::sync::RwLock<GatewayMode>>,
     /// Handle to the locally spawned Gateway process (None in remote mode,

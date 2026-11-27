@@ -61,7 +61,7 @@ import {
   useChatSessionStore,
   type ChatAttachmentMeta,
 } from "../../stores/chatSessionStore";
-import { useUploadingFiles } from "./uploadProgress";
+import { uploadPercent, useUploadingFiles } from "./uploadProgress";
 
 /** One 24×24 hover circle shared by all four controls. Deliberately NOT
  *  `toolbarIconButton` (`h-7 w-7 rounded-md`, sized for the composer's cluster):
@@ -432,9 +432,7 @@ export function RunBlockActionRow({
             >
               <Paperclip className="h-3 w-3 shrink-0 animate-pulse" strokeWidth={1.75} />
               <span className="shrink-0">
-                {u.sizeBytes
-                  ? `${Math.min(100, Math.round(((u.sentBytes ?? 0) / u.sizeBytes) * 100))}%`
-                  : "…"}
+                {u.sizeBytes ? uploadPercent(u.sentBytes, u.sizeBytes) : "…"}
               </span>
               <button
                 type="button"

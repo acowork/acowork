@@ -14,11 +14,11 @@ export interface UploadingFile {
 /**
  * In-flight uploads for a composer's attachment tray.
  *
- * Every attachment surface uploads through `chatSessionStore.upload`, which
- * reports accepted bytes (`onProgress`) — but a surface that forgets to wire
- * that up shows a pulsing spinner for the whole transfer, which on a 300 MB
- * file is a multi-minute "is it hung?" stare. That is what each surface used
- * to be, in three near-identical copies, so the wiring lives here instead:
+ * The three surfaces that upload through `chatSessionStore.upload` report
+ * accepted bytes (`onProgress`) — but a surface that forgets to wire that up
+ * shows a pulsing spinner for the whole transfer, which on a 300 MB file is a
+ * multi-minute "is it hung?" stare. That is what each of them used to be, in
+ * near-identical copies, so the wiring lives here instead:
  * `begin(file)` reserves the chip and hands back the callback and signal,
  * `done()` drops it. A surface cannot report nothing by accident any more.
  *
@@ -26,6 +26,12 @@ export interface UploadingFile {
  * surface's own `done()` in the same `finally` that handles a failure, so a
  * cancelled upload and a broken one leave the tray the same.
  */
+/** `3 MB / 30 MB` style percentage, clamped — the one spelling of "how far"
+ *  the capsule in the run drawer and the image overlay both use. */
+export function uploadPercent(sent: number | undefined, total: number): string {
+  return `${Math.min(100, Math.round(((sent ?? 0) / total) * 100))}%`;
+}
+
 export function useUploadingFiles() {
   const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
   const controllers = useRef(new Map<string, AbortController>());
