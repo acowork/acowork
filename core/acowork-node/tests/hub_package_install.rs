@@ -1,6 +1,6 @@
 //! End-to-end install guard for hub-published packages.
 //!
-//! The hub publishes `.agent` packages that the app installs through the
+//! The hub publishes `.bot` packages that the app installs through the
 //! node's `install_package`. That path demands a valid signature outside dev
 //! mode, so a package the hub signs but the node refuses would compile green,
 //! pass every unit test and still fail for every user at install time.
@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use acowork_node::package::install::install_package;
 use acowork_node::state::NodeState;
 
-/// The directory holding the hub-built `.agent` packages.
+/// The directory holding the hub-built `.bot` packages.
 fn hub_dist_dir() -> PathBuf {
     let dir = std::env::var_os("ACOWORK_HUB_DIST")
         .map(PathBuf::from)
@@ -45,7 +45,7 @@ fn hub_dist_dir() -> PathBuf {
     assert!(
         dir.is_dir(),
         "hub dist directory not found at {} — set ACOWORK_HUB_DIST to the directory \
-         holding the hub-built .agent packages",
+         holding the hub-built .bot packages",
         dir.display()
     );
     dir
@@ -70,7 +70,7 @@ fn every_official_hub_package_installs_in_production_mode() {
     std::fs::create_dir_all(&temp_root).expect("create temp root");
 
     for agent_id in OFFICIAL_AGENTS {
-        let pkg = dist.join(format!("{agent_id}.agent"));
+        let pkg = dist.join(format!("{agent_id}.bot"));
         assert!(
             pkg.is_file(),
             "hub did not publish {agent_id}: {} is missing",
