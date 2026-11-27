@@ -840,7 +840,7 @@
     "dataDirectory": "数据目录",
     "storage": "存储",
     "maxUploadSize": "单文件上限",
-    "maxUploadSizeHint": "所有上传共用一个上限：聊天附件、Agent 文件保存、intent 附件。分块上传可续传，因此大文件不再和小文件分档。修改在 Gateway 与上传服务重启后对新的上传生效。",
+    "maxUploadSizeHint": "所有上传共用一个上限：聊天附件、Bot 文件保存、intent 附件。分块上传可续传，因此大文件不再和小文件分档。修改在 Gateway 与上传服务重启后对新的上传生效。",
     "cacheManagement": "缓存管理",
     "cacheManagementSoon": "为 ADR-123 预留：后续在这里列出并可清理已下载模型、记忆数据库与文档缓存。",
     "about": "关于",

@@ -1203,7 +1203,7 @@
     "dataDirectory": "Data Directory",
     "storage": "Storage",
     "maxUploadSize": "Max file size",
-    "maxUploadSizeHint": "One ceiling for every upload — chat attachments, agent file saves and intent attachments. Chunked uploads resume where they stopped, so a large file no longer has a separate limit from a small one. Takes effect for uploads started after the Gateway and its upload services restart.",
+    "maxUploadSizeHint": "One ceiling for every upload — chat attachments, bot file saves and intent attachments. Chunked uploads resume where they stopped, so a large file no longer has a separate limit from a small one. Takes effect for uploads started after the Gateway and its upload services restart.",
     "cacheManagement": "Cache management",
     "cacheManagementSoon": "Reserved for ADR-123: downloaded models, memory databases and cached documents will be listed and prunable here.",
     "about": "About",
