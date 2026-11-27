@@ -22,18 +22,18 @@
 //! so the hub is absent there and an early `return` would report green while
 //! asserting nothing — a drift alarm that never rings is worse than none. The
 //! tests are opt-in instead: run them with `--ignored`, and point
-//! `ACOWORK_HUB_AGENTS` at the hub's `agents/` directory whenever it is not a
+//! `ACOWORK_HUB_AGENTS` at the hub's `bots/` directory whenever it is not a
 //! sibling of this checkout. Without a hub they fail loudly rather than pass.
 
 use std::path::{Path, PathBuf};
 
 use acowork_core::manifest::{AgentManifest, SkillDecl};
 
-/// The hub repository's `agents/` directory.
+/// The hub repository's `bots/` directory.
 ///
 /// `ACOWORK_HUB_AGENTS` wins when set; otherwise the hub is expected as a
 /// sibling of this checkout.
-fn hub_agents_dir() -> PathBuf {
+fn hub_bots_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("ACOWORK_HUB_AGENTS") {
         return PathBuf::from(dir);
     }
@@ -44,19 +44,19 @@ fn hub_agents_dir() -> PathBuf {
     main_repo
         .join("..")
         .join("ACoworkAgentHub")
-        .join("agents")
+        .join("bots")
 }
 
-/// Every `agents/<owner>/<name>/manifest.toml` in the hub, skipping `_template`.
+/// Every `bots/<owner>/<name>/manifest.toml` in the hub, skipping `_template`.
 ///
 /// Panics when the hub is missing or empty: a caller that runs these tests
 /// means to check the hub, and "no packages found" is a failure of the alarm,
 /// not a pass.
 fn manifest_paths() -> Vec<PathBuf> {
-    let root = hub_agents_dir();
+    let root = hub_bots_dir();
     assert!(
         root.is_dir(),
-        "hub checkout not found at {} — set ACOWORK_HUB_AGENTS to its agents/ directory, \
+        "hub checkout not found at {} — set ACOWORK_HUB_AGENTS to its bots/ directory, \
          or run the default test set (these tests are #[ignore]d)",
         root.display()
     );

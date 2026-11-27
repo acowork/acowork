@@ -90,7 +90,7 @@ jobs:
       - name: Hub packages satisfy the manifest contract
         working-directory: core
         env:
-          ACOWORK_HUB_AGENTS: ${{ github.workspace }}/.ci/hub/agents
+          ACOWORK_HUB_AGENTS: ${{ github.workspace }}/.ci/hub/bots
         run: cargo test -p acowork-core --test hub_interop -- --ignored
       - name: Fetch master (the soft check compares against it)
         # actions/checkout fetches only the triggering ref, so `origin/master`

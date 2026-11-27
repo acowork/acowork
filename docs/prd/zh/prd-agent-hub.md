@@ -11,7 +11,7 @@
 
 > **当前实现（2026-11）**：D1–D10 的产品决策仍然成立，但落地位置变了。官网那套静态页（`ACoworkWebSite/agents/*` + `dev/common/sync-agent-hub.py` + `dev/agent-hub/hub.test.js`）已被 `ACoworkAgentHub` 仓库取代：该仓库自己持有 bot 源目录、CI 打包签名、`index.json` 与站点，§11/§12 中指向 `ACoworkWebSite` 的行因此成为历史记录，保留不改写。
 >
-> **平台 bot 的真源是 `ACowork/bots/<name>-bot/`**，Hub 的 `agents/official/**` 是`tools/sync-official.py` 生成的镜像（逐字节拷贝，并在 `hub.json.mirror.source_commit` 记录所镜像的提交）。跨仓同步机制与两条检查（硬：镜像是否等于它声称的提交；软：master 是否已前进）见 `ACoworkAgentHub/CONTRIBUTING.md` 与 `docs/publishing.md`。
+> **平台 bot 的真源是 `ACowork/bots/<name>-bot/`**，Hub 的 `bots/official/**` 是`tools/sync-official.py` 生成的镜像（逐字节拷贝，并在 `hub.json.mirror.source_commit` 记录所镜像的提交）。跨仓同步机制与两条检查（硬：镜像是否等于它声称的提交；软：master 是否已前进）见 `ACoworkAgentHub/CONTRIBUTING.md` 与 `docs/publishing.md`。
 
 ---
 
