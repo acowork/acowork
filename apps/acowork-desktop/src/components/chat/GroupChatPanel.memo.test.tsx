@@ -181,7 +181,13 @@ describe("GroupChatPanel row memo (render-perf L1)", () => {
     // new identity exactly once. The baseline must be taken after it settles,
     // or the settle itself (a legitimate prop-identity change) pollutes it.
     await act(async () => {});
-    expect(rowRenders.n).toBe(tail.length * 2); // mount + directory settle
+    // Non-vacuity: rows really did paint, so the zero below means "nothing
+    // re-rendered", not "nothing ever rendered". NOT `tail.length * 2`: the
+    // transcript is virtualized (`VirtualRowList`), so how many rows exist in
+    // the DOM is a function of the viewport the virtualizer measures, not of
+    // the fixture's length — the old mount-count pin was an artifact of the
+    // pre-virtualization list.
+    expect(rowRenders.n).toBeGreaterThan(0);
 
     rowRenders.n = 0;
     const ta = screen.getByPlaceholderText("groupChat.placeholderWithMentions") as HTMLTextAreaElement;

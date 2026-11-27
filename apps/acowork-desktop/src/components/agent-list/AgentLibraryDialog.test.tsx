@@ -540,7 +540,10 @@ describe("upgrade routing (REQ-035–038)", () => {
         "upgrade_from_hub",
         expect.objectContaining({
           agentId: "com.acowork.safe",
-          packageFile: "downloads/com.acowork.safe.agent",
+          // From the catalog fixture, not a literal: a hard-coded filename
+          // here drifts the moment the fixture's package name changes, and the
+          // button's whole job is to hand the catalog's file through untouched.
+          packageFile: SAFE_AGENT.package.file,
           instanceId: "inst-old",
         }),
       ),

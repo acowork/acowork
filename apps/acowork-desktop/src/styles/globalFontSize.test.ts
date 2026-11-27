@@ -126,15 +126,20 @@ describe("global font size scales the whole app", () => {
   });
 
   it("leaves the NavBar alone (icon-only, fixed px sizing)", () => {
-    // The nav buttons carry no text and size their icons in fixed units
-    // (`h-6 w-6`), so they do not move when the font size changes. Pin
-    // the icon sizing so a future "let's make it em too" edit does not
-    // silently start resizing the rail.
+    // The nav buttons carry no text and size their artwork in fixed units,
+    // so the rail does not move when the font size changes: `NAV_ARTWORK_CLASS`
+    // is the one 28px tile every icon in the column wears, inside a 40px
+    // `NavButton`. Pin that sizing so a future "let's make it em too" edit
+    // does not silently start resizing the rail. (The rail used to spell
+    // `h-6 w-6` inline per icon; the artwork refactor hoisted it into the
+    // constant, which is what this reads now.)
     const nav = readFileSync(
       resolve(__dirname, "..", "components", "layout", "NavBar.tsx"),
       "utf8",
     );
-    expect(nav).toContain("h-6 w-6");
+    const artwork = nav.match(/NAV_ARTWORK_CLASS = "([^"]+)"/);
+    expect(artwork, "NavBar no longer declares NAV_ARTWORK_CLASS").not.toBeNull();
+    expect(artwork![1]).toBe("h-7 w-7");
     expect(nav).not.toMatch(/className="[^"]*text-(9|10|11|xs|sm|base|lg|xl)[^"]*"/);
   });
 

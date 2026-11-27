@@ -255,7 +255,7 @@ function LetterMark({ app, active }: { app: AppDto; active: boolean }) {
     <span
       className={cn(
         NAV_ARTWORK_CLASS,
-        "flex items-center justify-center rounded-md text-[13px] font-semibold",
+        "flex items-center justify-center rounded-md text-xs font-semibold",
         "bg-[var(--letter-bg)] transition-colors group-hover:bg-[var(--letter-bg-hover)]",
       )}
       style={

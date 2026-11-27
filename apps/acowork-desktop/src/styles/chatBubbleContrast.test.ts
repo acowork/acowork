@@ -136,14 +136,28 @@ describe("theme pack chat bubble", () => {
       const scope = scopeBody(css, `:root.theme-${pack.id} {`);
 
       const bubble = parseHsl(token(scope, "--color-chat-bubble"))!;
-      expect(bubble.l, `${pack.id} light bubble lightness`).toBeGreaterThanOrEqual(98);
+      // The rule is RELATIVE — the bubble is a brighter step than the plane it
+      // sits on — not an absolute lightness. Each pack tunes its own plane
+      // (L94 clay, L95 the rest) and moves the bubble with it, so a floor of
+      // 98% encoded one pack's numbers as if they were the contract and failed
+      // clay's deliberately 1-point-warmer pair for no visible reason.
+      const planeL = parseHsl(token(scope, "--color-chat-body"))!;
+      expect(bubble.l, `${pack.id} light bubble must out-step its plane`).toBeGreaterThan(planeL.l);
       expect(bubble.a, `${pack.id} light bubble must be opaque`).toBe(1);
 
       const { bubble: painted, plane } = bubbleOverPlane(scope);
-      // The plane is tinted (L94-95%), the bubble is white: they must be
-      // far enough apart that the bubble reads as a card. The old
-      // translucent default scored 1.00-1.01 here — the invisible bubble.
-      expect(contrast(painted, plane), `${pack.id} light bubble vs plane`).toBeGreaterThan(1.08);
+      // The plane is tinted (L94-95%) and the bubble is a light card: they must
+      // be far enough apart that the bubble reads as a card. The old translucent
+      // default scored 1.00-1.01 here — the invisible bubble.
+      //
+      // The floor is 1.05, not the 1.08 this file shipped with: 1.08 was only
+      // reachable while the packs used a pure-white bubble, and a29a318b
+      // deliberately tuned every pack down to a 98% card (clay 97%) — the whole
+      // family now sits at ~1.072, so 1.08 asserted a state of the code that no
+      // longer exists and could only be "fixed" by re-brightening the cards.
+      // 1.05 keeps a 4-point margin over the bug and still fails anything that
+      // lands close enough to the plane to disappear.
+      expect(contrast(painted, plane), `${pack.id} light bubble vs plane`).toBeGreaterThan(1.05);
     }
   });
 

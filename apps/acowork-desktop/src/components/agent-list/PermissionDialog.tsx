@@ -763,7 +763,7 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode, onNodeD
               data-testid="permission-dialog-delete-node"
               disabled={deleting}
               onClick={() => setConfirmDelete(true)}
-              className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-danger-icon transition-colors hover:bg-[var(--color-danger)]/10 disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-danger-icon transition-colors hover:bg-[var(--color-destructive)]/10 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Trash2 className="h-3.5 w-3.5 shrink-0" />
               {t("permissionDialog.deleteNode")}

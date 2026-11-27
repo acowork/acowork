@@ -10,6 +10,7 @@ import QRCode from "qrcode";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { copyText } from "../../lib/clipboard";
 import { log } from "../../lib/logger";
 import { resolvePairingBaseUrl } from "../../lib/pairing";
@@ -246,6 +247,11 @@ export function RemoteNodeEnrollPanel({ autoMint = true }: { autoMint?: boolean 
             type="button"
             onClick={() => setEditingHost(true)}
             className="max-w-full truncate text-center text-10 text-text-tertiary hover:text-text-secondary"
+            // The button's visible text is the host VALUE, so without this the
+            // accessible name is "http://localhost:19876" — a reader (screen or
+            // test) gets the address with no hint that the control edits it,
+            // and the name changes the moment the host resolves.
+            aria-label={t("agentHub.remoteNodeHostEdit")}
             title={t("agentHub.remoteNodeHostEdit")}
           >
             {gatewayDisplay}
@@ -293,9 +299,14 @@ export function RemoteNodeEnrollPanel({ autoMint = true }: { autoMint?: boolean 
 
         {cliOpen && command && (
           <div className="flex flex-col gap-2 rounded-md border border-border-divider bg-panel-inset p-2">
-            <code className="block max-h-20 overflow-auto break-all text-10 leading-relaxed text-text-tertiary">
-              {command}
-            </code>
+            {/* One-shot CLI; a long enroll token wraps to several lines, so
+                the block caps at 80px and scrolls — through the app's overlay
+                thumb, not the OS bar (`maxHeight` is the primitive's 5rem). */}
+            <OverlayScrollbar maxHeight={80} className="overscroll-contain">
+              <code className="block break-all text-10 leading-relaxed text-text-tertiary">
+                {command}
+              </code>
+            </OverlayScrollbar>
             <button
               type="button"
               onClick={() => void copyCli()}
