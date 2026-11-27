@@ -846,6 +846,13 @@ struct LogIndex {
     spans: Vec<LogSpan>,
     /// Number of `Data` lines: the pagination `total`.
     total_data: u64,
+    /// `explore_rows[i]` — is the data row at coordinate `i` part of an explore
+    /// run (`thought` / `tool_call` / `tool_result`, never an internal row)?
+    /// Built and reconciled alongside `spans`, so a page boundary can be moved
+    /// onto a RECORD boundary without touching the file: the record stream is a
+    /// property of the log, not of the window a caller happened to ask for.
+    /// One bool per row, appended incrementally like `spans`.
+    explore_rows: Vec<bool>,
     /// Byte length of the file at the last scan; equal to the file size when
     /// the index is up to date.
     end: u64,
@@ -924,6 +931,7 @@ fn reconcile_log(path: &Path, idx: &mut LogIndex) -> std::io::Result<()> {
         idx.spans.pop();
         if last.kind == LogLineKind::Data {
             idx.total_data -= 1;
+            idx.explore_rows.pop();
         }
         scan_from = last.offset;
     }
@@ -956,6 +964,11 @@ fn reconcile_log(path: &Path, idx: &mut LogIndex) -> std::io::Result<()> {
         let data_index = if kind == LogLineKind::Data {
             let i = idx.total_data;
             idx.total_data += 1;
+            // Record classification happens HERE, in the same scan that
+            // assigns the coordinate: the record stream and the pagination
+            // coordinates are two views of one pass, so they cannot disagree
+            // about where a run begins.
+            idx.explore_rows.push(is_explore_log_row(body));
             Some(i)
         } else {
             None
@@ -1047,6 +1060,7 @@ fn calibrate_open(path: &Path) -> std::io::Result<usize> {
         idx.spans.pop();
         if last.kind == LogLineKind::Data {
             idx.total_data -= 1;
+            idx.explore_rows.pop();
         }
         idx.end = last.offset;
         tracing::warn!(
@@ -4184,19 +4198,27 @@ fn build_session_page(
 ///   is one JSONL line (one thought / tool_call / tool_result /
 ///   user / assistant row). A single displayed "explore group" may
 ///   count as multiple raw entries depending on how many
-///   thoughts/tool_calls/tool_results it contains. `display group`
-///   collapsing (think + tool_call + tool_result → 1 chip) is a
-///   **pure-frontend UI abstraction** — see `displayMessages` in
-///   `ChatPanel.tsx`. The backend never reasons about groups.
+///   thoughts/tool_calls/tool_results it contains.
 ///
-/// # Why raw entries and not groups?
+/// # The unit is the RECORD; the coordinate is the row
 ///
-/// `offset` and `limit` are both measured in raw entries so they share
-/// a single dimension and arithmetic `next_offset = prev_offset +
-/// prev_limit` is always correct. Group-aware pagination (slicing by
-/// display groups) would require every protocol hop to recompute group
-/// boundaries — a hidden coupling that reintroduces the partial-cut
-/// bug family (a mega-explore group straddling a window boundary).
+/// The two are not the same thing, and the difference is where this reader's
+/// discipline lives (t-01412679):
+///
+/// - A **record** is what a reader thinks in: one bubble, or one whole explore
+///   run (the `groups=stub` projection turns a run into a single light row).
+/// - A **raw coordinate** is how a record is addressed: `offset` / `limit` /
+///   `total` count JSONL rows, so a log append never renumbers anything, and
+///   `next_offset = offset + limit` keeps working across protocol hops.
+///
+/// The page is therefore a range of WHOLE RECORDS: the requested window is
+/// expanded outward to record boundaries before a byte is read
+/// ([`snap_to_record_boundaries`]), and the response echoes the span it actually
+/// covers. Slicing at an arbitrary row and projecting afterwards — the earlier
+/// design — cannot express a run that straddles the cut: it emitted half a run
+/// as a stub plus the other half raw, and every consumer had to stitch the two
+/// back together (one run painted as two chips, counts doubled or halved).
+/// A partial record is now unrepresentable at the source.
 ///
 /// Implementation: a per-path line index (see the "Log index" section) maps
 /// the requested window to byte spans, and only those spans are read with
@@ -4229,7 +4251,7 @@ pub fn read_messages_paginated(
     // in ONE place (`read_messages_paginated_indexed`); this reader is its
     // coordinate-free projection. Two copies of that loop would be two places
     // for the index / corrupt-line discipline to drift (t-01412679 review).
-    let page = read_messages_paginated_indexed(path, offset, limit, from_tail)?;
+    let page = read_messages_paginated_indexed(path, offset, limit, from_tail, PageUnit::Rows)?;
     Ok(PaginatedMessages {
         messages: page.messages.into_iter().map(|(_, entry)| entry).collect(),
         offset: page.offset,
@@ -4258,6 +4280,35 @@ fn window_for(total: u64, offset: u64, limit: u32, from_tail: bool) -> (u64, u64
     }
 }
 
+/// Expand a raw window outward until it neither begins nor ends inside an
+/// explore run — the "a page is a sequence of records" rule.
+///
+/// A run is ONE record; a cut inside it would describe half a record in one
+/// page and the other half in the next, and every consumer would have to stitch
+/// the two back together (the reported "one run, two chips" bug). Snapping at
+/// the source means the projection never has to guess: the window it receives
+/// always contains whole runs.
+///
+/// Cost is O(run length) over the in-memory `explore_rows` bitmap — no file
+/// reads, no per-request rescan. A single run that swallows the whole window
+/// collapses the page to that one record, which is small on the wire (one stub)
+/// and therefore self-limiting.
+fn snap_to_record_boundaries(explore: &[bool], start: u64, end: u64) -> (u64, u64) {
+    let total = explore.len() as u64;
+    let mut s = start.min(total);
+    let mut e = end.min(total);
+    if s >= e {
+        return (s, e);
+    }
+    while s > 0 && explore[s as usize] && explore[(s - 1) as usize] {
+        s -= 1;
+    }
+    while e < total && explore[(e - 1) as usize] && explore[e as usize] {
+        e += 1;
+    }
+    (s, e)
+}
+
 /// [`read_messages_paginated`] paired with each entry's **true data
 /// coordinate**, for callers that must publish coordinates (explore stubs,
 /// t-01412679).
@@ -4268,6 +4319,28 @@ fn window_for(total: u64, offset: u64, limit: u32, from_tail: bool) -> (u64, u64
 /// NOT generally sit at `offset + i` — arithmetic on a compressed page would
 /// make every stub after the first hole advertise the wrong range. See the note
 /// on [`read_entries_indexed`].
+/// What a page is a page OF (t-01412679).
+///
+/// The distinction is not cosmetic: it decides whether the window may be
+/// widened to keep a record whole.
+///
+/// - [`PageUnit::Rows`] — a row window, verbatim. Used by the default (raw)
+///   projection, whose contract is "`limit` rows, no more": callers may count
+///   on `count <= limit`, and the frontend aligns raw windows to turn
+///   boundaries itself.
+/// - [`PageUnit::Records`] — a record window. A record is a bubble or a WHOLE
+///   explore run, so a boundary that would cut a run is moved outward to the
+///   run's edge and the response echoes the span it actually covers. Used by
+///   the `groups=stub` projection, where the record is the unit the reader
+///   thinks in (and the only shape in which a run can be described fully).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageUnit {
+    /// Rows are the unit: the window is returned as asked.
+    Rows,
+    /// Records are the unit: the window is widened to run boundaries.
+    Records,
+}
+
 pub struct IndexedMessagesPage {
     /// `(data_index, entry)` in ascending coordinate order.
     pub messages: Vec<(u64, ConversationEntry)>,
@@ -4293,6 +4366,7 @@ pub fn read_messages_paginated_indexed(
     offset: u64,
     limit: u32,
     from_tail: bool,
+    unit: PageUnit,
 ) -> Result<IndexedMessagesPage> {
     let file_len = std::fs::metadata(path)?.len();
     if file_len == 0 {
@@ -4307,7 +4381,20 @@ pub fn read_messages_paginated_indexed(
         return Ok(IndexedMessagesPage { messages: Vec::new(), offset, limit: 0, total: 0 });
     }
 
-    let (effective_offset, start_idx, end_idx) = window_for(total, offset, limit, from_tail);
+    let (requested_offset, start_idx, end_idx) = window_for(total, offset, limit, from_tail);
+    // A record page is a range of RECORDS: the caller's offset/limit are raw
+    // coordinates, so they can fall inside a run, and the window is expanded to
+    // the run's edges before anything is read or collapsed. The response echoes
+    // the span it actually covers, so `next_offset = offset + limit` still lands
+    // on a record start while a partial record becomes impossible to produce.
+    // A row page is returned exactly as asked (see [`PageUnit`]).
+    let (start_idx, end_idx, effective_offset) = match unit {
+        PageUnit::Rows => (start_idx, end_idx, requested_offset),
+        PageUnit::Records => {
+            let (s, e) = snap_to_record_boundaries(&idx.explore_rows, start_idx, end_idx);
+            (s, e, s)
+        }
+    };
     if start_idx >= end_idx {
         return Ok(IndexedMessagesPage {
             messages: Vec::new(),
@@ -4345,6 +4432,36 @@ pub fn read_messages_paginated_indexed(
     })
 }
 
+/// Record classification for one log line: does it belong to an explore run?
+///
+/// Same predicate as [`is_explore_entry`], applied to the raw bytes during the
+/// index scan so the boundary can be known without a page read. The probe
+/// struct keeps the cost to "walk the object once, keep two fields": the scan
+/// must not materialise a whole `ConversationEntry` (content, metadata,
+/// display…) merely to learn a role.
+fn is_explore_log_row(body: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct RowProbe {
+        #[serde(default)]
+        role: String,
+        #[serde(default)]
+        metadata: Option<serde_json::Value>,
+    }
+    let Ok(probe) = serde_json::from_slice::<RowProbe>(body) else {
+        // A line that does not parse is not a record anyone can project; the
+        // page reader skips it too. Treating it as "not explore" keeps the
+        // boundary walk honest — it can only ever stop at a broken line.
+        return false;
+    };
+    let internal = probe
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get(META_KEY_INTERNAL))
+        .and_then(|v| v.as_bool())
+        == Some(true);
+    !internal && matches!(probe.role.as_str(), "thought" | "tool_call" | "tool_result")
+}
+
 /// Whether an entry belongs to an explore run (the rows the frontend folds
 /// into one `explore_group` chip).
 ///
@@ -4369,6 +4486,13 @@ pub fn is_explore_entry(entry: &ConversationEntry) -> bool {
 /// `[start, end)` in the same dimension `offset` / `limit` / `total` use, so the
 /// caller's page arithmetic (`next_offset = offset + limit`, `isAtTail`, locate)
 /// is untouched — only the rows in between got lighter.
+///
+/// Precondition, guaranteed by the reader: the window's edges are record
+/// boundaries, so every run here is COMPLETE. A run cut by the page edge would
+/// make this function emit a stub that describes only part of a run — the exact
+/// shape that had the client fusing halves back together. The collapse never
+/// has to grow its own "is this run whole?" guess, because the window cannot
+/// deliver half of one.
 ///
 /// `page_reaches_log_tail` (`IndexedMessagesPage::reaches_log_tail`) says the
 /// window holds the NEWEST rows. The page's trailing run is then left RAW, for
@@ -4398,7 +4522,10 @@ pub fn is_explore_entry(entry: &ConversationEntry) -> bool {
 ///   [`ENTRY_KIND_COMPACTION`].
 /// - `metadata`: `start`, `end`, `raw_count`, `tools` (tool_call names in log
 ///   order, duplicates kept — presentation dedupe is a UI concern), and
-///   `tools_truncated` once the list exceeds `EXPLORE_STUB_TOOLS_CAP`.
+///   `tools_truncated` once the list exceeds `EXPLORE_STUB_TOOLS_CAP`;
+///   plus `steps`, the number of entries the block RENDERS (one per thought,
+///   one per tool invocation) — distinct from `raw_count`, which is the
+///   coordinate width. See the counter's own note.
 ///   Deliberately *no* `has_error`: the error flag on a tool_result row is a
 ///   content heuristic owned by the agent layer, and duplicating it here would
 ///   drift. The frontend derives it from the detail rows it fetches on expand.
@@ -4433,19 +4560,33 @@ pub fn collapse_explore_runs(
         let last_idx = run[run.len() - 1].0;
         let mut tools: Vec<&str> = Vec::new();
         let mut tools_truncated = false;
+        // Rendered-entry count for this part of the run: one per thought, one
+        // per tool invocation. A `tool_result` adds nothing — it renders inside
+        // its call (that is how the frontend's `buildPairedItems` pairs them),
+        // so counting raw rows here made the chip read ~2× the truth for a
+        // tool-heavy run and drop by half the moment the reader expanded it.
+        // The definition is ADDITIVE across the parts a page boundary splits a
+        // run into, which is what lets the frontend fuse those parts and keep
+        // one stable number (t-01412679 field report 1).
+        let mut steps: u32 = 0;
         for (_, e) in run.iter() {
-            if e.role == "tool_call" {
-                if tools.len() >= EXPLORE_STUB_TOOLS_CAP {
-                    tools_truncated = true;
-                    break;
+            match e.role.as_str() {
+                "thought" => steps += 1,
+                "tool_call" => {
+                    steps += 1;
+                    if tools.len() >= EXPLORE_STUB_TOOLS_CAP {
+                        tools_truncated = true;
+                        continue;
+                    }
+                    tools.push(
+                        e.metadata
+                            .as_ref()
+                            .and_then(|m| m.get("tool_name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(""),
+                    );
                 }
-                tools.push(
-                    e.metadata
-                        .as_ref()
-                        .and_then(|m| m.get("tool_name"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(""),
-                );
+                _ => {}
             }
         }
         let raw_count = last_idx - first_idx + 1;
@@ -4453,6 +4594,7 @@ pub fn collapse_explore_runs(
             "start": first_idx,
             "end": last_idx + 1,
             "raw_count": raw_count,
+            "steps": steps,
             "tools": tools,
         });
         if tools_truncated {
@@ -9800,12 +9942,68 @@ mod tests {
         assert_eq!(meta["end"], serde_json::json!(6));
         assert_eq!(meta["raw_count"], serde_json::json!(5));
         assert_eq!(
+            meta["steps"],
+            serde_json::json!(3),
+            "rendered entries: 1 thought + 2 tool invocations — the two              tool_result rows belong to their calls and add no step"
+        );
+        assert_eq!(
             meta["tools"],
             serde_json::json!(["file_read", "bash"]),
             "tool_call names in log order; tool_result rows never add a name"
         );
         assert!(meta.get("tools_truncated").is_none());
         assert_eq!(stub.id, run_first_id, "stub carries the run's first row id");
+    }
+
+    #[test]
+    fn collapse_explore_runs_steps_counts_rendered_entries_not_raw_rows() {
+        // Field report 1 (t-01412679): the chip read ~2x the truth for a
+        // tool-heavy run and dropped by half on expand. 4 calls + their 4
+        // results = 8 raw rows but 4 rendered entries; the same shape at the
+        // reported 44 raw / 26 rendered sizes (8 thoughts + 18 calls +
+        // 18 results) must land on 26.
+        let mut entries = Vec::new();
+        for i in 0..4 {
+            entries.push(stub_entry(
+                "tool_call",
+                "{}",
+                Some(serde_json::json!({"tool_name": "bash", "tool_call_id": format!("c{i}")})),
+            ));
+            entries.push(stub_entry(
+                "tool_result",
+                "done",
+                Some(serde_json::json!({"tool_name": "bash", "tool_call_id": format!("c{i}")})),
+            ));
+        }
+        let out = collapse_explore_runs(indexed(entries), false);
+        assert_eq!(out.len(), 1);
+        let meta = out[0].metadata.as_ref().unwrap();
+        assert_eq!(meta["raw_count"], serde_json::json!(8));
+        assert_eq!(meta["steps"], serde_json::json!(4));
+
+        let mut big = Vec::new();
+        let mut id = 0;
+        for round in 0..8 {
+            big.push(stub_entry("thought", "t", None));
+            // 8 thoughts + 18 calls + 18 results = 44 raw rows, 26 rendered.
+            for _ in 0..if round < 6 { 3 } else { 0 } {
+                big.push(stub_entry(
+                    "tool_call",
+                    "{}",
+                    Some(serde_json::json!({"tool_name": "bash", "tool_call_id": format!("c{id}")})),
+                ));
+                big.push(stub_entry(
+                    "tool_result",
+                    "done",
+                    Some(serde_json::json!({"tool_name": "bash", "tool_call_id": format!("c{id}")})),
+                ));
+                id += 1;
+            }
+        }
+        let out = collapse_explore_runs(indexed(big), false);
+        let meta = out[0].metadata.as_ref().unwrap();
+        assert_eq!(meta["raw_count"], serde_json::json!(44));
+        assert_eq!(meta["steps"], serde_json::json!(26));
     }
 
     #[test]
@@ -9878,6 +10076,57 @@ mod tests {
         assert_eq!(meta["tools"].as_array().unwrap().len(), 50);
         assert_eq!(meta["tools_truncated"], serde_json::json!(true));
         assert_eq!(meta["raw_count"], serde_json::json!(60));
+    }
+
+    #[test]
+    fn snap_to_record_boundaries_never_cuts_a_run() {
+        // 0 user | 1..3 run | 4 assistant | 5..6 run | 7 assistant
+        let explore = [false, true, true, false, true, true, false, false];
+        // A cut in the middle of the first run walks back to its first row…
+        assert_eq!(snap_to_record_boundaries(&explore, 2, 3), (1, 3));
+        // …and a cut at its last row walks forward to the run's end.
+        assert_eq!(snap_to_record_boundaries(&explore, 0, 2), (0, 3));
+        // Both edges inside one run → the page is exactly that run.
+        assert_eq!(snap_to_record_boundaries(&explore, 2, 3), (1, 3));
+        // A window that already starts and ends on boundaries is untouched.
+        assert_eq!(snap_to_record_boundaries(&explore, 4, 7), (4, 7));
+        // Whole-log window stays whole-log.
+        assert_eq!(snap_to_record_boundaries(&explore, 0, 8), (0, 8));
+        // Empty window is not widened.
+        assert_eq!(snap_to_record_boundaries(&explore, 4, 4), (4, 4));
+    }
+
+    #[test]
+    fn read_messages_paginated_indexed_returns_whole_runs() {
+        // t-01412679: the page unit is the RECORD. Asking for a raw window that
+        // straddles a run must return the whole run, with offset/limit echoing
+        // the span actually covered — otherwise the client receives half a run
+        // as a stub and half as raw rows and renders the run twice.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let lines = [
+            r#"{"id":"r0","ts":"2026-01-01T12:00:00.000Z","role":"user","content":"go"}"#,
+            r#"{"id":"r1","ts":"2026-01-01T12:00:01.000Z","role":"thought","content":"hmm"}"#,
+            r#"{"id":"r2","ts":"2026-01-01T12:00:02.000Z","role":"tool_call","content":"{}","metadata":{"tool_name":"bash","tool_call_id":"c1"}}"#,
+            r#"{"id":"r3","ts":"2026-01-01T12:00:03.000Z","role":"tool_result","content":"ok","metadata":{"tool_call_id":"c1"}}"#,
+            r#"{"id":"r4","ts":"2026-01-01T12:00:04.000Z","role":"assistant","content":"done"}"#,
+        ];
+        std::fs::write(&path, lines.join("
+") + "
+").unwrap();
+
+        // Ask for rows [1,3): the run is [1,4), so the page must be [1,4).
+        let page = read_messages_paginated_indexed(&path, 1, 2, false, PageUnit::Records).unwrap();
+        assert_eq!(page.offset, 1, "offset echoes the snapped start");
+        assert_eq!(page.limit, 3, "limit echoes the span actually covered");
+        assert_eq!(page.total, 5);
+        let coords: Vec<u64> = page.messages.iter().map(|(i, _)| *i).collect();
+        assert_eq!(coords, vec![1, 2, 3], "the whole run, no cut");
+
+        // A window that ends inside the run also expands forward.
+        let page = read_messages_paginated_indexed(&path, 0, 3, false, PageUnit::Records).unwrap();
+        assert_eq!((page.offset, page.limit), (0, 4));
+        assert_eq!(page.messages.len(), 4);
     }
 
     #[test]
@@ -9959,7 +10208,7 @@ mod tests {
 
         for (offset, limit, tail) in [(0u64, 3u32, false), (4, 3, false), (0, 3, true), (0, 100, true)] {
             let plain = read_messages_paginated(&path, offset, limit, tail).unwrap();
-            let page = read_messages_paginated_indexed(&path, offset, limit, tail).unwrap();
+            let page = read_messages_paginated_indexed(&path, offset, limit, tail, PageUnit::Rows).unwrap();
             assert_eq!(plain.offset, page.offset, "offset echo diverged at ({offset},{limit},{tail})");
             assert_eq!(plain.total, page.total);
             assert_eq!(plain.limit, page.limit, "one window arithmetic, one echoed span");
@@ -9989,7 +10238,7 @@ mod tests {
         )
         .unwrap();
 
-        let page = read_messages_paginated_indexed(&path, 0, 10, false).unwrap();
+        let page = read_messages_paginated_indexed(&path, 0, 10, false, PageUnit::Rows).unwrap();
         assert_eq!(page.total, 4, "the corrupt line still counts as a raw entry");
         assert_eq!(page.messages.len(), 3);
         assert_eq!(page.offset, 0);

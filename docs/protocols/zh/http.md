@@ -830,20 +830,38 @@ Gateway 会校验并把它当作 scope 注入（等同于以该用户身份读�
 
 #### 5.2.1 explore-stub 投影与懒读详情（t-01412679）
 
-`GET /sessions/{sid}/messages?groups=stub`：分页语义**不变** ——
-`offset` / `limit` / `total` 一律按 raw entry（JSONL 行）计（`limit` 是窗口跨度，
-不是 `messages` 的记录数；`count` 才是记录数，两者在 stub 模式下不相等）；变的只是行投影：
+`GET /sessions/{sid}/messages?groups=stub`：**记录是分页单元，raw 坐标是地址**。
+
+- `offset` / `limit` / `total` 仍按 raw entry（JSONL 行）计 —— 追加日志不改写既有坐标，
+  `next_offset = offset + limit` 在任何一跳都成立。
+- 但一页是**完整记录**的序列：请求窗口若切在某条 explore run 内部，服务端把它
+  向外吸附到该 run 的边界（起点回退到 run 首行、终点延到 run 末行），**响应回显的是
+  实际覆盖的跨度**（因此 `limit` 可能大于请求值）。所以 `offset + limit` 永远落在
+  记录边界上，任何一条记录都不会被切成两半 —— 「一个 run 两条 chip」「展开前后数字
+  不一致」这类问题的根被拔掉，不需要消费端去拼。
+- `count` 是记录数，与 `limit`（跨度）在 stub 模式下天然不相等。
+
+投影：
 连续的 `thought` / `tool_call` / `tool_result` run（且非 internal 行）折叠为**一条**
 `kind="explore_stub"` 记录，`content` 为空，`metadata` 携带
 
 ```json
-{ "start": 1, "end": 4, "raw_count": 3, "tools": ["bash"], "tools_truncated": false }
+{ "start": 1, "end": 4, "raw_count": 3, "steps": 2, "tools": ["bash"], "tools_truncated": false }
 ```
 
-`start` / `end` 是该 run 的 **data-index 坐标**（与 offset 同维度，end 开区间）。
+`start` / `end` 是该 run 的 **data-index 坐标**（与 offset 同维度，end 开区间）；
+`raw_count` 是该段的**坐标宽度**（`end - start`，raw 行数），`steps` 是这段
+**渲染出来的条目数**（每条 `thought` 计 1，每次工具调用计 1，`tool_result`
+画在它的 `tool_call` 里不单独计）。两个字段用途不同：`raw_count` 用于估算与
+坐标换算，`steps` 是折叠态标题上那个"n steps"；用 `raw_count` 当步数会让
+工具密集的 run 显示约两倍，展开后又回落到实际条目数。前端把同一 run 被分页
+切开的多个段融合成一个块时，`steps` / `raw_count` / `tools` 按段累加。
 stub 的 `id` = run 首行 id，前端 explore 块的缓存键（`block-${items[0].id}`）
 在 stub / raw / live 三条路径下同一坐标。响应带 `grouped: true`；默认
 （`groups` 省略或非 `stub`）返回原始行、无 `grouped` 字段，旧消费者形状不变。
+
+吸附对单个超长 run 是自限的：整个窗口落进同一个 run 时，该页就是这一条记录
+（线上只有一条 stub，很小）。
 
 **例外：页面尾部的 run 不折叠。** 当窗口触及日志末尾（`offset + limit >= total`）时，
 该页最后一段 run 原样返回。两个原因都是正确性而非观感：

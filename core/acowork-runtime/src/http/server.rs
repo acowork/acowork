@@ -5037,6 +5037,13 @@ mod tests {
         assert_eq!(stub["metadata"]["start"], 1);
         assert_eq!(stub["metadata"]["end"], 4);
         assert_eq!(stub["metadata"]["raw_count"], 3);
+        // `steps` is what the collapsed chip prints: rendered entries, not raw
+        // rows. The run below is thought + tool_call + tool_result = 3 rows but
+        // renders 2 entries (the result folds into its call).
+        assert_eq!(
+            stub["metadata"]["steps"], 2,
+            "steps counts rendered entries (thought + tool_call), not raw rows"
+        );
         assert_eq!(stub["metadata"]["tools"], serde_json::json!(["bash"]));
 
         // ── detail read: the run's raw rows, tool_result NOT truncated ──
