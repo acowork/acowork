@@ -14,7 +14,7 @@
 //! Usage:
 //!
 //! ```text
-//! ACOWORK_HUB_DIST=E:/projects/tranxon/ACoworkAgentHub/dist-verify \
+//! ACOWORK_HUB_DIST=E:/projects/tranxon/ACoworkBotHub/dist-verify \
 //!   cargo test -p acowork-node --test hub_package_install -- --ignored
 //! ```
 //!
@@ -39,7 +39,7 @@ fn hub_dist_dir() -> PathBuf {
                 .join("..")
                 .join("..")
                 .join("..")
-                .join("ACoworkAgentHub")
+                .join("ACoworkBotHub")
                 .join("dist-verify")
         });
     assert!(

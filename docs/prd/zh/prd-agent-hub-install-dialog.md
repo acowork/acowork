@@ -36,7 +36,7 @@ ACowork 装机后的第一个真实问题不是"怎么用"，而是"能装什么
 | 事实 | 出处 |
 | --- | --- |
 | Hub 站点已上线，8 个签名 bot | `https://hub.acowork.ai/data/index.json`（实测 200，`Access-Control-Allow-Origin: *`） |
-| Hub 站点自己写着"下载后在 Desktop App 中导入" | `ACoworkAgentHub/site/index.html` 首屏文案 |
+| Hub 站点自己写着"下载后在 Desktop App 中导入" | `ACoworkBotHub/site/index.html` 首屏文案 |
 | 官网 PRD 把这条列为验收标准：schema 被 Desktop 直接消费 | [prd-agent-hub.md](./prd-agent-hub.md) §2 G4「schema 被 Desktop App 直接消费，无需改造」 |
 | 桌面端目前没有任何 Hub / registry 相关代码 | `grep -rn "hub.acowork\|agent_hub" apps/acowork-desktop/src` 无结果 |
 | Gateway 已有异步安装能力（202 + OperationAck） | `core/acowork-gateway/src/http/agents.rs:1463`（`install_agent`）、`:1376`（`ensure_agent`） |
@@ -369,7 +369,7 @@ publish 侧不新增任何写盘能力：`build_publish` 已经返回 `output_pa
 
 #### D14 `examples/` 更名为 `agents/`（已执行）
 
-理由：这个目录的出厂内容是"我们随包发布的 bot"，不是"示例"；更名后与 ACoworkAgentHub 的已发布源树 `agents/<publisher>/<bot>/` 命名对齐。
+理由：这个目录的出厂内容是"我们随包发布的 bot"，不是"示例"；更名后与 ACoworkBotHub 的已发布源树 `agents/<publisher>/<bot>/` 命名对齐。
 
 范围：功能性命中 + 现行文档改，**ADR 正文保原样**（ADR 里写的 `agents/...` 是决策当时的事实，改写等于篡改历史）。子目录 `agent-packages/` 名字不变（产物路径被 ADR-104 定死，改名只放大 churn）。
 

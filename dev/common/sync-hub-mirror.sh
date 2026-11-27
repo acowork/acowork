@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Open the ACoworkAgentHub mirror PR for a commit of THIS repo.
+# Open the ACoworkBotHub mirror PR for a commit of THIS repo.
 #
 # The platform bots' source of truth is `bots/<name>-bot/` here. The hub
 # publishes a byte-for-byte mirror of them under `bots/official/`, produced
@@ -22,7 +22,7 @@
 #   dev/common/sync-hub-mirror.sh --dry-run       # report, change nothing
 #
 # Environment:
-#   ACOWORK_HUB   hub checkout (default: ../ACoworkAgentHub)
+#   ACOWORK_HUB   hub checkout (default: ../ACoworkBotHub)
 #   HUB_BASE      ref the mirror branch is cut from (default: origin/main).
 #                 Override it to test against an unmerged tooling branch.
 #   NO_PUSH=1     commit on the mirror branch, skip push and the PR
@@ -65,7 +65,7 @@ SHA="$(git -C "$MAIN_REPO" rev-parse --verify "${REF}^{commit}" 2>/dev/null)" \
     || { echo "ERROR: '$REF' is not a commit in $MAIN_REPO" >&2; exit 1; }
 SHORT="${SHA:0:12}"
 
-HUB="${ACOWORK_HUB:-$MAIN_REPO/../ACoworkAgentHub}"
+HUB="${ACOWORK_HUB:-$MAIN_REPO/../ACoworkBotHub}"
 HUB="$(cd "$HUB" 2>/dev/null && pwd)" \
     || { echo "ERROR: hub checkout not found at $ACOWORK_HUB (set ACOWORK_HUB)" >&2; exit 2; }
 [ -f "$HUB/tools/sync-official.py" ] \
@@ -188,7 +188,7 @@ echo "OK: committed $(git -C "$HUB" rev-parse --short HEAD) on $BRANCH"
 if [ "${NO_PUSH:-0}" = 1 ]; then
     echo "NO_PUSH=1 — branch left local. Next:"
     echo "  git -C $HUB push -u origin $BRANCH"
-    echo "  gh pr create -R acowork/ACoworkAgentHub -B main -t 'mirror: sync official agents from ACowork@${SHORT}'"
+    echo "  gh pr create -R acowork/ACoworkBotHub -B main -t 'mirror: sync official agents from ACowork@${SHORT}'"
     exit 0
 fi
 
@@ -198,7 +198,7 @@ command -v gh >/dev/null 2>&1 || {
 }
 
 git -C "$HUB" push -q -u origin "$BRANCH"
-gh pr create -R acowork/ACoworkAgentHub -B main -H "$BRANCH" \
+gh pr create -R acowork/ACoworkBotHub -B main -H "$BRANCH" \
     --title "mirror: sync official agents from ACowork@${SHORT}" \
     --body "**Generated — do not hand-edit.** Source: \`acowork/ACowork@${SHA}\`.
 
@@ -208,4 +208,4 @@ Produced by \`tools/sync-official.py --main-repo ../ACowork --main-ref ${SHA}\`.
 \`hub.json\` records the claim; \`--check\` verifies the mirror against it.
 
 - [ ] \`Check the mirror matches the commit it claims\` is green"
-echo "OK: PR opened against acowork/ACoworkAgentHub main"
+echo "OK: PR opened against acowork/ACoworkBotHub main"

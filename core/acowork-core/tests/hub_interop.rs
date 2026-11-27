@@ -43,7 +43,7 @@ fn hub_bots_dir() -> PathBuf {
         .join("..");
     main_repo
         .join("..")
-        .join("ACoworkAgentHub")
+        .join("ACoworkBotHub")
         .join("bots")
 }
 
@@ -136,7 +136,7 @@ fn shipped_skills(package_dir: &Path) -> Vec<SkillDecl> {
 }
 
 #[test]
-#[ignore = "needs the ACoworkAgentHub checkout: set ACOWORK_HUB_AGENTS and run --ignored"]
+#[ignore = "needs the ACoworkBotHub checkout: set ACOWORK_HUB_AGENTS and run --ignored"]
 fn every_hub_manifest_parses_and_validates_in_the_main_repo() {
     let paths = manifest_paths();
     for path in paths {
@@ -151,7 +151,7 @@ fn every_hub_manifest_parses_and_validates_in_the_main_repo() {
 }
 
 #[test]
-#[ignore = "needs the ACoworkAgentHub checkout: set ACOWORK_HUB_AGENTS and run --ignored"]
+#[ignore = "needs the ACoworkBotHub checkout: set ACOWORK_HUB_AGENTS and run --ignored"]
 fn every_hub_capability_points_at_a_shipped_skill() {
     let paths = manifest_paths();
     for path in paths {
@@ -170,7 +170,7 @@ fn every_hub_capability_points_at_a_shipped_skill() {
 }
 
 #[test]
-#[ignore = "needs the ACoworkAgentHub checkout: set ACOWORK_HUB_AGENTS and run --ignored"]
+#[ignore = "needs the ACoworkBotHub checkout: set ACOWORK_HUB_AGENTS and run --ignored"]
 fn every_hub_manifest_declares_no_hub_only_fields() {
     // The main repo re-serialises the parsed manifest on clone/upgrade, so a
     // hub-only field written into manifest.toml would be silently dropped.

@@ -128,7 +128,7 @@ is a build artifact of it — rebuild with `dev/common/build-agent.sh` and commi
 the rebuilt package in the same change; `acowork-sign`'s `example_packages` test
 fails when the zip and the source tree disagree.
 
-`ACoworkAgentHub/bots/official/**` is a **generated mirror** of those sources,
+`ACoworkBotHub/bots/official/**` is a **generated mirror** of those sources,
 never a second copy to edit. After landing an agent change here, publish it with:
 
 ```bash

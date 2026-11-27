@@ -79,7 +79,7 @@ jobs:
       - name: The hub registry (source of the mirrored packages)
         uses: actions/checkout@v4
         with:
-          repository: acowork/ACoworkAgentHub
+          repository: acowork/ACoworkBotHub
           persist-credentials: false
           path: .ci/hub
       - name: Shipped packages match their source tree
