@@ -2900,7 +2900,8 @@
     "title_one": "Deliverable from this turn",
     "openFailed": "Cannot open {{filename}}",
     "imageAlt": "Thumbnail of {{filename}}",
-    "size": "{{size}}"
+    "size": "{{size}}",
+    "copyLink": "Copy link"
   },
   "saveAs": {
     "title": "Save As",

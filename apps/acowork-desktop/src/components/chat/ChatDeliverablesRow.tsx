@@ -35,8 +35,9 @@
  * hook the editor preview uses, and cached by the same LRU; nothing about a
  * deliverable travels over the message channel.
  */
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Loader2, PackageOpen } from "lucide-react";
+import { CopyButton } from "../common/CopyButton";
 import type { ChatMessage } from "../../lib/types";
 import {
   deliverableFileName,
@@ -134,26 +135,69 @@ export function ChatDeliverablesRow({ message, agentId }: ChatDeliverablesRowPro
       </div>
       <div className="mt-1.5 flex flex-wrap items-center gap-2">
         {showFiles &&
-          files.map((file) =>
-            isImageDeliverable(file) ? (
-              <DeliverableThumbnail
-                key={`${file.workspaceId}:${file.relPath}`}
-                file={file}
-                agentId={agentId as string}
-                onOpen={openEntry}
-              />
-            ) : (
-              <DeliverableChip
-                key={`${file.workspaceId}:${file.relPath}`}
-                file={file}
-                onOpen={openEntry}
-              />
-            ),
-          )}
+          files.map((file) => (
+            <DeliverableLinkCopy
+              key={`${file.workspaceId}:${file.relPath}`}
+              text={file.relPath}
+            >
+              {isImageDeliverable(file) ? (
+                <DeliverableThumbnail
+                  file={file}
+                  agentId={agentId as string}
+                  onOpen={openEntry}
+                />
+              ) : (
+                <DeliverableChip file={file} onOpen={openEntry} />
+              )}
+            </DeliverableLinkCopy>
+          ))}
         {docs.map((doc) => (
-          <DeliverableDocCard key={doc.docId} doc={doc} onOpen={openDoc} />
+          <DeliverableLinkCopy key={doc.docId} text={doc.path}>
+            <DeliverableDocCard doc={doc} onOpen={openDoc} />
+          </DeliverableLinkCopy>
         ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The hover-revealed copy affordance shared by all three card kinds.
+ *
+ * What lands on the clipboard is the reference the platform already passes
+ * around: a document's library path (the `ref` `doc_read` takes, and the value
+ * `pm_submit_task`'s `doc_refs` accepts) or a workspace-relative file path.
+ * That is what makes the copied text usable when pasted into another agent's
+ * conversation — a clickable viewer link would only work inside this app.
+ *
+ * Hidden until the pointer arrives, so it never takes a click meant for the
+ * card, and held open through the copy confirmation (`CopyButton`'s
+ * `onCopiedChange`): a checkmark that fades on mouse-out reports nothing.
+ */
+function DeliverableLinkCopy({ text, children }: { text: string; children: React.ReactNode }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="group/link relative inline-flex">
+      {children}
+      <span
+        className={cn(
+          "absolute bottom-0.5 right-0.5 rounded transition-opacity",
+          copied
+            ? "opacity-100"
+            : "pointer-events-none opacity-0 group-hover/link:pointer-events-auto group-hover/link:opacity-100",
+          "focus-within:pointer-events-auto focus-within:opacity-100",
+        )}
+      >
+        <CopyButton
+          text={text}
+          iconOnly
+          ariaLabel={t("deliverables.copyLink")}
+          onCopiedChange={setCopied}
+          testId="deliverable-copy-link"
+          className="bg-surface"
+        />
+      </span>
     </div>
   );
 }
