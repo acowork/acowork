@@ -567,7 +567,7 @@ where
 /// about), small enough that the kernel can hand us a 64 KiB slice
 /// without us holding the whole 100 MiB attachment in the request
 /// worker's heap. Aligned with the typical TCP send buffer (16 KiB × 4).
-const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
+pub(crate) const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
 async fn download_attachment(
     State(state): State<AppState>,

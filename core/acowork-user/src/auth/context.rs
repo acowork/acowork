@@ -106,6 +106,11 @@ pub(crate) fn is_public_path(path: &str) -> bool {
     // binding is the trust boundary; `message_id` idempotency bounds replay.
     path.starts_with("/internal/chat-sessions/")
         || path == "/internal/chat-sessions"
+        // ADR-122 §4.3: the agent-to-agent transfer area. Same reasoning — the
+        // caller is the Gateway on this host, and the agent identities it
+        // forwards are headers only the Gateway may write.
+        || path.starts_with("/internal/transfers")
+        || path == "/internal/transfers"
         || matches!(
             path,
             "/health"

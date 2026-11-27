@@ -21,6 +21,7 @@ pub mod auth_api;
 pub mod chat_api;
 pub mod chat_sessions_api;
 pub mod profile_api;
+pub mod transfers;
 pub mod uploads;
 
 use axum::Router;
@@ -42,6 +43,10 @@ pub fn user_router(_state: &AppState) -> Router<AppState> {
         .merge(account_api::account_routes())
         .merge(chat_api::chat_routes())
         .merge(chat_sessions_api::chat_session_routes())
+        // Agent-to-agent transfer area (ADR-122 §4.3). Gateway-only surface:
+        // the Gateway verifies both agent instances and is the only writer of
+        // the two identity headers these handlers read.
+        .merge(transfers::transfer_routes())
         .merge(auth_api::auth_routes())
         .merge(profile_api::user_avatar_routes())
 }

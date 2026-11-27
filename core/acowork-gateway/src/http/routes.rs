@@ -340,6 +340,10 @@ pub fn build_router(state: AppState) -> Router {
         // the Gateway's only Intent ingress; Runtimes POST here instead
         // of publishing to the control topic.
         .merge(crate::http::intent_api::intent_routes())
+        // ADR-122 §4.3: the agent-to-agent transfer surface. Runtimes reach the
+        // user service's transfer area only through here, because only the
+        // Gateway can attribute a call to an agent instance.
+        .merge(crate::http::transfers_api::transfer_routes())
         // ADR-106 D5/D9: the Chat surface's execution-block read. Gateway-owned
         // rather than proxied, because serving one block means composing two
         // reads (this chat's projection cache + the hosting Runtime) and neither

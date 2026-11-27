@@ -133,6 +133,12 @@ struct Meta {
     /// Unix seconds; drives the TTL sweep without relying on directory mtime
     /// (which every chunk write would touch).
     created_at: i64,
+    /// Who reserved this id (the agent instance, for a transfer store). Only
+    /// the owning service's trusted identity can supply it; `None` for the
+    /// stores where the surrounding directory already scopes the upload (a
+    /// chat session's `files/`, an agent's own workspace).
+    #[serde(default)]
+    creator: Option<String>,
 }
 
 /// One process-local store root.
@@ -173,6 +179,19 @@ impl UploadStore {
         size: u64,
         sha256: &str,
     ) -> Result<String, UploadError> {
+        self.create_owned(name, size, sha256, None).await
+    }
+
+    /// [`Self::create`] for a store that must remember the creator — the
+    /// agent-to-agent transfer area (ADR-122 D12), where the id alone is not
+    /// scoped to anyone and the send side has to be attributable later.
+    pub async fn create_owned(
+        &self,
+        name: &str,
+        size: u64,
+        sha256: &str,
+        creator: Option<&str>,
+    ) -> Result<String, UploadError> {
         if size == 0 {
             return Err(UploadError::BadRequest("size must be positive".into()));
         }
@@ -194,6 +213,10 @@ impl UploadStore {
             size,
             sha256: sha,
             created_at: chrono::Utc::now().timestamp(),
+            creator: creator
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(str::to_string),
         };
         write_json(&dir.join(META), &meta).await?;
         Ok(id)
@@ -469,6 +492,11 @@ impl Completer {
         &self.meta.sha256
     }
 
+    /// The creator recorded at `create`, when the store asked for one.
+    pub fn creator(&self) -> Option<&str> {
+        self.meta.creator.as_deref()
+    }
+
     /// The staging file. Landing code should `rename` it into place.
     pub fn path(&self) -> &Path {
         &self.path
@@ -626,6 +654,34 @@ mod tests {
         assert_eq!(v["documentId"], "d1");
         assert!(!root.join("uploads").join(&id).join("0").exists());
         assert!(s.head(&id).await.unwrap().completed);
+    }
+
+    /// A store that records a creator (the transfer area) hands it back from
+    /// every `complete`, and a plain `create` records none — the two stores
+    /// differ in exactly that field, so one proof covers both.
+    #[tokio::test]
+    async fn create_owned_records_the_creator_for_complete() {
+        let (s, _root) = store("owned");
+        let bytes = payload(1);
+
+        let owned = s
+            .create_owned("a.bin", bytes.len() as u64, &digest(&bytes), Some("inst-1"))
+            .await
+            .unwrap();
+        s.put(&owned, 0, &bytes).await.unwrap();
+        let Completion::Staged(c) = s.complete(&owned).await.unwrap() else {
+            panic!("expected a fresh merge");
+        };
+        assert_eq!(c.creator(), Some("inst-1"));
+        c.commit(serde_json::json!({})).await.unwrap();
+
+        let plain = s.create("b.bin", bytes.len() as u64, &digest(&bytes)).await.unwrap();
+        s.put(&plain, 0, &bytes).await.unwrap();
+        let Completion::Staged(c) = s.complete(&plain).await.unwrap() else {
+            panic!("expected a fresh merge");
+        };
+        assert_eq!(c.creator(), None);
+        c.commit(serde_json::json!({})).await.unwrap();
     }
 
     #[tokio::test]

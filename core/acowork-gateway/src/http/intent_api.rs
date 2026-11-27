@@ -1089,6 +1089,26 @@ pub struct IntentRequest {
     /// then guarantees visibility.
     #[serde(default)]
     pub on_behalf_of: Option<String>,
+    /// Attachment references (ADR-122 §4.3, D11): ids in the user service's
+    /// transfer area, whose bytes the sender put there first. Only `id` is
+    /// read — every other claim a sender could make about the file is
+    /// re-stated by the store after it verified the digest, because a declared
+    /// `size`/`sha256` is not a fact until then (ADR-122 §3).
+    ///
+    /// Absent (an older Runtime) means "no attachments", never a failed
+    /// intent; a `kind = "response"` intent may carry the key and it is
+    /// ignored (Q4) — the field is already on the envelope, so opening the
+    /// response direction later is a pure increment.
+    #[serde(default)]
+    pub attachments: Vec<IntentAttachmentRef>,
+}
+
+/// One attachment an intent *references*. Deliberately one field: the Gateway
+/// resolves everything else from the transfer record, so a sender cannot
+/// smuggle a different name or size into the receiver's turn.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IntentAttachmentRef {
+    pub id: String,
 }
 
 /// ADR-076 §决策 4 (rev.): compute the read-only awareness seed for an
@@ -1432,6 +1452,32 @@ async fn deliver_intent(
     };
     let aware_users =
         aware_users_seed(&state, &req.sender, &req.target, originator.as_deref());
+
+    // --- ADR-122 §4.3: attachment references -----------------------------
+    // Resolved here, before delivery, for two reasons: the receiver's pull has
+    // to be authorized by then (the grant lives on the transfer record), and a
+    // reference the sender does not own must fail the *send* rather than the
+    // receiver's turn. `user_port` is the same handle the Chat binding below
+    // uses; without the user service there is no transfer area at all.
+    let mut params = req.params;
+    if !req.attachments.is_empty() {
+        let Some(port) = user_port else {
+            return Err(ApiError::service_unavailable(
+                "attachment delivery requires the user service",
+            ));
+        };
+        let resolved = resolve_intent_attachments(
+            port,
+            &req.sender,
+            &req.target,
+            &req.attachments,
+        )
+        .await?;
+        params.insert(
+            acowork_core::protocol::INTENT_ATTACHMENTS_PARAM.to_string(),
+            serde_json::to_value(&resolved).unwrap_or_default(),
+        );
+    }
     let dreq = delivery::DeliveryRequest {
         message_id: message_id.clone(),
         conversation_id: conversation_id.clone(),
@@ -1440,7 +1486,7 @@ async fn deliver_intent(
         target_instance: req.target.clone(),
         action: req.action.clone(),
         params_json: serde_json::to_string(&serde_json::Value::Object(strip_untrusted_brief(
-            req.params,
+            params,
         )))
         .unwrap_or_default(),
         source_chat_session_id,
@@ -3498,7 +3544,113 @@ async fn intent_status(
 /// there. Without a node token (local single-machine mode), an online
 /// sender claim is accepted — the same no-op boundary every other
 /// isolation mechanism keeps at that tier.
-async fn verify_sender_identity(
+/// Resolve the attachment references an intent declared, and authorize the
+/// target to pull them (ADR-122 §4.3, D11/D13).
+///
+/// Two things happen per reference, in this order:
+///
+/// 1. **Read the record** from the transfer store (as the sender, which is
+///    always allowed to read what it created) and check that the sender is its
+///    `creator_instance_id`. This is the whole of "an intent may only carry
+///    files it uploaded": an id is a uuid a sender could have been given by
+///    someone else, and forwarding it unchecked would make the store a
+///    confused deputy for whoever handed it over.
+/// 2. **Grant the target** read access by appending it to the record. The grant
+///    is the authorization the receiver's pull is checked against, so it has to
+///    exist before delivery — a grant written after the fact is a race the
+///    receiver loses.
+///
+/// The metadata handed back is the store's, not the sender's (ADR-122 §3:
+/// "声明值不当事实"). A reference that does not resolve, or that belongs to
+/// another instance, fails the *send* with a message naming the id — the
+/// alternative (deliver a reference that will 404 on the pull) turns a
+/// send-time bug into a receiver-side mystery.
+async fn resolve_intent_attachments(
+    user_port: u16,
+    sender: &str,
+    target: &str,
+    refs: &[IntentAttachmentRef],
+) -> Result<Vec<acowork_core::protocol::IntentAttachmentMeta>, ApiError> {
+    let client = crate::http::proxy::runtime_http_client();
+    let base = format!("http://127.0.0.1:{user_port}/internal/transfers");
+    let mut out = Vec::with_capacity(refs.len());
+    for r in refs {
+        let id = r.id.trim();
+        if id.is_empty() {
+            return Err(ApiError::bad_request("attachment id must not be empty"));
+        }
+
+        let meta = client
+            .get(format!("{base}/{id}/meta"))
+            .header(crate::http::transfers_api::READER_HEADER, sender)
+            .send()
+            .await
+            .map_err(|e| ApiError::bad_gateway(&format!("transfer store: {e}")))?;
+        if meta.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(ApiError::unprocessable_entity(&format!(
+                "attachment {id} is not a transfer the sender can read"
+            )));
+        }
+        if !meta.status().is_success() {
+            return Err(ApiError::bad_gateway(&format!(
+                "transfer store answered {} for attachment {id}",
+                meta.status()
+            )));
+        }
+        let record: serde_json::Value = meta
+            .json()
+            .await
+            .map_err(|e| ApiError::bad_gateway(&format!("transfer record: {e}")))?;
+        let creator = record
+            .get("creator_instance_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if creator != sender {
+            return Err(ApiError::forbidden(&format!(
+                "attachment {id} was not uploaded by this sender"
+            )));
+        }
+
+        // Authorize the receiver. Idempotent, so a redelivered intent that
+        // resolves the same references twice is harmless.
+        let granted = client
+            .post(format!("{base}/{id}/grant"))
+            .header(crate::http::transfers_api::CREATOR_HEADER, sender)
+            .json(&serde_json::json!({ "instance": target }))
+            .send()
+            .await
+            .map_err(|e| ApiError::bad_gateway(&format!("transfer grant: {e}")))?;
+        if !granted.status().is_success() {
+            return Err(ApiError::bad_gateway(&format!(
+                "transfer store refused the grant for attachment {id} ({})",
+                granted.status()
+            )));
+        }
+
+        out.push(acowork_core::protocol::IntentAttachmentMeta {
+            id: id.to_string(),
+            name: record
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            mime: record
+                .get("mime")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            size: record.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+            sha256: record
+                .get("sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    Ok(out)
+}
+
+pub(crate) async fn verify_sender_identity(
     state: &AppState,
     headers: &HeaderMap,
     sender: &str,

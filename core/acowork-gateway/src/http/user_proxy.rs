@@ -349,7 +349,7 @@ fn spawn_chat_usage_forget(state: AppState, agents: Vec<String>, chat_id: String
 /// `content-length` is dropped for the same reason
 /// [`is_hop_by_hop_header`] excludes it: reqwest recomputes it from the
 /// buffered body.
-fn forwardable_response_headers(upstream: &HeaderMap) -> HeaderMap {
+pub(crate) fn forwardable_response_headers(upstream: &HeaderMap) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in upstream.iter() {
         if !is_hop_by_hop_header(name) {

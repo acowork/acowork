@@ -819,6 +819,37 @@ pub struct ChatAttachmentMeta {
 /// exact blindness the field exists to remove. One constant, two sides.
 pub const CHAT_ATTACHMENTS_PARAM: &str = "chat_attachments";
 
+/// One attachment an intent carries (ADR-122 §4.3, D11).
+///
+/// The bytes do not travel in the envelope: the sender put them in the user
+/// service's transfer area first and the intent carries this *reference*. The
+/// Gateway resolves it against the transfer record and re-states the facts
+/// below before delivery — a sender-declared `size` / `sha256` is never
+/// trusted (ADR-122 §3, "声明值不当事实").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntentAttachmentMeta {
+    /// Transfer id (`/api/transfers/{id}/content` reads it back).
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub size: u64,
+    /// Verified by the store at `complete`, so this one *is* a fact.
+    #[serde(default)]
+    pub sha256: String,
+}
+
+/// Delivery-params key carrying this turn's [`IntentAttachmentMeta`] list.
+///
+/// Same one-constant-two-sides rule as [`CHAT_ATTACHMENTS_PARAM`]: the Gateway
+/// writes it, the receiving Runtime reads it. A missing key means "this
+/// intent carried no attachments" — never a failed turn (ADR-122 §4.3), which
+/// is also how a half-deployed pair degrades.
+pub const INTENT_ATTACHMENTS_PARAM: &str = "attachments";
+
 /// Delivery-params key carrying the execution session a Chat turn was
 /// **addressed to** by a human (ADR-106 D6 levels 1–2).
 ///

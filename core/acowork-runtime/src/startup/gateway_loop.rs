@@ -1194,6 +1194,68 @@ async fn dispatch_inbound(
 /// the router is switched off, goes straight through
 /// [`route_intent_legacy`] on this task.
 #[allow(clippy::too_many_arguments)]
+/// Pull an intent's transfer attachments into the workspace and append them to
+/// the turn's reference list (ADR-122 §4.3 D13).
+///
+/// Reads the agent's own coordinates off the session core (instance id and
+/// gateway host) rather than threading them through the routing ladder: the
+/// pull is a property of "this agent received an intent", not of any one
+/// ladder level, and every level would otherwise have to carry it.
+async fn pull_transfer_attachments(
+    env: &mut crate::agent::inbound::IntentEnvelope,
+    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    work_dir: &std::path::Path,
+    node_token: &str,
+) {
+    if env
+        .params
+        .get(acowork_core::protocol::INTENT_ATTACHMENTS_PARAM)
+        .is_none()
+    {
+        return;
+    }
+    let (instance_id, gateway_host) = {
+        let guard = session_manager.lock().await;
+        let cfg = guard.core().config().clone();
+        (
+            cfg.instance_id().to_string(),
+            cfg.gateway_host
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1".to_string()),
+        )
+    };
+    let gateway_base = format!(
+        "http://{gateway_host}:{}",
+        acowork_core::defaults::gateway_http_port()
+    );
+    let pulled = crate::agent::intent_turn::pull_intent_attachments(
+        &env.params,
+        work_dir,
+        &gateway_base,
+        node_token,
+        &instance_id,
+    )
+    .await;
+    if pulled.is_empty() {
+        return;
+    }
+    // Appended to the list every downstream reader already consults — a turn
+    // may carry the human's own composer references as well as the peer's.
+    let list = env
+        .params
+        .as_object_mut()
+        .map(|o| o.entry("attached_items").or_insert_with(|| serde_json::json!([])));
+    if let Some(serde_json::Value::Array(items)) = list {
+        let count = pulled.len();
+        for item in pulled {
+            if let Ok(v) = serde_json::to_value(&item) {
+                items.push(v);
+            }
+        }
+        tracing::info!(count, "intent attachments pulled into the workspace");
+    }
+}
+
 async fn route_intent_inbound(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     chat_sessions: &Arc<crate::agent::chat_router::ChatSessionManager>,
@@ -1205,11 +1267,18 @@ async fn route_intent_inbound(
     use crate::agent::inbound::InboundMessage;
     use crate::error::RuntimeError;
 
-    let InboundMessage::IntentMessage(env) = msg else {
+    let InboundMessage::IntentMessage(mut env) = msg else {
         return Err(RuntimeError::Config(
             "route_intent_inbound called with a non-intent message".to_string(),
         ));
     };
+
+    // ADR-122 §4.3 D13: the sender referenced its bytes in the transfer area;
+    // bring them into this workspace before the turn is built, and add them to
+    // the reference list the model already reads (`params.attached_items`).
+    // Appended, never assigned: a turn may carry the human's own references
+    // from the Chat composer as well as the peer's files.
+    pull_transfer_attachments(&mut env, session_manager, work_dir, node_token).await;
 
     // ADR-106 D6 rev. 2026-11-12: a click on a live `exec_session_route_confirm`
     // card is the parked turn's tool result, not a new routing question. The

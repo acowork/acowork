@@ -80,6 +80,11 @@ impl IntentSendTool {
                         "type": "object",
                         "description": "Intent payload (key-value data for the target Agent)"
                     },
+                    "attachments": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional workspace file paths to send WITH the intent (ADR-122). Each is uploaded to the platform's transfer area first and referenced by id; the receiver pulls the bytes into its own workspace before its turn starts. Absolute paths, or paths relative to your workspace."
+                    },
                     "repo": {
                         "type": "string",
                         "description": "Optional git URL of a repository the task is about (design doc 27 §4.5.1). Format-checked by the Gateway; the target works only inside its own authorized directories."
@@ -96,6 +101,140 @@ impl IntentSendTool {
                 "required": ["target", "action"]
             }),
         }
+    }
+
+    /// Put one file into the platform's transfer area and return its id
+    /// (ADR-122 §3 + §4.3).
+    ///
+    /// Two passes over the file on purpose: `create` needs the digest up
+    /// front, and the digest has to be computed by streaming — reading a whole
+    /// attachment into memory to hash it is exactly the failure mode the
+    /// chunked route exists to avoid. The second pass streams the chunks.
+    async fn upload_transfer(&self, path: &str, work_dir: &str) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncReadExt;
+
+        let resolved = {
+            let p = std::path::Path::new(path);
+            if p.is_absolute() || work_dir.is_empty() {
+                p.to_path_buf()
+            } else {
+                std::path::Path::new(work_dir).join(p)
+            }
+        };
+        let file = tokio::fs::File::open(&resolved)
+            .await
+            .map_err(|e| format!("{}: {e}", resolved.display()))?;
+        let size = file
+            .metadata()
+            .await
+            .map_err(|e| format!("{}: {e}", resolved.display()))?
+            .len();
+        if size == 0 {
+            return Err("file is empty".to_string());
+        }
+        let name = resolved
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "attachment".to_string());
+
+        // Pass 1: streamed digest.
+        let mut reader = file;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; acowork_core::upload::CHUNK_BYTES as usize];
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("read {}: {e}", resolved.display()))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let sha256 = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+
+        let base = format!(
+            "http://{}:{}/api/transfers/uploads",
+            self.config.gateway_host,
+            gateway_http_port()
+        );
+        let sender = &self.config.instance_id;
+
+        // Reserve an id.
+        let mut req = self
+            .client
+            .post(format!("{base}?sender={sender}"))
+            .json(&serde_json::json!({ "name": name, "size": size, "sha256": sha256 }));
+        if !self.config.node_token.is_empty() {
+            req = req.header(acowork_core::auth::NODE_TOKEN_HEADER, &self.config.node_token);
+        }
+        let created = req.send().await.map_err(|e| format!("create: {e}"))?;
+        if !created.status().is_success() {
+            return Err(format!(
+                "create refused ({}): {}",
+                created.status(),
+                created.text().await.unwrap_or_default()
+            ));
+        }
+        let upload_id = created
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("uploadId").and_then(|i| i.as_str()).map(str::to_string))
+            .ok_or_else(|| "create answered no uploadId".to_string())?;
+
+        // Pass 2: the chunks, in order — a resume here would need a HEAD, and
+        // a fresh id has nothing to resume.
+        let mut reader = tokio::fs::File::open(&resolved)
+            .await
+            .map_err(|e| format!("{}: {e}", resolved.display()))?;
+        let mut offset: u64 = 0;
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("read {}: {e}", resolved.display()))?;
+            if n == 0 {
+                break;
+            }
+            let mut req = self
+                .client
+                .put(format!("{base}/{upload_id}/{offset}?sender={sender}"))
+                .body(buf[..n].to_vec());
+            if !self.config.node_token.is_empty() {
+                req = req.header(acowork_core::auth::NODE_TOKEN_HEADER, &self.config.node_token);
+            }
+            let sent = req.send().await.map_err(|e| format!("chunk {offset}: {e}"))?;
+            if !sent.status().is_success() {
+                return Err(format!("chunk {offset} refused ({})", sent.status()));
+            }
+            offset += n as u64;
+        }
+
+        // Land it. The mime is what the receiving side types the file with;
+        // an unknown extension stays octet-stream and the name carries the
+        // meaning.
+        let mime = mime_for(&name);
+        let mut req = self.client.post(format!(
+            "{base}/{upload_id}/complete?sender={sender}&mime={mime}"
+        ));
+        if !self.config.node_token.is_empty() {
+            req = req.header(acowork_core::auth::NODE_TOKEN_HEADER, &self.config.node_token);
+        }
+        let landed = req.send().await.map_err(|e| format!("complete: {e}"))?;
+        if !landed.status().is_success() {
+            return Err(format!(
+                "complete refused ({}): {}",
+                landed.status(),
+                landed.text().await.unwrap_or_default()
+            ));
+        }
+        Ok(upload_id)
     }
 
     fn fail(content: impl Into<String>) -> ToolResult {
@@ -164,6 +303,28 @@ impl Tool for IntentSendTool {
             .filter(|s| !s.trim().is_empty())
             .map(String::from);
 
+        // ADR-122 §4.3 D11: files ride the transfer area, not the envelope.
+        // Upload before sending so a reference the receiver cannot fetch
+        // never leaves this call: the Gateway validates ownership and grants
+        // the target access, both of which need the bytes to be there.
+        let attachment_ids = match params.get("attachments").and_then(|v| v.as_array()) {
+            Some(list) => {
+                let work_dir = ctx.work_dir.clone().unwrap_or_default();
+                let mut ids = Vec::with_capacity(list.len());
+                for entry in list {
+                    let Some(path) = entry.as_str().map(str::trim).filter(|p| !p.is_empty()) else {
+                        return Ok(Self::fail("attachments must be non-empty file paths"));
+                    };
+                    match self.upload_transfer(path, &work_dir).await {
+                        Ok(id) => ids.push(serde_json::json!({ "id": id })),
+                        Err(e) => return Ok(Self::fail(format!("attachment {path}: {e}"))),
+                    }
+                }
+                ids
+            }
+            None => Vec::new(),
+        };
+
         let url = format!(
             "http://{}:{}/api/intents",
             self.config.gateway_host, gateway_http_port()
@@ -174,6 +335,9 @@ impl Tool for IntentSendTool {
             "target": target,
             "action": action,
             "params": intent_params,
+            // ADR-122 D11: references only — the Gateway re-states the facts
+            // from the transfer record, so nothing here is a claim.
+            "attachments": attachment_ids,
             "repo": repo,
             "session_config": session_config,
             "conversation_id": conversation_id,
@@ -268,6 +432,26 @@ impl Tool for IntentSendTool {
                 )))
             }
         }
+    }
+}
+
+/// A small extension→mime map. Not a dependency: the transfer area needs a
+/// type for `Content-Type` on the pull and nothing else, and every receiver
+/// decides how to read a file by its own rules anyway.
+fn mime_for(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "txt" | "log" => "text/plain",
+        "md" => "text/markdown",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
     }
 }
 

@@ -1115,6 +1115,138 @@ pub async fn post_intent_response(
 ///
 /// An entry the Runtime cannot read is dropped, not fatal — the turn still
 /// runs with what could be parsed (same rule the Chat-attachment pull applies).
+/// Pull an intent's transfer attachments into this agent's workspace and
+/// return them as [`acowork_core::protocol::AttachedItem`]s, ready to be
+/// appended to `params.attached_items` (ADR-122 §4.3, D13).
+///
+/// Why pull at all: the sender's bytes live in the platform's transfer area,
+/// not in this workspace, and the model can only read a path. Why *here*: the
+/// turn is about to be built, and building it is the last moment the paths can
+/// appear — after this the reference list is what the model sees.
+///
+/// Deliberately total: any failure (no authorization, a 404, a network blip, a
+/// name the filesystem refuses) drops that one attachment and keeps the turn.
+/// A message that arrives without its file is still the message; refusing the
+/// whole turn because a blob expired would lose news the sender already
+/// committed to sending.
+pub async fn pull_intent_attachments(
+    params: &Value,
+    work_dir: &std::path::Path,
+    // `http://host:port` of the Gateway — composed by the caller, so the pull
+    // needs no global port lookup and a test can point it at a stand-in.
+    gateway_base: &str,
+    node_token: &str,
+    instance_id: &str,
+) -> Vec<acowork_core::protocol::AttachedItem> {
+    use acowork_core::protocol::{AttachedItem, IntentAttachmentMeta};
+    use tokio::io::AsyncWriteExt as _;
+
+    let metas: Vec<IntentAttachmentMeta> = params
+        .get(acowork_core::protocol::INTENT_ATTACHMENTS_PARAM)
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    if metas.is_empty() {
+        return Vec::new();
+    }
+
+    // Not under `files/`: that directory is the content-addressed attachment
+    // blob store (a document id per name), and a peer's incoming file is not a
+    // blob of ours — mixing the two would put unnamed bytes in a store whose
+    // dedup scans the directory.
+    let inbox = work_dir.join("intent-attachments");
+    if let Err(e) = tokio::fs::create_dir_all(&inbox).await {
+        tracing::warn!(error = %e, dir = %inbox.display(), "intent attachments: inbox unavailable");
+        return Vec::new();
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build();
+    let Ok(client) = client else {
+        return Vec::new();
+    };
+
+    let mut items = Vec::with_capacity(metas.len());
+    for meta in metas {
+        // The name arrives from another agent: keep only its last component
+        // and drop anything a filesystem would reinterpret, so a crafted name
+        // cannot walk out of the inbox.
+        let raw = meta.name.rsplit(['/', '\\']).next().unwrap_or("");
+        let safe: String = raw
+            .chars()
+            .map(|c| if c.is_control() || ":*?\"<>|".contains(c) { '_' } else { c })
+            .collect();
+        let name = if safe.trim().is_empty() {
+            "attachment".to_string()
+        } else {
+            safe
+        };
+        let dest = inbox.join(format!("{}-{name}", meta.id));
+
+        if !dest.exists() {
+            let url = format!(
+                "{gateway_base}/api/transfers/{}/content?sender={}",
+                meta.id, instance_id
+            );
+            let mut req = client.get(&url);
+            if !node_token.is_empty() {
+                req = req.header(acowork_core::auth::NODE_TOKEN_HEADER, node_token);
+            }
+            let mut ok = false;
+            match req.send().await {
+                Ok(mut resp) if resp.status().is_success() => {
+                    match tokio::fs::File::create(&dest).await {
+                        Ok(mut file) => {
+                            // Streamed: a transfer may be as large as the
+                            // upload ceiling, and buffering it here would put
+                            // the receiver's whole budget into one turn.
+                            loop {
+                                match resp.chunk().await {
+                                    Ok(Some(chunk)) => {
+                                        if let Err(e) = file.write_all(&chunk).await {
+                                            tracing::warn!(error = %e, "intent attachment write failed");
+                                            break;
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        ok = true;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "intent attachment stream broke");
+                                        break;
+                                    }
+                                }
+                            }
+                            let _ = file.flush().await;
+                        }
+                        Err(e) => tracing::warn!(error = %e, path = %dest.display(), "intent attachment: cannot create"),
+                    }
+                }
+                Ok(resp) => {
+                    tracing::warn!(
+                        transfer = %meta.id,
+                        status = %resp.status(),
+                        "intent attachment refused by the transfer store"
+                    );
+                }
+                Err(e) => tracing::warn!(error = %e, transfer = %meta.id, "intent attachment pull failed"),
+            }
+            if !ok {
+                let _ = tokio::fs::remove_file(&dest).await;
+                continue;
+            }
+        }
+
+        items.push(AttachedItem::AttachedFile {
+            abs_path: dest.to_string_lossy().to_string(),
+            name,
+            client_id: None,
+        });
+    }
+    items
+}
+
 pub fn attached_items_from_params(
     params: &Value,
 ) -> Option<Vec<acowork_core::protocol::AttachedItem>> {

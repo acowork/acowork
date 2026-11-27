@@ -45,6 +45,7 @@ pub mod restricted_mode;
 pub mod routes;
 pub mod server;
 pub mod services_api;
+pub mod transfers_api;
 pub mod settings_api;
 pub mod skills_api;
 pub mod vault_api;

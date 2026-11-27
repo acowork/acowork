@@ -60,6 +60,10 @@ pub struct AppState {
     /// the `complete` rename into a session's `files/` stays on one
     /// filesystem, and so the TTL sweep has a single root to walk.
     pub uploads: Arc<acowork_core::upload::UploadStore>,
+    /// Agent-to-agent transfer area (ADR-122 §4.3): chunk store, landed blobs
+    /// and their creator/grant records. Owned here rather than by a Runtime
+    /// because neither agent may write the other's workspace (ADR-009).
+    pub transfers: Arc<crate::http::transfers::Transfers>,
 }
 
 impl AppState {
@@ -68,11 +72,13 @@ impl AppState {
         let uploads = Arc::new(acowork_core::upload::UploadStore::new(
             config.data_dir.join(".uploads").join("chat-sessions"),
         ));
+        let transfers = Arc::new(crate::http::transfers::Transfers::new(&config.data_dir));
         Self {
             auth_service,
             shared: Arc::new(RwLock::new(shared)),
             alerts: Arc::new(AlertStore::new()),
             uploads,
+            transfers,
         }
     }
 
