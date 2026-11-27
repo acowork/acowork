@@ -206,6 +206,11 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/sessions/{sid}/messages",
             get(proxy_get_messages).post(proxy_post_message),
         )
+        // t-01412679: lazy explore-run detail read, transparent like `messages`.
+        .route(
+            "/api/agents/{id}/sessions/{sid}/messages/detail",
+            get(proxy_get_message_detail),
+        )
         // ADR-106 D4: the round projection read. A Chat block is a reference to
         // one round of an execution session, and this is the only way anything on
         // the chat side can resolve that reference — the Gateway never reads a
@@ -979,6 +984,20 @@ async fn proxy_get_messages(
     headers: HeaderMap,
 ) -> Response {
     let path = format!("/sessions/{}/messages", sid);
+    let query = build_query_string(&params);
+    proxy_to_runtime(&state, &id, &path, &query, &headers).await
+}
+
+/// Reverse-proxy `GET .../sessions/{sid}/messages/detail?start&end` — the lazy
+/// explore-run read (t-01412679). Transparent like `messages`: the Gateway adds
+/// no projection semantics and never touches the transcript itself (ADR-009 §5).
+async fn proxy_get_message_detail(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/sessions/{}/messages/detail", sid);
     let query = build_query_string(&params);
     proxy_to_runtime(&state, &id, &path, &query, &headers).await
 }

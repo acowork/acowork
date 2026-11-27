@@ -809,7 +809,8 @@ Gateway 会校验并把它当作 scope 注入（等同于以该用户身份读�
 | GET | `/api/agents/{id}/conversations/latest` | 最新会话消息（ADR-034 唯一保留的 conversations 端点） | `/sessions/latest` |
 | GET | `/api/agents/{id}/sessions/{sid}` | 单会话完整状态（合并 meta + state） | `/sessions/{sid}` |
 | GET | `/api/agents/{id}/sessions/{sid}/state` | **legacy 别名**：转发到 `/sessions/{sid}`（保留以兼容旧调用方） | `/sessions/{sid}` |
-| GET | `/api/agents/{id}/sessions/{sid}/messages` | 拉取消息历史（支持 cursor 分页） | `/sessions/{sid}/messages` |
+| GET | `/api/agents/{id}/sessions/{sid}/messages` | 拉取消息历史（支持 cursor 分页；`?groups=stub` 走 explore-stub 投影，见 §5.2.1） | `/sessions/{sid}/messages` |
+| GET | `/api/agents/{id}/sessions/{sid}/messages/detail?start&end` | 按坐标区间懒读一条 explore run 的原始行（t-01412679，见 §5.2.1） | `/sessions/{sid}/messages/detail` |
 | GET | `/api/agents/{id}/sessions/{sid}/config` | 读取会话 config 快照（ADR-047） | `/sessions/{sid}/config` |
 | PUT | `/api/agents/{id}/sessions/{sid}/config` | 写会话 config（**owner 或 admin**） | `/sessions/{sid}/config` |
 
@@ -826,6 +827,42 @@ Gateway 会校验并把它当作 scope 注入（等同于以该用户身份读�
 >
 > **公开 ≠ 可改**：`visibility = public`（或缺省）的 session 任何人可读，但只有 owner /
 > admin 可写（open / close / delete / 改 config / 设可见性）。
+
+#### 5.2.1 explore-stub 投影与懒读详情（t-01412679）
+
+`GET /sessions/{sid}/messages?groups=stub`：分页语义**不变** ——
+`offset` / `limit` / `total` 一律按 raw entry（JSONL 行）计（`limit` 是窗口跨度，
+不是 `messages` 的记录数；`count` 才是记录数，两者在 stub 模式下不相等）；变的只是行投影：
+连续的 `thought` / `tool_call` / `tool_result` run（且非 internal 行）折叠为**一条**
+`kind="explore_stub"` 记录，`content` 为空，`metadata` 携带
+
+```json
+{ "start": 1, "end": 4, "raw_count": 3, "tools": ["bash"], "tools_truncated": false }
+```
+
+`start` / `end` 是该 run 的 **data-index 坐标**（与 offset 同维度，end 开区间）。
+stub 的 `id` = run 首行 id，前端 explore 块的缓存键（`block-${items[0].id}`）
+在 stub / raw / live 三条路径下同一坐标。响应带 `grouped: true`；默认
+（`groups` 省略或非 `stub`）返回原始行、无 `grouped` 字段，旧消费者形状不变。
+
+**例外：页面尾部的 run 不折叠。** 当窗口触及日志末尾（`offset + limit >= total`）时，
+该页最后一段 run 原样返回。两个原因都是正确性而非观感：
+
+1. 待授权（pending）的 `tool_call` 必然是日志最后一行，而 Desktop 只能在该 `tool_call`
+   所属的 explore 块里渲染 Allow / Deny（按 `tool_call_id` 配对）。折进 stub 后块内无行可配对
+   → 授权控件消失，agent 卡在一个用户看不见的等待上。
+2. 未结束的 run 会继续增长：stub 冻结在 `[start,end)` 上，而后续 live 行会另起一块，
+   同一个 run 变成两块，且 stub 展开时取回的行与 live 行重复显示。
+
+run 结束后（其后跟了气泡行）就不再是尾部 run，下一次读即正常折叠 —— 代价被限制在最新页的一段 run 上。
+
+`GET /sessions/{sid}/messages/detail?start=&end=`：按 stub 广告的坐标懒读该 run
+的原始行，**tool_result 不做 5 行截断**（展开即全文）；每行附 `data_index`，
+损坏行是显式空洞而非位移。校验：`end > start` 且 `end - start ≤ 500`，否则 400；
+授权与 `/messages` 同规则（不可读 = hidden 404）。
+
+设计动机：explore 块展开是小概率事件，历史分页只需气泡 + 块元数据；
+一次请求的磁盘读量恒为"窗口字节 + 增量尾扫"，与 session 文件大小无关。
 
 ### 5.6 会话控制面（ADR-076 §决策 4）
 

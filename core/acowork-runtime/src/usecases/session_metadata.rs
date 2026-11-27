@@ -161,14 +161,71 @@ pub struct SessionDetail {
     pub live_state: Option<serde_json::Value>,
 }
 
+/// Ceiling on one page / one detail slice, in RAW entries.
+///
+/// Lives here (not in the HTTP layer) because it is a property of the read
+/// contract itself: `get_messages` clamps `limit` to it, and the detail window
+/// refuses to serve more than it, so no caller can build a request that reads
+/// an unbounded slice of a multi-megabyte transcript. Every layer that needs
+/// the number must take it from here — two literals that agree today are two
+/// literals that disagree after the next edit.
+pub const MESSAGES_PAGE_SPAN_MAX: u32 = 500;
+
 /// Response for `get_messages` — paginated messages from a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagesResponse {
     pub session_id: String,
     pub messages: Vec<serde_json::Value>,
     pub offset: u64,
+    /// **Raw span width** of the window — the number of JSONL entries the page
+    /// covers, NOT the number of records in `messages` (t-01412679: the stub
+    /// projection returns fewer records than entries). The cursor contract is
+    /// `next_offset = offset + limit`; a client that reads this as "rows
+    /// returned" desynchronises its pagination and its at-tail test.
     pub limit: u32,
     pub total: u64,
+    /// Records actually present in `messages` (≤ `limit`).
+    pub count: usize,
+    /// `true` when this page went through the explore-stub projection
+    /// (t-01412679, `?groups=stub`). Echoed so a client can tell a light page
+    /// from a raw one without sniffing `kind` on every row. `skip_serializing`
+    /// keeps the raw-mode wire shape byte-identical for existing consumers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub grouped: bool,
+}
+
+/// Row projection for `GET /sessions/{sid}/messages` (t-01412679).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MessageGroups {
+    /// Every stored row verbatim — the historical behavior and the default,
+    /// so existing consumers (debug panel, compression history) are untouched.
+    #[default]
+    Raw,
+    /// Contiguous explore runs collapse into one `explore_stub` row each.
+    Stub,
+}
+
+impl MessageGroups {
+    /// Parse the `groups` query flag. Anything but `stub` (case-insensitive)
+    /// is `Raw`: a query flag over HTTP must not fail a read on spelling,
+    /// same tolerance as the rounds `latest` flag.
+    pub fn from_query(value: Option<&str>) -> Self {
+        match value.map(str::trim).map(str::to_ascii_lowercase) {
+            Some(v) if v == "stub" => Self::Stub,
+            _ => Self::Raw,
+        }
+    }
+}
+
+/// Response for `get_message_detail` — one explore run's raw rows.
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageDetailResponse {
+    pub session_id: String,
+    /// Rows in `[start, end)` in chronological order, each paired with its
+    /// true data coordinate (a corrupt line is an explicit hole, not a shift).
+    pub messages: Vec<serde_json::Value>,
+    pub start: u64,
+    pub end: u64,
     pub count: usize,
 }
 
@@ -289,13 +346,39 @@ pub trait SessionMetadataService: Send + Sync {
     ///
     /// When `from_tail` is `true`, the window is anchored to the last
     /// `limit` entries regardless of `offset` (initial-load path).
+    ///
+    /// `groups` selects the row projection (t-01412679): `Raw` returns every
+    /// stored row verbatim; `Stub` replaces contiguous explore runs
+    /// (thought / tool_call / tool_result) with one `explore_stub` row each,
+    /// advertising the run's `[start, end)` data coordinates for a later
+    /// [`Self::get_message_detail`] fetch. Pagination arithmetic is identical
+    /// in both modes — offset/limit/total always count raw entries.
     async fn get_messages(
         &self,
         session_id: &str,
         offset: Option<u64>,
         limit: Option<u32>,
         from_tail: bool,
+        groups: MessageGroups,
     ) -> Result<MessagesResponse>;
+
+    /// Read one explore run's raw rows by the `[start, end)` coordinates an
+    /// explore stub advertised (t-01412679).
+    ///
+    /// Unlike `get_messages`, tool_result content is NOT truncated: expanding
+    /// a block is exactly the moment the reader wants the full row. Backends
+    /// without a transcript store return `Err` (same pattern as
+    /// [`Self::token_stats`]).
+    async fn get_message_detail(
+        &self,
+        _session_id: &str,
+        _start: u64,
+        _end: u64,
+    ) -> Result<MessageDetailResponse> {
+        Err(RuntimeError::Core(acowork_core::AcoworkError::Memory(
+            "message detail not supported by this session-metadata backend".to_string(),
+        )))
+    }
 
     /// Agent-scoped per-model token statistics (SQLite `token_stats`
     /// aggregate). Backends without the statistics table return `Err`.

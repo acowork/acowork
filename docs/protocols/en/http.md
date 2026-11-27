@@ -588,9 +588,56 @@ Gateway does not parse the Runtime response body; all reads and writes are verba
 | GET | `/api/agents/{id}/conversations/latest` | Latest session messages (the only conversations endpoint retained per ADR-034) | `/sessions/latest` |
 | GET | `/api/agents/{id}/sessions/{sid}` | Single session full state (meta + state merged) | `/sessions/{sid}` |
 | GET | `/api/agents/{id}/sessions/{sid}/state` | **legacy alias**: forwards to `/sessions/{sid}` (kept for backward compatibility with old callers) | `/sessions/{sid}` |
-| GET | `/api/agents/{id}/sessions/{sid}/messages` | Fetch message history (cursor pagination) | `/sessions/{sid}/messages` |
+| GET | `/api/agents/{id}/sessions/{sid}/messages` | Fetch message history (cursor pagination; `?groups=stub` selects the explore-stub projection, see §5.2.1) | `/sessions/{sid}/messages` |
+| GET | `/api/agents/{id}/sessions/{sid}/messages/detail?start&end` | Lazy coordinate-range read of one explore run's raw rows (t-01412679, see §5.2.1) | `/sessions/{sid}/messages/detail` |
 
 > **`?active=true` (ADR-038)**: returns only the sessions **resident in Runtime memory** right now — the `Active` lifecycle set, entered by `POST .../open` and left by `POST .../close`. It is therefore the authoritative record of "which sessions are currently open", which is why the Desktop does not persist its tab list: after a restart it issues this one query and projects the backend truth onto the tab strip (the frontend projects, it does not own the state). Like the caller-scope filter, this filter runs **before** pagination, so `total_count` / `total_pages` describe the "active and readable" subset and a client can never page into rows it may not see; the two filters intersect. Omitted or `active=false` = the ordinary full history list.
+
+#### 5.2.1 explore-stub projection and lazy detail read (t-01412679)
+
+`GET /sessions/{sid}/messages?groups=stub`: the pagination contract is
+**unchanged** — `offset` / `limit` / `total` always count raw entries (JSONL
+lines). `limit` is the window's span, never the number of records in
+`messages`; `count` is the record count, and the two differ under the stub
+projection. Only the row projection changes: a contiguous run of
+`thought` / `tool_call` / `tool_result` rows (never an internal row) collapses
+into **one** `kind="explore_stub"` record with empty `content` and metadata
+`{ "start": 1, "end": 4, "raw_count": 3, "tools": ["bash"], "tools_truncated": false }`,
+where `start` / `end` are the run's **data-index coordinates** (same dimension
+as `offset`; `end` exclusive). The stub's `id` is the run's first row id, so the
+frontend explore-block cache key (`block-${items[0].id}`) is the same value
+across the stub / raw / live paths. The response carries `grouped: true`; the
+default (`groups` omitted or not `stub`) returns stored rows verbatim with no
+`grouped` field, so existing consumers see an unchanged shape.
+
+**Exception: the page's trailing run is not collapsed.** When the window touches
+the end of the log (`offset + limit >= total`), the last run on that page is
+returned verbatim. Both reasons are correctness, not cosmetics:
+
+1. A `tool_call` awaiting authorization is necessarily the log's last row, and
+   the Desktop can only render Allow / Deny inside the explore block that owns
+   that row (paired by `tool_call_id`). Folded into a stub, the block has no rows
+   to pair against and the control disappears — the agent waits on a decision
+   nobody can see.
+2. An unfinished run keeps growing: a stub frozen over `[start, end)` plus the
+   following live rows render as two blocks for one run, and the stub's fetch
+   duplicates rows the live tail already shows.
+
+Once a bubble follows the run it is no longer trailing and collapses on the next
+read, so the cost is bounded to one run on the newest page.
+
+`GET /sessions/{sid}/messages/detail?start=&end=`: reads the raw rows behind one
+stub by its advertised coordinates. `tool_result` content is **not** truncated
+to 5 lines here — expanding a block is exactly when the reader wants the full
+row. Each row carries its true `data_index`; a corrupt line is an explicit
+hole, not a coordinate shift. Validation: `end > start` and
+`end - start ≤ 500`, else 400; authorization follows the same hidden-404 rule
+as `/messages`.
+
+Rationale: expanding an explore block is the rare event, so history pages ship
+bubbles plus block metadata; a single request's disk reads stay bounded to the
+window's byte spans plus the incremental tail scan, independent of session file
+size.
 
 ### 5.3 Attachments
 

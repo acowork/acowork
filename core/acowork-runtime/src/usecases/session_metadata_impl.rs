@@ -9,12 +9,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::agent::session_state::{SharedLatestSession, SharedSessionSnapshots};
-use crate::conversation::{self, SessionScope};
+use crate::conversation::{self, ConversationEntry, SessionScope};
 use crate::error::{Result, RuntimeError};
 use crate::usecases::agent_token::AgentTokenService;
 use crate::usecases::session_metadata::{
-    ChatListingScope, ConversationEntryView, MessagesResponse, SessionDetail,
-    SessionMetadataService, SessionSummary, SessionsListResponse, TokenStatsResponse,
+    ChatListingScope, ConversationEntryView, MessageDetailResponse, MessageGroups,
+    MessagesResponse, SessionDetail, SessionMetadataService, SessionSummary,
+    SessionsListResponse, TokenStatsResponse,
 };
 
 /// The `Active` set and each resident session's stored status, from ONE read.
@@ -315,6 +316,7 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         offset: Option<u64>,
         limit: Option<u32>,
         from_tail: bool,
+        groups: MessageGroups,
     ) -> Result<MessagesResponse> {
         let file_path = self
             .work_dir
@@ -322,34 +324,89 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             .join(format!("{}.jsonl", session_id));
 
         let off = offset.unwrap_or(0);
-        let lim = limit.unwrap_or(50).clamp(1, 500);
+        let lim = limit
+            .unwrap_or(50)
+            .clamp(1, super::session_metadata::MESSAGES_PAGE_SPAN_MAX);
 
-        let paginated = conversation::read_messages_paginated(&file_path, off, lim, from_tail)?;
-
-        // ADR-035 D9.2: truncate tool_result content to first 5 lines
-        // for display in ALL HTTP paths. Full content stays in JSONL
-        // for LLM context.
-        let messages: Vec<serde_json::Value> = paginated
-            .messages
-            .into_iter()
-            .map(|mut entry| {
-                if entry.role == "tool_result" {
-                    entry.content = truncate_tool_result(&entry.content);
-                }
-                // The wire shape is the stored row plus its human projection; the
-                // panel never resolves `metadata.intent` itself.
-                serde_json::to_value(ConversationEntryView::new(&entry))
-                    .unwrap_or(serde_json::Value::Null)
-            })
-            .collect();
+        // The two projections share ONE window arithmetic and ONE span read
+        // (`read_messages_paginated_indexed`); they differ only in how the rows
+        // are projected. `limit` echoes the window's RAW span in both modes —
+        // the cursor contract is `next_offset = offset + limit`, and the stub
+        // projection returns fewer RECORDS than entries (docs/protocols/zh/
+        // http.md §5.2.1). Echoing the collapsed record count here made every
+        // client believe it was not at the tail (t-01412679 review C1).
+        let (messages, offset_echo, limit_echo, total, grouped) = match groups {
+            MessageGroups::Raw => {
+                let page = conversation::read_messages_paginated(&file_path, off, lim, from_tail)?;
+                // ADR-035 D9.2: truncate tool_result content to first 5 lines
+                // for display in ALL page reads. Full content stays in JSONL
+                // for LLM context; the lazy detail read is the one intentional
+                // exception (expanding a block = wanting the full row).
+                let messages: Vec<serde_json::Value> =
+                    page.messages.iter().map(page_entry_view).collect();
+                (messages, page.offset, page.limit, page.total, false)
+            }
+            MessageGroups::Stub => {
+                let page =
+                    conversation::read_messages_paginated_indexed(&file_path, off, lim, from_tail)?;
+                // The page's trailing run stays raw when the window holds the
+                // newest rows — a pending authorization lives there, and an
+                // open run keeps growing (see `collapse_explore_runs`).
+                let reaches_tail = page.reaches_log_tail();
+                let stubs = conversation::collapse_explore_runs(page.messages, reaches_tail);
+                let messages: Vec<serde_json::Value> =
+                    stubs.iter().map(page_entry_view).collect();
+                (messages, page.offset, page.limit, page.total, true)
+            }
+        };
         let count = messages.len();
 
         Ok(MessagesResponse {
             session_id: session_id.to_string(),
             messages,
-            offset: paginated.offset,
-            limit: paginated.limit,
-            total: paginated.total,
+            offset: offset_echo,
+            limit: limit_echo,
+            total,
+            count,
+            grouped,
+        })
+    }
+
+    async fn get_message_detail(
+        &self,
+        session_id: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<MessageDetailResponse> {
+        let file_path = self
+            .work_dir
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
+
+        // Coordinate-paired read: the caller addresses rows by the exact
+        // coordinates a stub advertised, so a skipped corrupt line must not
+        // slide the window (see `read_entries_indexed`).
+        //
+        // No `truncate_tool_result` here — expanding an explore block is the
+        // moment the reader asked for the full row (t-01412679 §8 decision 4).
+        let entries = conversation::read_entries_indexed(&file_path, start, end)?;
+        let messages: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(di, entry)| {
+                let mut view = entry_view(entry);
+                if let Some(obj) = view.as_object_mut() {
+                    obj.insert("data_index".to_string(), serde_json::json!(di));
+                }
+                view
+            })
+            .collect();
+        let count = messages.len();
+
+        Ok(MessageDetailResponse {
+            session_id: session_id.to_string(),
+            messages,
+            start,
+            end,
             count,
         })
     }
@@ -364,6 +421,30 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         let consistent = store.token_stats_consistent().unwrap_or(false);
         Ok(TokenStatsResponse { items, consistent })
     }
+}
+
+/// Wire shape of one stored row: the persisted row plus its server-resolved
+/// human projection (`display` / `speaker` / `turn_origin`), untruncated.
+fn entry_view(entry: &ConversationEntry) -> serde_json::Value {
+    serde_json::to_value(ConversationEntryView::new(entry)).unwrap_or(serde_json::Value::Null)
+}
+
+/// Wire shape of one **page** row: [`entry_view`] plus the ADR-035 D9.2 display
+/// truncation for `tool_result`.
+///
+/// ONE home for that rule, so a future page-shaped read cannot silently ship a
+/// full tool_result. The content is patched on the serialized value instead of
+/// cloning the row — a page carries megabyte-class rows and must not be deep
+/// copied on the read path. The lazy `get_message_detail` deliberately does NOT
+/// come through here: expanding a block is the request for the full row.
+fn page_entry_view(entry: &ConversationEntry) -> serde_json::Value {
+    let mut view = entry_view(entry);
+    let display_content = (entry.role == "tool_result")
+        .then(|| truncate_tool_result(&entry.content));
+    if let (Some(content), Some(obj)) = (display_content, view.as_object_mut()) {
+        obj.insert("content".to_string(), serde_json::Value::String(content));
+    }
+    view
 }
 
 /// Truncate tool_result content to the first 5 lines for HTTP display.

@@ -708,6 +708,8 @@ impl RuntimeHttpServer {
                 get(get_session).delete(crate::http::session_control::delete_session),
             )
             .route("/sessions/{sid}/messages", get(get_messages).post(crate::http::session_control::post_send_message))
+            // t-01412679: lazy detail read for one explore stub's raw rows.
+            .route("/sessions/{sid}/messages/detail", get(get_message_detail))
             // ADR-106 D4: the round projection read. One round by id, or a bounded
             // batch — the reads a Chat block is rendered from. Both resolve off disk,
             // so a `Closed` (not resident) session projects exactly like a live one.
@@ -1512,6 +1514,14 @@ struct GetMessagesQuery {
     /// know `total`.  Ignored when total == 0.
     #[serde(default)]
     tail: Option<bool>,
+    /// t-01412679: row projection. `stub` collapses contiguous explore runs
+    /// (thought / tool_call / tool_result) into one `explore_stub` row each —
+    /// bubbles plus explore metadata, detail fetched lazily via
+    /// `GET /sessions/{sid}/messages/detail`. Anything else (default `raw`)
+    /// returns stored rows verbatim. Pagination arithmetic is identical in
+    /// both modes: offset/limit/total always count raw entries.
+    #[serde(default)]
+    groups: Option<String>,
 }
 
 // ── Session config (ADR-047) ───────────────────────────────────
@@ -1662,7 +1672,15 @@ async fn get_messages(
         Json(serde_json::json!({"error": "session metadata service not ready"})),
     ))?;
     let resp = svc
-        .get_messages(&sid, query.offset, query.limit, query.tail.unwrap_or(false))
+        .get_messages(
+            &sid,
+            query.offset,
+            query.limit,
+            query.tail.unwrap_or(false),
+            crate::usecases::session_metadata::MessageGroups::from_query(
+                query.groups.as_deref(),
+            ),
+        )
         .await
         .map_err(|e| {
             tracing::warn!(
@@ -1675,6 +1693,84 @@ async fn get_messages(
                 Json(serde_json::json!({"error": e.to_string()})),
             )
         })?;
+    Ok(Json(serde_json::to_value(resp).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "serialization failed"})),
+        )
+    })?))
+}
+
+/// Query parameters for `GET /sessions/{sid}/messages/detail`.
+#[derive(Debug, Deserialize)]
+struct GetMessageDetailQuery {
+    /// First data coordinate of the run (inclusive) — as advertised by an
+    /// explore stub's `metadata.start`.
+    start: Option<u64>,
+    /// Last data coordinate of the run (exclusive) — `metadata.end`.
+    end: Option<u64>,
+}
+
+/// Upper bound on one detail window: the same ceiling `get_messages` clamps
+/// `limit` to, taken from the read contract rather than restated. A stub is
+/// produced from a single page, so a legitimate run fits comfortably; anything
+/// wider is a malformed (or hostile) request.
+const MESSAGE_DETAIL_MAX_SPAN: u64 =
+    crate::usecases::session_metadata::MESSAGES_PAGE_SPAN_MAX as u64;
+
+/// `GET /sessions/{sid}/messages/detail?start&end` — the raw rows behind one
+/// explore stub (t-01412679).
+///
+/// The desktop expands an explore block (a small-probability event per block)
+/// and pulls exactly that block's rows, untruncated. Independent route rather
+/// than an overload of `offset/limit` on `/messages`: the two reads answer
+/// different questions (page projection vs. coordinate slice) and conflating
+/// them would make every consumer re-derive which semantics a query has.
+async fn get_message_detail(
+    State(state): State<HttpState>,
+    Path(sid): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<GetMessageDetailQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // ADR-076 §决策 4: same hidden-404 rule as `get_messages` — this route
+    // exposes transcript content, so it must not become an existence oracle.
+    crate::http::session_control::authorize_read(
+        &state,
+        &sid,
+        &crate::http::session_control::scope_from_headers(&headers),
+    )?;
+    let start = query.start.unwrap_or(0);
+    let end = query.end.unwrap_or(0);
+    if end <= start {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "end must be greater than start"})),
+        ));
+    }
+    if end - start > MESSAGE_DETAIL_MAX_SPAN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("span exceeds {} entries", MESSAGE_DETAIL_MAX_SPAN)
+            })),
+        ));
+    }
+    let svc = state.session_metadata.lock().await;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "session metadata service not ready"})),
+    ))?;
+    let resp = svc.get_message_detail(&sid, start, end).await.map_err(|e| {
+        tracing::warn!(
+            session_id = %sid,
+            error = %e,
+            "Failed to read message detail window"
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
     Ok(Json(serde_json::to_value(resp).map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4823,6 +4919,166 @@ mod tests {
         assert_eq!(items[0]["total_cache_read"], 40);
         assert_eq!(items[0]["total_cache_write"], 7);
         assert_eq!(items[0]["total_cost"], 0.05);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// t-01412679: `?groups=stub` page projection + the lazy
+    /// `messages/detail?start&end` read, end to end over HTTP.
+    #[tokio::test]
+    async fn test_http_messages_stub_and_detail() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-stub");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let conversations_dir = temp_dir.join("conversations");
+        std::fs::create_dir_all(&conversations_dir).unwrap();
+        let session_id = "20260101_120000_stub";
+
+        let mut meta = test_session_meta_minimal();
+        meta.session_id = session_id.to_string();
+        meta.message_count = 6;
+        crate::conversation::write_session_meta(&conversations_dir, &meta).unwrap();
+
+        // One turn with a 3-row explore run in the middle.
+        std::fs::write(
+            conversations_dir.join(format!("{}.jsonl", session_id)),
+            "{\"id\":\"s1\",\"ts\":\"2026-01-01T12:00:00.000Z\",\"role\":\"user\",\"content\":\"go\"}\n\
+             {\"id\":\"s2\",\"ts\":\"2026-01-01T12:00:01.000Z\",\"role\":\"thought\",\"content\":\"a long chain of reasoning that should not ride the stub page\"}\n\
+             {\"id\":\"s3\",\"ts\":\"2026-01-01T12:00:02.000Z\",\"role\":\"tool_call\",\"content\":\"{}\",\"metadata\":{\"tool_name\":\"bash\",\"tool_call_id\":\"c1\"}}\n\
+             {\"id\":\"s4\",\"ts\":\"2026-01-01T12:00:03.000Z\",\"role\":\"tool_result\",\"content\":\"line1\\nline2\\nline3\\nline4\\nline5\\nline6\\nline7\",\"metadata\":{\"tool_name\":\"bash\",\"tool_call_id\":\"c1\"}}\n\
+             {\"id\":\"s5\",\"ts\":\"2026-01-01T12:00:04.000Z\",\"role\":\"assistant\",\"content\":\"answer\"}\n",
+        )
+        .unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            TEST_INSTANCE_ID.to_string(),
+            snapshots,
+            latest,
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+        )
+        .await
+        .unwrap();
+
+        // ── default (raw): shape unchanged, `grouped` absent ──────────
+        let url = format!(
+            "http://127.0.0.1:{}/sessions/{}/messages?limit=50",
+            server.port, session_id
+        );
+        let body: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+        assert_eq!(body["count"], 5);
+        assert_eq!(body["total"], 5);
+        assert_eq!(body["limit"], 5, "raw page echoes the window span");
+        assert!(body.get("grouped").is_none(), "raw wire shape must not drift");
+        assert_eq!(body["messages"][1]["role"], "thought");
+
+        // ── stub projection: 5 rows → 3 records, cursor math intact ──
+        let url = format!(
+            "http://127.0.0.1:{}/sessions/{}/messages?limit=50&groups=stub",
+            server.port, session_id
+        );
+        let body: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+        assert_eq!(body["count"], 3, "3 records");
+        assert_eq!(body["total"], 5, "total stays in RAW entries");
+        // t-01412679 review C1: `limit` is the RAW span of the window, NOT the
+        // number of records the projection returned. A client computes
+        // `next_offset = offset + limit` and `isAtTail = offset + limit >=
+        // total` from it; echoing 3 here made every session look mid-history
+        // (no live-tail folding, spurious "load more" fetches).
+        assert_eq!(body["limit"], 5, "limit stays in RAW entries");
+        assert!(
+            body["offset"].as_u64().unwrap() + body["limit"].as_u64().unwrap()
+                >= body["total"].as_u64().unwrap(),
+            "the tail page must read as AT THE TAIL through offset+limit"
+        );
+        assert_eq!(body["grouped"], true);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[2]["role"], "assistant");
+        let stub = &msgs[1];
+        assert_eq!(stub["kind"], "explore_stub");
+        assert_eq!(stub["id"], "s2", "run's first row id = frontend blockId anchor");
+        assert_eq!(stub["content"], "");
+        assert_eq!(stub["metadata"]["start"], 1);
+        assert_eq!(stub["metadata"]["end"], 4);
+        assert_eq!(stub["metadata"]["raw_count"], 3);
+        assert_eq!(stub["metadata"]["tools"], serde_json::json!(["bash"]));
+
+        // ── detail read: the run's raw rows, tool_result NOT truncated ──
+        let url = format!(
+            "http://127.0.0.1:{}/sessions/{}/messages/detail?start=1&end=4",
+            server.port, session_id
+        );
+        let body: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+        assert_eq!(body["count"], 3);
+        assert_eq!(body["start"], 1);
+        assert_eq!(body["end"], 4);
+        let rows = body["messages"].as_array().unwrap();
+        assert_eq!(rows[0]["role"], "thought");
+        assert_eq!(rows[0]["data_index"], 1);
+        assert_eq!(rows[2]["role"], "tool_result");
+        assert!(
+            rows[2]["content"]
+                .as_str()
+                .unwrap()
+                .matches('\n')
+                .count()
+                >= 6,
+            "detail must carry the full tool_result (7 lines), not the 5-line page preview"
+        );
+
+        // ── window validation ─────────────────────────────────────────
+        let url = format!(
+            "http://127.0.0.1:{}/sessions/{}/messages/detail?start=3&end=3",
+            server.port, session_id
+        );
+        assert_eq!(
+            reqwest::get(&url).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        let url = format!(
+            "http://127.0.0.1:{}/sessions/{}/messages/detail?start=0&end=501",
+            server.port, session_id
+        );
+        assert_eq!(
+            reqwest::get(&url).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

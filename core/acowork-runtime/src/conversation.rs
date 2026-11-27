@@ -46,6 +46,17 @@ const CONVERSATION_FORMAT_VERSION: u32 = 3;
 /// Entry kind discriminator for `ConversationEntry.kind`.
 pub const ENTRY_KIND_COMPACTION: &str = "compaction";
 
+/// Entry kind for a synthetic *explore stub* row (t-01412679).
+///
+/// Emitted only by the `groups=stub` projection of `GET /sessions/{sid}/messages`:
+/// a contiguous run of `thought` / `tool_call` / `tool_result` rows is replaced by
+/// ONE stub carrying the run's data-index range and cheap scalars, so a page ships
+/// bubbles plus explore metadata instead of every thought's full text. The stub
+/// never reaches the JSONL — the log stays the raw row sequence, and the detail
+/// endpoint (`GET /sessions/{sid}/messages/detail?start&end`) reads the run back
+/// by the coordinates the stub advertises.
+pub const ENTRY_KIND_EXPLORE_STUB: &str = "explore_stub";
+
 /// Metadata key marking an entry as an *internal runtime artifact* (e.g. the
 /// output-budget nudge injected by `AgentLoop::handle_output_budget_exhausted`).
 ///
@@ -4214,57 +4225,91 @@ pub fn read_messages_paginated(
     //   `from_tail = true` → force the window to the LAST `limit` entries
     //     (overrides `offset`); used by the initial-load code path which
     //     doesn't know `total` yet.
-    let file_len = std::fs::metadata(path)?.len();
-    if file_len == 0 {
-        return Ok(PaginatedMessages {
-            messages: Vec::new(),
-            offset,
-            limit: 0,
-            total: 0,
-        });
-    }
+    // The window arithmetic, the index reconciliation and the span read live
+    // in ONE place (`read_messages_paginated_indexed`); this reader is its
+    // coordinate-free projection. Two copies of that loop would be two places
+    // for the index / corrupt-line discipline to drift (t-01412679 review).
+    let page = read_messages_paginated_indexed(path, offset, limit, from_tail)?;
+    Ok(PaginatedMessages {
+        messages: page.messages.into_iter().map(|(_, entry)| entry).collect(),
+        offset: page.offset,
+        limit: page.limit,
+        total: page.total,
+    })
+}
 
-    let index = log_index_for(path);
-    let mut idx = index.lock().unwrap();
-    // Incremental tail scan; a full pass only happens on first touch.
-    reconcile_log(path, &mut idx)?;
-
-    let total = idx.total_data;
-
-    // If `offset` skips past the end, the page is empty (harmless boundary).
-    // `from_tail` is rejected for empty files — total=0 means there's nothing
-    // at the tail either.
-    if total == 0 {
-        return Ok(PaginatedMessages {
-            messages: Vec::new(),
-            offset,
-            limit: 0,
-            total: 0,
-        });
-    }
-
-    // Compute the effective [start_idx, end_idx) window.
-    //
-    // Forward semantics:
-    //   start_idx = offset.min(total)
-    //   end_idx   = (offset + limit).min(total)
-    //
-    // `from_tail` overrides: clamp `start_idx` so `end_idx` lands on the
-    // last `limit` (or fewer) entries.
-    let (effective_offset, start_idx, end_idx) = if from_tail {
-        // Walk backwards from the tail by `limit` entries (or all of them
-        // when the file holds fewer than `limit`).
+/// Resolve a pagination request into the concrete `[start, end)` data window.
+///
+/// Forward semantics (ADR-050):
+///   `start = offset.min(total)`
+///   `end   = (offset + limit).min(total)`
+///
+/// `from_tail` overrides: clamp `start` so `end` lands on the last `limit`
+/// (or fewer) entries, and echo the offset the caller "should have asked
+/// for". The single source of this arithmetic for every page reader.
+fn window_for(total: u64, offset: u64, limit: u32, from_tail: bool) -> (u64, u64, u64) {
+    if from_tail {
         let tail_start = total.saturating_sub(limit as u64);
-        let echo_offset = tail_start; // What the caller "should have asked for"
-        (echo_offset, tail_start, total)
+        (tail_start, tail_start, total)
     } else {
         let start = offset.min(total);
         let end = (offset + limit as u64).min(total);
         (offset, start, end)
-    };
+    }
+}
 
+/// [`read_messages_paginated`] paired with each entry's **true data
+/// coordinate**, for callers that must publish coordinates (explore stubs,
+/// t-01412679).
+///
+/// Same window arithmetic as the plain reader (it is the single implementation
+/// of it); same corrupt-line behavior. The pairing is why this exists at all:
+/// a line that fails to parse is dropped from the page, so `messages[i]` does
+/// NOT generally sit at `offset + i` — arithmetic on a compressed page would
+/// make every stub after the first hole advertise the wrong range. See the note
+/// on [`read_entries_indexed`].
+pub struct IndexedMessagesPage {
+    /// `(data_index, entry)` in ascending coordinate order.
+    pub messages: Vec<(u64, ConversationEntry)>,
+    /// Effective window start (the from-tail override echoes here).
+    pub offset: u64,
+    /// **Raw span width** of the window (`end - start`), never the number of
+    /// rows that survived parsing. See [`MessagesResponse::limit`] (in
+    /// `usecases::session_metadata`) for why the difference is load-bearing.
+    pub limit: u32,
+    pub total: u64,
+}
+
+impl IndexedMessagesPage {
+    /// True when this window's far edge touches the end of the log — i.e. the
+    /// page holds the newest rows, so its trailing run may still be growing.
+    pub fn reaches_log_tail(&self) -> bool {
+        self.offset + u64::from(self.limit) >= self.total
+    }
+}
+
+pub fn read_messages_paginated_indexed(
+    path: &Path,
+    offset: u64,
+    limit: u32,
+    from_tail: bool,
+) -> Result<IndexedMessagesPage> {
+    let file_len = std::fs::metadata(path)?.len();
+    if file_len == 0 {
+        return Ok(IndexedMessagesPage { messages: Vec::new(), offset, limit: 0, total: 0 });
+    }
+
+    let index = log_index_for(path);
+    let mut idx = index.lock().unwrap();
+    reconcile_log(path, &mut idx)?;
+    let total = idx.total_data;
+    if total == 0 {
+        return Ok(IndexedMessagesPage { messages: Vec::new(), offset, limit: 0, total: 0 });
+    }
+
+    let (effective_offset, start_idx, end_idx) = window_for(total, offset, limit, from_tail);
     if start_idx >= end_idx {
-        return Ok(PaginatedMessages {
+        return Ok(IndexedMessagesPage {
             messages: Vec::new(),
             offset: effective_offset,
             limit: 0,
@@ -4272,8 +4317,7 @@ pub fn read_messages_paginated(
         });
     }
 
-    // Map the data-coordinate window onto byte spans and read ONLY those.
-    let mut messages: Vec<ConversationEntry> = Vec::new();
+    let mut messages: Vec<(u64, ConversationEntry)> = Vec::new();
     let mut file = std::fs::File::open(path)?;
     for span in idx.spans.iter() {
         let Some(di) = span.data_index else { continue };
@@ -4287,21 +4331,173 @@ pub fn read_messages_paginated(
             continue;
         };
         match serde_json::from_str::<ConversationEntry>(&text) {
-            Ok(e) => messages.push(e),
+            Ok(e) => messages.push((di, e)),
             Err(e) => tracing::warn!("Skipping invalid JSONL line: {}", e),
         }
     }
     drop(idx); // release the index before the (allocating) return path
 
-    let actual_limit = messages.len() as u32;
-
-    Ok(PaginatedMessages {
+    Ok(IndexedMessagesPage {
         messages,
         offset: effective_offset,
-        limit: actual_limit,
+        limit: (end_idx - start_idx) as u32,
         total,
     })
 }
+
+/// Whether an entry belongs to an explore run (the rows the frontend folds
+/// into one `explore_group` chip).
+///
+/// Mirrors the frontend predicate in `messageFolder.foldMessages` (t-01412679
+/// design §9.1): exactly `thought` / `tool_call` / `tool_result`, and never an
+/// internal runtime artifact. Every other role — including system part rows
+/// (attachments / context_ref) — *breaks* a run, which is what the frontend
+/// does too. If either side changes, both must change together.
+pub fn is_explore_entry(entry: &ConversationEntry) -> bool {
+    if entry.is_internal() {
+        return false;
+    }
+    matches!(entry.role.as_str(), "thought" | "tool_call" | "tool_result")
+}
+
+/// Collapse contiguous explore runs in a page into lightweight stub rows
+/// (`kind = ` [`ENTRY_KIND_EXPLORE_STUB`]), the `groups=stub` projection.
+///
+/// Pure function over an already-read window: no IO, no coordinate guessing.
+/// `entries` are `(data_index, entry)` pairs in ascending order (as returned by
+/// [`read_messages_paginated_indexed`]); a stub advertises the run's true
+/// `[start, end)` in the same dimension `offset` / `limit` / `total` use, so the
+/// caller's page arithmetic (`next_offset = offset + limit`, `isAtTail`, locate)
+/// is untouched — only the rows in between got lighter.
+///
+/// `page_reaches_log_tail` (`IndexedMessagesPage::reaches_log_tail`) says the
+/// window holds the NEWEST rows. The page's trailing run is then left RAW, for
+/// two reasons that are both correctness, not cosmetics:
+///
+/// - **A pending authorization must stay visible.** The only place the Desktop
+///   can render Allow/Deny is the explore block that owns the `tool_call` row,
+///   paired by `tool_call_id`. A stub has no rows, so a `tool_call` folded into
+///   one becomes an unanswerable request: an agent that is waiting for a
+///   decision nobody can see. A tool awaiting its decision sits at the end of
+///   the log by construction — i.e. exactly inside the trailing run.
+/// - **The run may still grow.** Live rows keep arriving for an open run; a
+///   stub frozen over rows 40-50 while rows 51+ stream in renders the same run
+///   as two blocks AND duplicates content (the stub's fetch covers rows the
+///   live tail already shows).
+///
+/// Once the run is finished (a bubble follows it), it is no longer trailing and
+/// collapses on the next read — the cost is bounded to one run, on the newest
+/// page only.
+///
+/// Stub contract (design §9.2):
+/// - `id` / `ts` = the run's FIRST row, so the frontend's content-derived
+///   `blockId` (`block-${items[0].id}`) is the same value in stub mode, raw
+///   mode, and after the live tail finalizes — one cache key across paths.
+/// - `role = "assistant"` keeps legacy readers (which switch on role) from
+///   meeting an unknown role; `kind` is the discriminator, same pattern as
+///   [`ENTRY_KIND_COMPACTION`].
+/// - `metadata`: `start`, `end`, `raw_count`, `tools` (tool_call names in log
+///   order, duplicates kept — presentation dedupe is a UI concern), and
+///   `tools_truncated` once the list exceeds `EXPLORE_STUB_TOOLS_CAP`.
+///   Deliberately *no* `has_error`: the error flag on a tool_result row is a
+///   content heuristic owned by the agent layer, and duplicating it here would
+///   drift. The frontend derives it from the detail rows it fetches on expand.
+pub fn collapse_explore_runs(
+    entries: Vec<(u64, ConversationEntry)>,
+    page_reaches_log_tail: bool,
+) -> Vec<ConversationEntry> {
+    /// Cap on the `tools` list a stub carries inline. A run this long already
+    /// means a megabyte-class explore block; the header chip shows a handful
+    /// of names regardless, and the detail fetch is unbounded by this cap.
+    const EXPLORE_STUB_TOOLS_CAP: usize = 50;
+
+    let mut out: Vec<ConversationEntry> = Vec::with_capacity(entries.len());
+    // The run currently being accumulated, OWNED: a folded run is emitted
+    // nowhere (that is the saving) and a plain row moves straight into `out`,
+    // so the projection copies no entry — the page the reader just built is the
+    // page we hand back, minus the rows that folded.
+    let mut run: Vec<(u64, ConversationEntry)> = Vec::new();
+
+    let flush = |run: &mut Vec<(u64, ConversationEntry)>,
+                     out: &mut Vec<ConversationEntry>,
+                     as_stub: bool| {
+        if run.is_empty() {
+            return;
+        }
+        if !as_stub {
+            // Trailing run on the newest page: its rows go out untouched.
+            out.extend(run.drain(..).map(|(_, entry)| entry));
+            return;
+        }
+        let first_idx = run[0].0;
+        let last_idx = run[run.len() - 1].0;
+        let mut tools: Vec<&str> = Vec::new();
+        let mut tools_truncated = false;
+        for (_, e) in run.iter() {
+            if e.role == "tool_call" {
+                if tools.len() >= EXPLORE_STUB_TOOLS_CAP {
+                    tools_truncated = true;
+                    break;
+                }
+                tools.push(
+                    e.metadata
+                        .as_ref()
+                        .and_then(|m| m.get("tool_name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                );
+            }
+        }
+        let raw_count = last_idx - first_idx + 1;
+        let mut meta = serde_json::json!({
+            "start": first_idx,
+            "end": last_idx + 1,
+            "raw_count": raw_count,
+            "tools": tools,
+        });
+        if tools_truncated {
+            meta["tools_truncated"] = serde_json::json!(true);
+        }
+        let stub = ConversationEntry {
+            id: run[0].1.id.clone(),
+            ts: run[0].1.ts.clone(),
+            role: "assistant".to_string(),
+            content: String::new(),
+            metadata: Some(meta),
+            kind: Some(ENTRY_KIND_EXPLORE_STUB.to_string()),
+        };
+        // Entries between the run's ends can only be explore rows (the run
+        // is maximal), so nothing was dropped; but emit the run's members
+        // nowhere — that is the whole point of the stub.
+        run.clear();
+        out.push(stub);
+    };
+
+    for (di, entry) in entries {
+        let explore = is_explore_entry(&entry);
+        // `entries` is ascending by construction, so a run is contiguous in
+        // coordinates UNLESS a corrupt line was skipped between two rows. A
+        // gap means the stub would advertise rows the reader never saw and
+        // the detail fetch would silently include an unknown line — end the
+        // run instead.
+        if explore && run.last().is_none_or(|(prev, _)| di == prev + 1) {
+            run.push((di, entry));
+        } else {
+            flush(&mut run, &mut out, true);
+            if explore {
+                run.push((di, entry));
+            } else {
+                out.push(entry);
+            }
+        }
+    }
+    // Final flush. When the page holds the newest rows, its trailing run is
+    // left raw (see the doc comment: pending authorization + live growth).
+    flush(&mut run, &mut out, !page_reaches_log_tail);
+    out
+}
+
+
 
 /// Read a data-coordinate window **paired with each entry's true coordinate**.
 ///
@@ -9553,6 +9749,262 @@ mod tests {
     /// How many rounds the side table describes.
     fn fold_round_count(path: &Path) -> usize {
         crate::rounds::fold(path).unwrap().len()
+    }
+
+    // ── t-01412679: explore-stub projection ──────────────────────────
+
+    fn stub_entry(role: &str, content: &str, metadata: Option<serde_json::Value>) -> ConversationEntry {
+        ConversationEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            ts: "2026-01-01T12:00:00.000Z".to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            metadata,
+            kind: None,
+        }
+    }
+
+    fn indexed(entries: Vec<ConversationEntry>) -> Vec<(u64, ConversationEntry)> {
+        entries.into_iter().enumerate().map(|(i, e)| (i as u64, e)).collect()
+    }
+
+    #[test]
+    fn collapse_explore_runs_folds_contiguous_run() {
+        let first = stub_entry("user", "go", None);
+        let thought = stub_entry("thought", "a very long reasoning text", None);
+        let run_first_id = thought.id.clone();
+        let entries = indexed(vec![
+            first,
+            thought,
+            stub_entry("tool_call", r#"{"path":"a.rs"}"#, Some(serde_json::json!({"tool_name": "file_read", "tool_call_id": "c1"}))),
+            stub_entry("tool_result", "ok", Some(serde_json::json!({"tool_name": "file_read", "tool_call_id": "c1"}))),
+            stub_entry("tool_call", "{}", Some(serde_json::json!({"tool_name": "bash"}))),
+            stub_entry("tool_result", "done", Some(serde_json::json!({"tool_name": "bash"}))),
+            stub_entry("assistant", "answer", None),
+        ]);
+
+        // Mid-log page (`false`): the run is followed by a bubble, so the
+        // tail rule is irrelevant here.
+        let out = collapse_explore_runs(entries, false);
+        assert_eq!(out.len(), 3, "user, one stub, assistant");
+        assert_eq!(out[0].role, "user");
+        assert_eq!(out[2].role, "assistant");
+
+        let stub = &out[1];
+        assert_eq!(stub.kind.as_deref(), Some(ENTRY_KIND_EXPLORE_STUB));
+        // The stub carries NO content — that is the payload this whole
+        // projection exists to remove from the page.
+        assert!(stub.content.is_empty());
+        let meta = stub.metadata.as_ref().unwrap();
+        assert_eq!(meta["start"], serde_json::json!(1));
+        assert_eq!(meta["end"], serde_json::json!(6));
+        assert_eq!(meta["raw_count"], serde_json::json!(5));
+        assert_eq!(
+            meta["tools"],
+            serde_json::json!(["file_read", "bash"]),
+            "tool_call names in log order; tool_result rows never add a name"
+        );
+        assert!(meta.get("tools_truncated").is_none());
+        assert_eq!(stub.id, run_first_id, "stub carries the run's first row id");
+    }
+
+    #[test]
+    fn collapse_explore_runs_stub_keeps_first_row_identity() {
+        // The frontend derives an explore block's cache key from the run's
+        // FIRST row id (`block-${items[0].id}`). The stub must carry that id
+        // so stub / raw / live paths share one key.
+        let first = stub_entry("thought", "reasoning", None);
+        let first_id = first.id.clone();
+        let first_ts = first.ts.clone();
+        let entries = indexed(vec![
+            first,
+            stub_entry("tool_call", "{}", Some(serde_json::json!({"tool_name": "bash"}))),
+        ]);
+        let out = collapse_explore_runs(entries, false);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, first_id);
+        assert_eq!(out[0].ts, first_ts);
+        assert_eq!(out[0].role, "assistant", "legacy role-switching readers must not meet an unknown role");
+    }
+
+    #[test]
+    fn collapse_explore_runs_breaks_on_gaps_and_non_explore_rows() {
+        // A coordinate gap (corrupt line skipped by the reader) must end a
+        // run: a stub may never advertise rows the page reader did not see.
+        let a = stub_entry("thought", "t1", None);
+        let b = stub_entry("tool_call", "{}", Some(serde_json::json!({"tool_name": "x"})));
+        let c = stub_entry("thought", "t2", None);
+        let d = stub_entry("tool_result", "r", Some(serde_json::json!({"tool_name": "x"})));
+        let entries = vec![(0u64, a), (1, b), (3, c), (4, d)];
+        let out = collapse_explore_runs(entries, false);
+        assert_eq!(out.len(), 2, "two stubs, the gap split them");
+        assert_eq!(out[0].metadata.as_ref().unwrap()["end"], serde_json::json!(2));
+        assert_eq!(out[1].metadata.as_ref().unwrap()["start"], serde_json::json!(3));
+        assert_eq!(out[1].metadata.as_ref().unwrap()["end"], serde_json::json!(5));
+    }
+
+    #[test]
+    fn collapse_explore_runs_internal_row_breaks_run() {
+        let mut internal = stub_entry("thought", "hidden nudge", None);
+        internal.metadata = Some(serde_json::json!({ META_KEY_INTERNAL: true }));
+        let entries = indexed(vec![
+            stub_entry("tool_call", "{}", Some(serde_json::json!({"tool_name": "x"}))),
+            internal.clone(),
+            stub_entry("tool_result", "r", Some(serde_json::json!({"tool_name": "x"}))),
+        ]);
+        let out = collapse_explore_runs(entries, false);
+        assert_eq!(out.len(), 3, "stub, internal row verbatim, stub");
+        assert_eq!(out[0].kind.as_deref(), Some(ENTRY_KIND_EXPLORE_STUB));
+        assert!(out[1].is_internal(), "internal rows pass through uncollapsed");
+        assert_eq!(out[2].kind.as_deref(), Some(ENTRY_KIND_EXPLORE_STUB));
+        assert_eq!(out[2].metadata.as_ref().unwrap()["start"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn collapse_explore_runs_caps_tools_list() {
+        let mut entries: Vec<ConversationEntry> = Vec::new();
+        for i in 0..60 {
+            entries.push(stub_entry(
+                "tool_call",
+                "{}",
+                Some(serde_json::json!({"tool_name": format!("t{}", i)})),
+            ));
+        }
+        // Mid-log page: a page that ENDS on the run leaves it raw (see the
+        // tail test below), so this fixture is explicitly not the tail.
+        let out = collapse_explore_runs(indexed(entries), false);
+        assert_eq!(out.len(), 1);
+        let meta = out[0].metadata.as_ref().unwrap();
+        assert_eq!(meta["tools"].as_array().unwrap().len(), 50);
+        assert_eq!(meta["tools_truncated"], serde_json::json!(true));
+        assert_eq!(meta["raw_count"], serde_json::json!(60));
+    }
+
+    #[test]
+    fn collapse_explore_runs_passes_bubbles_through() {
+        let entries = indexed(vec![
+            stub_entry("user", "hello", None),
+            stub_entry("assistant", "hi", None),
+            stub_entry("system", "notice", None),
+        ]);
+        let out = collapse_explore_runs(entries, false);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|e| e.kind.is_none()), "no stubs without an explore run");
+    }
+
+    #[test]
+    fn collapse_explore_runs_leaves_the_trailing_run_raw_at_log_tail() {
+        // t-01412679 review C2. A page that holds the newest rows must NOT
+        // collapse its trailing run: a pending authorization's `tool_call` is
+        // the log's last row (the Desktop can only render Allow/Deny inside the
+        // block that owns that row), and an open run keeps growing — a stub
+        // frozen over it would duplicate the live rows it advertises.
+        let entries = indexed(vec![
+            stub_entry("user", "go", None),
+            stub_entry("thought", "reasoning", None),
+            stub_entry("tool_call", "{}", Some(serde_json::json!({"tool_name": "bash", "tool_call_id": "c1"}))),
+        ]);
+        let at_tail = collapse_explore_runs(entries.clone(), true);
+        assert_eq!(at_tail.len(), 3, "user + the raw run, nothing collapsed");
+        assert!(at_tail.iter().all(|e| e.kind.is_none()));
+        assert_eq!(at_tail[2].role, "tool_call", "the pending row stays addressable by tool_call_id");
+
+        // Same rows, mid-log page: the run is behind us and collapses. This is
+        // what makes the rule bounded — once the run finishes (a bubble
+        // follows), it folds like any other.
+        let mid_log = collapse_explore_runs(entries, false);
+        assert_eq!(mid_log.len(), 2, "user + one stub");
+        assert_eq!(mid_log[1].kind.as_deref(), Some(ENTRY_KIND_EXPLORE_STUB));
+        assert_eq!(mid_log[1].metadata.as_ref().unwrap()["start"], serde_json::json!(1));
+        assert_eq!(mid_log[1].metadata.as_ref().unwrap()["end"], serde_json::json!(3));
+    }
+
+    #[test]
+    fn collapse_explore_runs_collapses_earlier_runs_at_log_tail() {
+        // Only the TRAILING run is exempt: a finished run earlier in the newest
+        // page still folds, so compression is not lost wholesale.
+        let entries = indexed(vec![
+            stub_entry("user", "go", None),
+            stub_entry("thought", "old reasoning", None),
+            stub_entry("tool_result", "ok", None),
+            stub_entry("assistant", "first answer", None),
+            stub_entry("tool_call", "{}", Some(serde_json::json!({"tool_name": "bash"}))),
+        ]);
+        let out = collapse_explore_runs(entries, true);
+        assert_eq!(out.len(), 4, "user, stub, answer, raw trailing tool_call");
+        assert_eq!(out[1].kind.as_deref(), Some(ENTRY_KIND_EXPLORE_STUB));
+        assert_eq!(out[1].metadata.as_ref().unwrap()["start"], serde_json::json!(1));
+        assert_eq!(out[1].metadata.as_ref().unwrap()["end"], serde_json::json!(3));
+        assert_eq!(out[3].role, "tool_call");
+        assert!(out[3].kind.is_none());
+    }
+
+    #[test]
+    fn read_paginated_indexed_matches_plain_reader() {
+        // The stub page and the raw page must agree on WHERE the window is —
+        // one shared `window_for`, exercised through both readers.
+        let temp_dir = TempDir::new().unwrap();
+        let conv_dir = temp_dir.path().join("conversations");
+        std::fs::create_dir_all(&conv_dir).unwrap();
+        let path = conv_dir.join("coord.jsonl");
+        let mut lines = String::new();
+        for i in 0..10 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            lines.push_str(&format!(
+                "{{\"id\":\"m{}\",\"ts\":\"2026-01-01T12:00:00.000Z\",\"role\":\"{}\",\"content\":\"c{}\"}}\n",
+                i, role, i
+            ));
+        }
+        std::fs::write(&path, &lines).unwrap();
+
+        for (offset, limit, tail) in [(0u64, 3u32, false), (4, 3, false), (0, 3, true), (0, 100, true)] {
+            let plain = read_messages_paginated(&path, offset, limit, tail).unwrap();
+            let page = read_messages_paginated_indexed(&path, offset, limit, tail).unwrap();
+            assert_eq!(plain.offset, page.offset, "offset echo diverged at ({offset},{limit},{tail})");
+            assert_eq!(plain.total, page.total);
+            assert_eq!(plain.limit, page.limit, "one window arithmetic, one echoed span");
+            assert_eq!(plain.messages.len(), page.messages.len());
+            for (slot, (di, e)) in page.messages.iter().enumerate() {
+                assert_eq!(di, &((page.offset as usize + slot) as u64), "coordinate slid at slot {slot}");
+                assert_eq!(e.id, plain.messages[slot].id);
+            }
+        }
+    }
+
+    #[test]
+    fn read_paginated_indexed_survives_corrupt_line() {
+        // The coordinate hazard `read_entries_indexed` documents, on the
+        // page path: the row AFTER a corrupt line keeps its true coordinate,
+        // so a stub built from it advertises the right range.
+        let temp_dir = TempDir::new().unwrap();
+        let conv_dir = temp_dir.path().join("conversations");
+        std::fs::create_dir_all(&conv_dir).unwrap();
+        let path = conv_dir.join("hole.jsonl");
+        std::fs::write(
+            &path,
+            "{\"id\":\"m0\",\"ts\":\"2026-01-01T12:00:00.000Z\",\"role\":\"user\",\"content\":\"go\"}\n\
+             not-json\n\
+             {\"id\":\"m2\",\"ts\":\"2026-01-01T12:00:00.000Z\",\"role\":\"thought\",\"content\":\"t\"}\n\
+             {\"id\":\"m3\",\"ts\":\"2026-01-01T12:00:00.000Z\",\"role\":\"tool_call\",\"content\":\"{}\",\"metadata\":{\"tool_name\":\"bash\"}}\n",
+        )
+        .unwrap();
+
+        let page = read_messages_paginated_indexed(&path, 0, 10, false).unwrap();
+        assert_eq!(page.total, 4, "the corrupt line still counts as a raw entry");
+        assert_eq!(page.messages.len(), 3);
+        assert_eq!(page.offset, 0);
+        // The echoed span is the WINDOW, not the parsed rows: a hole must not
+        // shorten the cursor (`next_offset = offset + limit`) — review C1.
+        assert_eq!(page.limit, 4);
+        assert!(page.reaches_log_tail(), "window covers the whole log");
+
+        let out = collapse_explore_runs(page.messages, false);
+        // user row, then a stub for [2,4) — coordinate 1 (the hole) is not
+        // inside any advertised range.
+        assert_eq!(out.len(), 2);
+        let meta = out[1].metadata.as_ref().unwrap();
+        assert_eq!(meta["start"], serde_json::json!(2));
+        assert_eq!(meta["end"], serde_json::json!(4));
     }
 }
 
