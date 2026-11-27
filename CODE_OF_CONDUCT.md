@@ -45,7 +45,7 @@ For this project, community spaces include:
   mirrors.
 - Any chat channel, forum, or mailing list where the project is discussed.
 - Design and ADR discussions, including proposals circulated outside the repository.
-- Submissions of `.agent` packages, skills, and prompts to the project.
+- Submissions of `.bot` packages, skills, and prompts to the project.
 - Representing the project in public — including social media and conference talks.
 
 ## Enforcement Responsibilities

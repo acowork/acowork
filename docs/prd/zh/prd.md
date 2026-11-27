@@ -50,7 +50,7 @@ ACowork 是一个"**Bot as APP**"平台。核心隐喻借鉴 Android：Bot 如 A
 
 | 编号 | 需求 | 优先级 | 说明 |
 |------|------|--------|------|
-| PKG-01 | Bot 以 `.agent` 压缩包分发，内含配置、Prompt、Skill、工具声明，**不含可执行文件** | P0 | 声明式打包是平台核心前提 |
+| PKG-01 | Bot 以 `.bot` 压缩包分发，内含配置、Prompt、Skill、工具声明，**不含可执行文件** | P0 | 声明式打包是平台核心前提 |
 | PKG-02 | .bot 包必须签名，Gateway 安装时强制验证完整性和来源 | P0 | 安全底线 |
 | PKG-03 | 支持两类签名身份：Developer（自签名）和 Platform（平台签发） | P0 | Phase 1 最小签名模型 |
 | PKG-04 | 系统 Bot 必须由 Platform Key 签名 | P0 | 防止伪装系统 Bot |

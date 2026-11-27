@@ -72,7 +72,7 @@ ACowork 是一个**多用户、分布式、AI 原生的协作平台**。团队�
 | **客户端** · Desktop App · Mobile App | 每台设备 | Tauri v2 界面，走 HTTP + MQTT——同一套界面、同一个账号 |
 | **Gateway** · `acowork-gateway` | 每集群 1 个 | HTTP `:19876`、MQTT `:19875`、反向代理、包管理、Intent 路由、全局资源 |
 | **Node Agent** · `acowork-node` | 每台主机 1 个 | 进程表、本地包存储、反向代理 `:19900`、LSP 监督 |
-| **Runtime** · `acowork-runtime` | 每个 `.agent` 1 个 | 加载包、LLM 主循环、工具执行、loopback HTTP |
+| **Runtime** · `acowork-runtime` | 每个 `.bot` 1 个 | 加载包、LLM 主循环、工具执行、loopback HTTP |
 
 四个常驻服务挂在同一条路径上，对人和 Agent 一律以 REST + MCP 暴露：
 `acowork-user`（账号 · 角色）· `acowork-pm`（项目 · 任务）· `acowork-doc`（文档库）·

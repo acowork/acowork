@@ -78,7 +78,7 @@ Desktop App 通过 **Gateway HTTP API** 与 Gateway 交互：
 |------|----------|------|------|
 | Gateway 状态 | GET | `/health` | 健康检查 |
 | Bot 列表 | GET | `/api/agents` | 已安装的 Bot 列表 |
-| Bot 安装 | POST | `/api/agents/install` | 安装 .bot 包（multipart：`.agent` 字节 + 必填 `node_id`，ADR-113） |
+| Bot 安装 | POST | `/api/agents/install` | 安装 .bot 包（multipart：`.bot` 字节 + 必填 `node_id`，ADR-113） |
 | Bot 卸载 | DELETE | `/api/agents/:id` | 卸载 Bot |
 | Bot 克隆 | POST | `/api/agents/clone` | 克隆 Bot |
 | Bot 启停 | POST | `/api/agents/:id/start` | 启动 Bot |
@@ -239,7 +239,7 @@ Step 4: 身份信息采集（必填 → 选填）
 
 Step 5: 安装第一个 Agent
   ├─ 从本地仓库选择
-  ├─ 拖放 .agent 文件安装
+  ├─ 拖放 .bot 文件安装
   └─ 跳过（之后手动安装）
 
 → 进入主界面
@@ -377,7 +377,7 @@ Step 5: 生成 → 调用 Gateway API 创建工作区 → 新 Agent 标记 dev: 
 ```
 Step 1: 检查 — manifest 完整性、SKILL.md 格式、prompts 存在性
 Step 2: 清理 — 移除 dev 标记、清空 recordings/、重置 config/
-Step 3: 打包 — 生成 .agent ZIP 文件
+Step 3: 打包 — 生成 .bot ZIP 文件
 Step 4: 签名 — 调用 acowork-sign 签名
 Step 5: 分发 — 本地安装 / 导出到文件 / 上传仓库
 ```

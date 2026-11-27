@@ -125,19 +125,19 @@ Calendar Agent ← GatewayResponse::IntentReceived
 
 ```bash
 # Phase 1: independent binaries
-agent-runtime /path/to/weather.agent --socket /tmp/gateway.sock
+agent-runtime /path/to/weather.bot --socket /tmp/gateway.sock
 acowork-gateway start
 acowork-keygen --alias my-key
-acowork-sign --key my-key.pem --input weather.unsigned.agent
-acowork-verify weather.agent
+acowork-sign --key my-key.pem --input weather.unsigned.bot
+acowork-verify weather.bot
 
 # Phase 5: unified CLI
 acowork gateway start
-acowork agent install weather.agent
+acowork agent install weather.bot
 acowork agent start com.example.weather
 acowork keygen --alias my-key
-acowork sign weather.unsigned.agent
-acowork verify weather.agent
+acowork sign weather.unsigned.bot
+acowork verify weather.bot
 ```
 
 ---

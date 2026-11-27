@@ -74,7 +74,7 @@ Gateway sits a flat three-tier chain: **Gateway** → **Node Service** → **Run
 | **Clients** · Desktop App · Mobile App | per device | Tauri v2 UI over HTTP + MQTT — same surface, same account |
 | **Gateway** · `acowork-gateway` | 1 per cluster | HTTP `:19876`, MQTT `:19875`, reverse proxy, package manager, intent routing, global resources |
 | **Node Service** · `acowork-node` | 1 per host | process table, local package store, reverse proxy `:19900`, LSP supervisor |
-| **Runtime** · `acowork-runtime` | 1 per `.agent` | loads the package, LLM loop, tool execution, loopback HTTP |
+| **Runtime** · `acowork-runtime` | 1 per `.bot` | loads the package, LLM loop, tool execution, loopback HTTP |
 
 Four co-resident services sit on the same path, exposed to humans and bots alike over REST + MCP:
 `acowork-user` (accounts · roles) · `acowork-pm` (projects · tasks) · `acowork-doc` (document library) ·

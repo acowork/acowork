@@ -13,7 +13,7 @@ The tool system is Bot's sole channel for perceiving and operating the world. LL
 ```
 Tool Dispatcher
 ├── Built-in Tools     # Runtime built-in, available in Phase 1
-├── WASM Tools         # Bundled with .agent package, executed in Wasmtime sandbox
+├── WASM Tools         # Bundled with .bot package, executed in Wasmtime sandbox
 ├── RAG Tools          # Enterprise RAG integration, query external knowledge base
 └── Gateway Tools      # Operations requiring Gateway coordination (not triggered by LLM tool_call)
 ```
@@ -310,7 +310,7 @@ Recommended flow for Bot developers writing WASM tools:
 3. Compile:
    cargo build --target wasm32-wasip2 --release
 
-4. Place .wasm file in .agent package's tools/ directory
+4. Place .wasm file in .bot package's tools/ directory
 
 5. Declare tool in manifest.toml (see §3.2)
 ```

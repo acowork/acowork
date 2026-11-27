@@ -37,7 +37,7 @@ Both share Gateway's internal state, just different access layers.
 
 ## 1. Package Manager
 
-- **Install**: Extract `.agent` to `~/.local/share/agent-gateway/agents/<agent_id>/`, verify manifest integrity, record version. Must verify package signature before installation (see [02-agent-package.md](./02-agent-package.md)); if signature is invalid or doesn't match the installed version's signature, reject installation.
+- **Install**: Extract `.bot` to `~/.local/share/agent-gateway/agents/<agent_id>/`, verify manifest integrity, record version. Must verify package signature before installation (see [02-agent-package.md](./02-agent-package.md)); if signature is invalid or doesn't match the installed version's signature, reject installation.
 - **Uninstall**: Delete the corresponding directory, optionally back up user data (including private SQLite memory layer).
 - **Upgrade**: Preserve `data/` and user-modified `config/`, replace other files. If `runtime_version` is incompatible, prompt the user. On upgrade, verify the new package's signing certificate fingerprint matches the installed version.
 - **Repository support**: Configurable multiple HTTP repository sources (like apt), periodically check for updates. Repository-provided .bot packages must be signed.
@@ -475,7 +475,7 @@ Gateway CLI is a separate binary (`acowork`), providing command-line management 
 
 ```bash
 # Agent management
-acowork install <path>          # Install .agent package (includes signature verification)
+acowork install <path>          # Install .bot package (includes signature verification)
 acowork uninstall <agent_id>    # Uninstall Agent
 acowork list                    # List installed Agents and their status
 acowork start <agent_id>       # Start Agent

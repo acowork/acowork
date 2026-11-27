@@ -37,7 +37,7 @@ crates/acowork-core/
 ### manifest.rs
 
 ```rust
-/// .agent package's manifest.toml complete data structure
+/// .bot package's manifest.toml complete data structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentManifest {
     pub agent_id: String,

@@ -485,7 +485,7 @@ sequenceDiagram
     Note over GW,BROKER: Gateway only connects here; Global Resources Publisher background loop detects provider/mcp/lsp/embedding state changes and PUBLISHes acowork/global/{kind} (Retained)
 
     Note over GW,RT: 2. Gateway spawns Runtime process
-    GW->>RT: spawn (command line/env: --agent-id, --package-path=.agent package, --work-dir, --config-dir, --mqtt-port, --http-port=0)
+    GW->>RT: spawn (command line/env: --agent-id, --package-path=.bot package, --work-dir, --config-dir, --mqtt-port, --http-port=0)
 
     Note over RT: 3. Runtime starts: loads local config (pure local file I/O, Gateway not involved)
     RT->>RT: Start localhost HTTP server (--http-port=0 assigns random port)

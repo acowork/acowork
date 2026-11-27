@@ -27,7 +27,7 @@ acowork-ai/
 │   ├── acowork-gateway/         # Gateway binary + library
 │   ├── acowork-sqlite/          # SQLite memory backend (implements MemoryProvider trait)
 │   ├── acowork-vault/           # encrypted key storage
-│   └── acowork-sign/            # .agent package sign/verify tool
+│   └── acowork-sign/            # .bot package sign/verify tool
 ├── apps/
 │   └── acowork-desktop/         # Tauri v2 desktop app (Phase 5)
 │       ├── src-tauri/            # Rust backend (Gateway/Debug client + tray)

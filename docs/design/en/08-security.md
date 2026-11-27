@@ -250,7 +250,7 @@ Runtime-side security (§2~§11) establishes post-installation defense in depth.
 Referencing the Google Play scanning mechanism in the Android ecosystem, ACowork establishes security checkpoints at the Bot repository (store) listing stage, **shifting security left** to the publishing phase. This forms a three-layer defense: pre-listing scan + install-time signature verification + runtime protection:
 
 ```
-Developer submits .agent package
+Developer submits .bot package
        │
        ▼
   Repository security scan (§12)       ← Pre-listing: static analysis + behavior assessment
@@ -302,7 +302,7 @@ When a Bot is shared, the packaged SQLite memory layer memory contains SkillIter
 ### 12.4 Scan Engine Architecture
 
 ```
-.agent package submitted
+.bot package submitted
        │
        ▼
   ┌─────────────────────────────────────────────┐

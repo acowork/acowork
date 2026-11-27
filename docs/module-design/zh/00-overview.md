@@ -27,7 +27,7 @@ acowork-ai/
 │   ├── acowork-gateway/         # Gateway 二进制 + 库
 │   ├── acowork-sqlite/          # SQLite 记忆层 图数据库引擎（实现 MemoryStore trait）
 │   ├── acowork-vault/           # 密钥加密存储
-│   └── acowork-sign/            # .agent 包签名/验签工具
+│   └── acowork-sign/            # .bot 包签名/验签工具
 ├── apps/
 │   └── acowork-desktop/         # Tauri v2 桌面应用（Phase 5）
 │       ├── src-tauri/            # Rust backend (Gateway/Debug 客户端 + 托盘)

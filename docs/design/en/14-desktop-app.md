@@ -78,7 +78,7 @@ Desktop App interacts with Gateway via the **Gateway HTTP API**:
 |-----------|-------------|------|-------------|
 | Gateway status | GET | `/health` | Health check |
 | Bot list | GET | `/api/agents` | Installed Bots list |
-| Bot install | POST | `/api/agents/install` | Install .bot package (multipart: `.agent` bytes + required `node_id`, ADR-113) |
+| Bot install | POST | `/api/agents/install` | Install .bot package (multipart: `.bot` bytes + required `node_id`, ADR-113) |
 | Bot uninstall | DELETE | `/api/agents/:id` | Uninstall Bot |
 | Bot clone | POST | `/api/agents/clone` | Clone Bot |
 | Bot start/stop | POST | `/api/agents/:id/start` | Start Bot |
@@ -240,7 +240,7 @@ Step 4: Identity information collection (required → optional)
 
 Step 5: Install first Agent
   ├─ Select from local repository
-  ├─ Drag-and-drop .agent file to install
+  ├─ Drag-and-drop .bot file to install
   └─ Skip (install manually later)
 
 → Enter main interface
@@ -377,7 +377,7 @@ In developer mode, the "Publish" option in Bot list right-click menu opens the p
 ```
 Step 1: Check — manifest integrity, SKILL.md format, prompts presence
 Step 2: Clean — remove dev tag, clear recordings/, reset config/
-Step 3: Package — generate .agent ZIP file
+Step 3: Package — generate .bot ZIP file
 Step 4: Sign — call acowork-sign to sign
 Step 5: Distribute — local install / export to file / upload to repository
 ```

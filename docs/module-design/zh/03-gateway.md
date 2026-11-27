@@ -13,7 +13,7 @@ crates/acowork-gateway/
     │   └── state.rs               # 全局状态（已安装 Agent、运行中 Agent 等）
     ├── package_manager/
     │   ├── mod.rs
-    │   ├── install.rs             # .agent 包安装（解压 + 签名验证 + manifest 校验）
+    │   ├── install.rs             # .bot 包安装（解压 + 签名验证 + manifest 校验）
     │   ├── uninstall.rs           # 卸载（可选备份 SQLite 记忆层）
     │   ├── upgrade.rs             # 升级（保留 data/ + config/，校验签名一致）
     │   └── repository.rs          # 远程仓库源（HTTP，Phase 5）

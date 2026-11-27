@@ -14,7 +14,7 @@
 | ---------------------- | ------------------------------------- | ------------------------------ |
 | zygote / ART           | Bot Runtime 二进制                  | 通用执行引擎，只有一个         |
 | APK (DEX + resources)  | .bot 包 (config + prompts + skills) | 声明式，无自定义代码           |
-| APK Signature          | .agent Signing Block                  | 包签名，验证完整性和来源       |
+| APK Signature          | .bot Signing Block                  | 包签名，验证完整性和来源       |
 | ActivityManagerService | Gateway                               | 生命周期管理                   |
 | Binder IPC             | MQTT pub/sub + HTTP 反向代理           | 进程间通信（ADR-033）          |
 | ContentProvider        | `acowork-user` 用户域                  | 用户身份与偏好管理             |
@@ -27,7 +27,7 @@
 
 ## 2. 核心特性
 
-- **标准化打包**：Bot 以压缩包（.agent）分发，内含配置、Prompt、Skill、工具声明，**不含可执行文件**。所有包必须经过签名，Gateway 安装时强制验证签名完整性和来源。
+- **标准化打包**：Bot 以压缩包（.bot）分发，内含配置、Prompt、Skill、工具声明，**不含可执行文件**。所有包必须经过签名，Gateway 安装时强制验证签名完整性和来源。
 - **统一执行引擎**：Bot Runtime 是平台提供的唯一二进制，负责加载 .bot 包并执行 Bot 逻辑（LLM 交互、工具调度、记忆读写）。
 - **进程级隔离**：每个 Bot 由 Gateway 启动为独立 Bot Runtime 进程，拥有独立工作区、私有 SQLite 记忆数据库、文件系统隔离、可选资源限制（cgroups/容器）。
 - **Bot 自治**：Bot 进程内直连 LLM API、自主执行工具、自主管理权限校验，不依赖 Gateway 代理业务逻辑。

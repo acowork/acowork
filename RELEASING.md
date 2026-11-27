@@ -37,7 +37,7 @@ file and forgets the others fails CI.
 **Agent packages are versioned independently.** `agents/*/manifest.toml` has
 its own `version` and a `runtime_version` compatibility floor. Bump `version`
 only for agents you changed, in the same commit as the source edit plus the
-rebuilt `.agent`.
+rebuilt `.bot`.
 
 ---
 
@@ -50,19 +50,19 @@ so a release build must come from a **clean, committed** work tree.
 
 ```bash
 ./dev/common/build-agent.sh agents/<name>-agent
-cargo run --release --bin acowork-verify -- agents/agent-packages/<id>.agent
+cargo run --release --bin acowork-verify -- agents/agent-packages/<id>.bot
 ```
 
-CI's `packages` job proves the shipped `.agent` matches its source tree. It
+CI's `packages` job proves the shipped `.bot` matches its source tree. It
 only soft-warns about mirror drift; the hard gate lives in the hub's own
 publish workflow. One agent change is **two commits, in this order**:
 
-1. Here — edit the agent, bump `version`, rebuild `.agent`, commit.
+1. Here — edit the agent, bump `version`, rebuild `.bot`, commit.
 2. The hub — `dev/common/sync-hub-mirror.sh`, then merge the generated PR.
 
 ### Signing baseline
 
-An upgrade is rejected unless the new `.agent`'s signing certificate
+An upgrade is rejected unless the new `.bot`'s signing certificate
 fingerprint matches the installed one (`CONTRIBUTING.md` §Signing rules).
 `v0.1.0` fixes that baseline: all seven committed packages are signed by
 
@@ -122,5 +122,5 @@ PR merged if agents changed.
 - Gitee sync, hub mirror merge, Android APK and iOS submission are manual.
 - The Tauri updater is not configured, so v0.1.0 → v0.2.0 is a manual install.
 - Windows installer signing needs a decision before the first signed release.
-  OS-level installer signing and `.agent` package signing are independent;
+  OS-level installer signing and `.bot` package signing are independent;
   v0.1.0 can ship unsigned installers without affecting package upgrades.

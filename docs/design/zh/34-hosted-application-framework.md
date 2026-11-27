@@ -117,7 +117,7 @@ mac    := HMAC-SHA256(secret, "acowork/app-session/v1|<exp>|<len>:<app_id>|<len>
 | 维度 | 结论 | 理由 |
 |---|---|---|
 | 安装归属 | **Gateway 宿主机**（`{data_dir}` 下） | supervisor 跑在 Gateway 进程内（`gateway/mod.rs`）；远程 node 目前只托管 Runtime，不托管应用的进程与数据 |
-| 分发形态 | 单个 `.app` 文件（ZIP + Signing Block） | 与 `.agent` 共用一套签名体系，密码学部分不重写 |
+| 分发形态 | 单个 `.app` 文件（ZIP + Signing Block） | 与 `.bot` 共用一套签名体系，密码学部分不重写 |
 | 信任默认值 | **拒绝未签名包** | 应用会拉起一个本地任意进程，风险面大于 bot 包 |
 | memory | 仍排除 | 面板型 UI 契约未定（§1） |
 
@@ -125,7 +125,7 @@ mac    := HMAC-SHA256(secret, "acowork/app-session/v1|<exp>|<len>:<app_id>|<len>
 
 ### 6.2 `.app` 包格式
 
-`.app` 是一个 ZIP，装下应用运行所需的全部内容。与 `.agent` 最大的差别是**内含可执行文件**：
+`.app` 是一个 ZIP，装下应用运行所需的全部内容。与 `.bot` 最大的差别是**内含可执行文件**：
 
 ```
 <app_id>-<version>.app
@@ -146,7 +146,7 @@ mac    := HMAC-SHA256(secret, "acowork/app-session/v1|<exp>|<len>:<app_id>|<len>
 | 条目路径 | 禁止 `..`、绝对路径、符号链接、加密条目、嵌套 ZIP | 解压前逐条目扫 |
 | `bin/` | 必须存在，且 `bin/{process.binary}` 可执行 | 安装时 |
 | 平台 | `[package].platforms` 必须含当前 `(os, arch)` | 安装时 |
-| 大小 | 单包 ≤ **200 MB**（`.agent` 是 50 MB；app 要带二进制与前端） | 收包时流式计数，超限即断，不整包 buffer |
+| 大小 | 单包 ≤ **200 MB**（`.bot` 是 50 MB；app 要带二进制与前端） | 收包时流式计数，超限即断，不整包 buffer |
 | 压缩算法 | 仅 `deflate` / `store` | 解压时 |
 | 未知顶层条目 | 忽略（向前兼容），但不参与任何契约 | 解压时 |
 
@@ -220,7 +220,7 @@ entry = "bin/acowork-pm"
 | 签名 / 验签 | `sign::sign_package` / `verify::verify_package` 直接用（与包内语义无关） |
 | 打包 | **不复用** `packager::build_agent_package`（硬编码 `manifest.toml`、`AgentManifest`、conversations/memory 排除规则）。新增 `build_app_package`，复用上面三层 |
 
-签名身份沿用 `.agent` 的两类（Developer 自签名 / Platform），并加一条 app 专属规则：
+签名身份沿用 `.bot` 的两类（Developer 自签名 / Platform），并加一条 app 专属规则：
 
 | 检查 | 规则 | 失败错误码 |
 |---|---|---|
@@ -230,7 +230,7 @@ entry = "bin/acowork-pm"
 | 未签名包 | 默认拒绝；`apps.allow_unsigned = true` 时才接受并 `warn` | `unsigned_package` |
 | 内置应用 | 无包、无签名，随 Gateway 构建分发 | — |
 
-> 与 `.agent` Phase 1「未签名可选」不同，`.app` **默认拒绝未签名**：安装一个应用等于允许一个本地进程长期运行，风险面远大于 bot 包。开发期用 `allow_unsigned` 显式放行，生产建议关闭。
+> 与 `.bot` Phase 1「未签名可选」不同，`.app` **默认拒绝未签名**：安装一个应用等于允许一个本地进程长期运行，风险面远大于 bot 包。开发期用 `allow_unsigned` 显式放行，生产建议关闭。
 
 ### 6.7 安装流程
 
@@ -329,7 +329,7 @@ entry = "bin/acowork-pm"
 # 从应用源码目录产出未签名包（内部调 acowork-sign 通用层）
 dev/common/build-app.sh <app-src-dir> --version 1.0.1 --platform windows-x86_64
 
-# 签名（复用现有二进制，语义与 .agent 一致）
+# 签名（复用现有二进制，语义与 .bot 一致）
 acowork-sign --key ./keys/app-key.pem --cert ./keys/app-key.crt \
              --input ./build/pm-1.0.1.unsigned.app \
              --output ./build/pm-1.0.1.app
@@ -370,7 +370,7 @@ P3.1 可独立验证：把 PM 打成一个包，换 id（如 `pm-local`）装进
 - 增量升级（每次整包）。
 - 应用间依赖解析（不引入 `depends_on`）。
 - 多平台 fat 包。
-- 包内安装钩子（`preinstall` / `postinstall`）——**拒绝在安装期执行包内任意代码**，与 `.agent` 同一条红线。
+- 包内安装钩子（`preinstall` / `postinstall`）——**拒绝在安装期执行包内任意代码**，与 `.bot` 同一条红线。
 
 ---
 

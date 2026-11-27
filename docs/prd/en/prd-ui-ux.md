@@ -291,7 +291,7 @@ Rendered only when `gatewayStatus === "error"` (steady‑state offline; startup 
 ```
 ┌────────────────────────────┐
 │ ✨ Create Agent            │  → opens CreateWizard (online creation)
-│ ＋ Install Agent           │  → opens .agent file picker and installs
+│ ＋ Install Agent           │  → opens .bot file picker and installs
 └────────────────────────────┘
 ```
 

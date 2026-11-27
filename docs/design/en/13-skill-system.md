@@ -12,7 +12,7 @@ The Skill system uses a **two-layer model**: SKILL.md as the static definition l
 
 ```
 Skill System
-├── Definition Layer (static)    ← SKILL.md files, distributed with .agent package
+├── Definition Layer (static)    ← SKILL.md files, distributed with .bot package
 │   ├── YAML frontmatter        Metadata (name, triggers, tool deps, model compatibility snapshot)
 │   └── Markdown body           Instruction body (execution steps, notes, output format)
 │
@@ -44,7 +44,7 @@ SKILL.md uses YAML frontmatter + Markdown body, compatible with the Bot Skills o
 ### 2.1 File Location
 
 ```
-<agent_id>.agent
+<agent_id>.bot
 └── skills/
     └── <skill_name>/
         ├── SKILL.md           # Required, Skill definition

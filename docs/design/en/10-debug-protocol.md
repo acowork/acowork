@@ -710,7 +710,7 @@ Step 1: Check — manifest integrity, SKILL.md format, prompts presence
 Step 2: Clean — remove dev tag, clear recordings/, reset config/
   └─ RPC: PreparePublish { remove_dev: true, clear_recordings: true, reset_config: true }
 
-Step 3: Package — generate .agent ZIP
+Step 3: Package — generate .bot ZIP
   └─ Local file operation
 
 Step 4: Sign — call acowork-sign to sign

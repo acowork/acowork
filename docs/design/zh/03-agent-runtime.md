@@ -69,7 +69,7 @@ Runtime 经由 `--mqtt-port` 连接 Gateway 的嵌入式 MQTT broker；MQTT 是 
 
 ```
 Agent Runtime 二进制
-├── Package Loader      # 解析 .agent ZIP，加载 manifest + prompts + skills（config 在 workspace/config，不在包级）
+├── Package Loader      # 解析 .bot ZIP，加载 manifest + prompts + skills（config 在 workspace/config，不在包级）
 ├── AgentCore (Arc)     # 跨 Session 共享状态
 │   ├── Provider       # LLM Provider（直连 LLM API）
 │   ├── Tool Registry  # 工具注册表

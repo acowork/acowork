@@ -6,7 +6,7 @@
 | 作者 | Product |
 | 日期 | 2026-06 |
 | 涉及仓库 | `ACowork`（bot 源与打包）、`ACoworkAgentHub`（注册中心、签名发布、hub.acowork.ai）、`ACoworkWebSite`（导航入口） |
-| 关联 | Roadmap Phase 7「remote `.agent` registry / Bot store」（Planning）；`dev/common/build-agent.sh`；`agents/agent-packages/` |
+| 关联 | Roadmap Phase 7「remote `.bot` registry / Bot store」（Planning）；`dev/common/build-agent.sh`；`agents/agent-packages/` |
 | 非目标声明 | 本文档不覆盖 skills 目录、付费分发、在线试用 |
 
 > **当前实现（2026-11）**：D1–D10 的产品决策仍然成立，但落地位置变了。官网那套静态页（`ACoworkWebSite/agents/*` + `dev/common/sync-agent-hub.py` + `dev/agent-hub/hub.test.js`）已被 `ACoworkAgentHub` 仓库取代：该仓库自己持有 bot 源目录、CI 打包签名、`index.json` 与站点，§11/§12 中指向 `ACoworkWebSite` 的行因此成为历史记录，保留不改写。
@@ -76,9 +76,9 @@
 
 **代价（明确接受）**：非技术作者门槛高；发布节奏受 git 约束；没有"即时上架"体验。
 
-### D3：`.agent` 二进制放站点同源目录，但放独立子目录
+### D3：`.bot` 二进制放站点同源目录，但放独立子目录
 
-**决定**：`agents/downloads/*.agent`，由脚本从 `ACowork/agents/agent-packages/` 拷入。
+**决定**：`agents/downloads/*.bot`，由脚本从 `ACowork/agents/agent-packages/` 拷入。
 
 **理由与权衡**：
 
@@ -144,7 +144,7 @@
 | R4 | 详情视图 | 点击卡片展开详情：完整 description、capabilities（名称+描述）、skills 清单、`version`、`runtime_version`、`author`、`agent_id`、权限列表、包大小与 SHA-256 |
 | R5 | **权限外露** | `permissions`（含 Shell / FilesystemWrite / Network）在**卡片层**可见，不得仅存在于详情内；高危权限（Shell、FilesystemWrite）使用警示色 |
 | R6 | 不做等级标签 | 页面**不得**出现 Official / Community 徽章或"官方/社区""未经审计"措辞；每个 bot 卡片与详情如实显示 manifest 的 `author`；`agents.json` 不含 `tier` 字段 |
-| R7 | 下载与安装说明 | 下载按钮指向同源 `.agent`；页面明示"下载后在 Desktop App 中导入"；**不得**出现任何"一键安装/自动安装"表述（App 侧无 deep link 协议，已核实） |
+| R7 | 下载与安装说明 | 下载按钮指向同源 `.bot`；页面明示"下载后在 Desktop App 中导入"；**不得**出现任何"一键安装/自动安装"表述（App 侧无 deep link 协议，已核实） |
 | R8 | 投稿入口 | "Submit a bot" → registry PR 模板；页内说明需 `manifest.toml` + 签名（`build-agent.sh`） |
 | R9 | 站点保持零构建 | 不引入 `functions/`、`wrangler.toml`、npm 依赖；同步逻辑用 bash/python；`package.json` 不出现 |
 | R10 | 主题与可访问性 | 复用 `styles.css` 变量，浅色/深色两套均可读（`prefers-color-scheme`）；键盘可完成"搜索→筛选→展开详情→下载"全链路；焦点可见；`aria-live` 播报结果数 |
@@ -176,7 +176,7 @@
     "capabilities": [{ "key": "prd_writing", "description": "…" }],
     "skills": ["prd-writing", "user-research"],
     "package": {
-      "file": "downloads/com.acowork.product-manager.agent",
+      "file": "downloads/com.acowork.product-manager.bot",
       "size_bytes": 74489,
       "sha256": "…"
     }
@@ -204,7 +204,7 @@
 | 详情展开 | 抽屉/内联展开，非新窗口；ESC 与点击外部可关闭 |
 | 响应式 | ≥1024 三列 / 768 两列 / <480 单列；工具栏在窄屏换行不溢出 |
 | 权限警示 | Shell/FilesystemWrite 用高对比标记，不用纯色依赖（配文字） |
-| 下载中 | 按钮不进入假成功状态；`.agent` 走浏览器原生下载 |
+| 下载中 | 按钮不进入假成功状态；`.bot` 走浏览器原生下载 |
 
 ---
 
@@ -274,7 +274,7 @@
 | `agents/agents.js` | ACoworkWebSite | 渲染 / 搜索 / 筛选 / 详情 / URL 状态 |
 | `agents/data/agents.json` | ACoworkWebSite | 生成物，单一数据源投影 |
 | `agents/index.html`（`ah-data` 块） | ACoworkWebSite | 生成物，`file://` 兜底快照（D6） |
-| `agents/downloads/*.agent` | ACoworkWebSite | 7 个签名包 |
+| `agents/downloads/*.bot` | ACoworkWebSite | 7 个签名包 |
 | `agents/avatars/*` | ACoworkWebSite | 头像 |
 | `styles.css`（`ah-*` 段） | ACoworkWebSite | 复用变量，双主题 |
 | `index.html`（导航） | ACoworkWebSite | Bots 入口 |

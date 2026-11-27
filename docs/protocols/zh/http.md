@@ -1408,7 +1408,7 @@ Authorization: Bearer <token>
 Content-Type: multipart/form-data; boundary=----abc
 
 ------abc
-Content-Disposition: form-data; name="package"; filename="hello.agent"
+Content-Disposition: form-data; name="package"; filename="hello.bot"
 Content-Type: application/octet-stream
 
 <binary>

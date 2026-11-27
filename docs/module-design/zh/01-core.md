@@ -37,7 +37,7 @@ crates/acowork-core/
 ### manifest.rs
 
 ```rust
-/// .agent 包的 manifest.toml 完整数据结构
+/// .bot 包的 manifest.toml 完整数据结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentManifest {
     pub agent_id: String,

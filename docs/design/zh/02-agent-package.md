@@ -1,4 +1,4 @@
-# Bot 打包格式（.agent）
+# Bot 打包格式（.bot）
 
 > 版本：v3.4 | 更新日期：2026-11-23
 
@@ -11,7 +11,7 @@
 `.bot` 文件本质是一个 ZIP 压缩包。Bot 包**不含可执行文件**，只包含配置、Prompt 和数据。由 Bot Runtime 二进制加载执行。
 
 ```
-<agent_id>.agent
+<agent_id>.bot
 ├── manifest.toml          # 必需，元数据 + LLM 配置 + 权限 + 工具声明
 ├── prompts/               # 提示词模板（ADR-120）
 │   ├── system.md          # 角色身份：通用属性（专长、原则、表达方式），与业务场景无关
@@ -55,7 +55,7 @@
 采用类似 APK Signature Scheme v2 的思路，在 ZIP 的 Central Directory 之前插入一个 Signing Block，签名覆盖整个 ZIP 的所有内容（Local Files + Central Directory + End of Directory），而非将签名文件放在 ZIP 内部的 `META-INF/` 目录中（后者可被 strip 攻击绕过）：
 
 ```
-.agent ZIP 结构：
+.bot ZIP 结构：
 ┌──────────────────────┐
 │   ZIP Local Files    │  ← 被签名覆盖
 │   (manifest.toml,    │
@@ -110,7 +110,7 @@ Phase 1 实现两类签名身份。未来扩展阶段将引入 Distribution Key�
 > **Phase 1 说明**：当前阶段签名验证为可选——未签名的 .bot 包允许安装但记录警告日志。严格的签名强制验证将在 Phase 2 实施。
 
 ```
-用户安装 .agent 包
+用户安装 .bot 包
        │
        ▼
 1. 解析 ZIP，提取 Signing Block
@@ -185,18 +185,18 @@ label = "Trusted Weather Developer"
 # 生成开发者密钥对
 acowork-keygen --alias my-key --output ./keys/
 
-# 签名 .agent 包
+# 签名 .bot 包
 acowork-sign \
     --key ./keys/my-key.pem \
     --cert ./keys/my-key.crt \
-    --input ./build/com.example.weather.unsigned.agent \
-    --output ./build/com.example.weather.agent
+    --input ./build/com.example.weather.unsigned.bot \
+    --output ./build/com.example.weather.bot
 
 # 验证签名
-acowork-verify ./build/com.example.weather.agent
+acowork-verify ./build/com.example.weather.bot
 
 # 查看签名信息
-acowork-verify --verbose ./build/com.example.weather.agent
+acowork-verify --verbose ./build/com.example.weather.bot
 # 输出：Signer: CN=Zhang San, O=Example Corp
 #       Digest: SHA-256
 #       Valid from: 2026-01-01 to 2027-01-01
@@ -220,8 +220,8 @@ acowork-verify --verbose ./build/com.example.weather.agent
 ```bash
 # 使用 --debug 自动选用 debug key
 acowork-sign --debug \
-    --input ./build/com.example.weather.unsigned.agent \
-    --output ./build/com.example.weather.debug.agent
+    --input ./build/com.example.weather.unsigned.bot \
+    --output ./build/com.example.weather.debug.bot
 ```
 
 Gateway 安装 debug 包时的行为：

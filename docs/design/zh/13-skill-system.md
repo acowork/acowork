@@ -12,7 +12,7 @@ Skill 系统采用**双层模型**：SKILL.md 作为静态定义层（发布态�
 
 ```
 Skill System
-├── Definition Layer（静态）    ← SKILL.md 文件，随 .agent 包分发
+├── Definition Layer（静态）    ← SKILL.md 文件，随 .bot 包分发
 │   ├── YAML frontmatter        元数据（名称、触发词、工具依赖、模型兼容性快照）
 │   └── Markdown body           指令正文（执行步骤、注意事项、输出格式）
 │
@@ -44,7 +44,7 @@ SKILL.md 采用 YAML frontmatter + Markdown body 格式，兼容 Bot Skills 开�
 ### 2.1 文件位置
 
 ```
-<agent_id>.agent
+<agent_id>.bot
 └── skills/
     └── <skill_name>/
         ├── SKILL.md           # 必需，Skill 定义

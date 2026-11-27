@@ -1,4 +1,4 @@
-# Bot Packaging Format (.agent)
+# Bot Packaging Format (.bot)
 
 > Version: v3.4 | Last Updated: 2026-11-23
 
@@ -11,7 +11,7 @@
 The `.bot` file is essentially a ZIP archive. Bot packages **contain no executable code** — only configuration, Prompts, and data. The Bot Runtime binary loads and executes them.
 
 ```
-<agent_id>.agent
+<agent_id>.bot
 ├── manifest.toml          # Required: metadata + LLM config + permissions + tool declarations
 ├── prompts/               # Prompt templates (ADR-120)
 │   ├── system.md          # Role identity: general attributes (expertise, principles, expression); scenario-agnostic
@@ -55,7 +55,7 @@ Filenames in `OVERRIDABLE_PROMPTS` (`summary.md`, `title.md`, `compact-template.
 Following the approach of APK Signature Scheme v2, a Signing Block is inserted before the ZIP Central Directory. The signature covers all ZIP contents (Local Files + Central Directory + End of Directory), rather than placing signature files inside the ZIP's `META-INF/` directory (which can be bypassed via strip attacks):
 
 ```
-.agent ZIP Structure:
+.bot ZIP Structure:
 ┌──────────────────────┐
 │   ZIP Local Files    │  ← covered by signature
 │   (manifest.toml,    │
@@ -110,7 +110,7 @@ Phase 1 implements two signing identities. Future phases will introduce Distribu
 > **Phase 1 Note**: Signature verification is optional in the current phase — unsigned .bot packages are allowed to install but generate a warning log. Strict enforcement will be implemented in Phase 2.
 
 ```
-User installs .agent package
+User installs .bot package
        │
        ▼
 1. Parse ZIP, extract Signing Block
@@ -185,18 +185,18 @@ label = "Trusted Weather Developer"
 # Generate developer key pair
 acowork-keygen --alias my-key --output ./keys/
 
-# Sign .agent package
+# Sign .bot package
 acowork-sign \
     --key ./keys/my-key.pem \
     --cert ./keys/my-key.crt \
-    --input ./build/com.example.weather.unsigned.agent \
-    --output ./build/com.example.weather.agent
+    --input ./build/com.example.weather.unsigned.bot \
+    --output ./build/com.example.weather.bot
 
 # Verify signature
-acowork-verify ./build/com.example.weather.agent
+acowork-verify ./build/com.example.weather.bot
 
 # View signature information
-acowork-verify --verbose ./build/com.example.weather.agent
+acowork-verify --verbose ./build/com.example.weather.bot
 # Output: Signer: CN=Zhang San, O=Example Corp
 #         Digest: SHA-256
 #         Valid from: 2026-01-01 to 2027-01-01
@@ -220,8 +220,8 @@ A debug key is auto-generated on first run of the `acowork` CLI:
 ```bash
 # Use --debug to auto-select debug key
 acowork-sign --debug \
-    --input ./build/com.example.weather.unsigned.agent \
-    --output ./build/com.example.weather.debug.agent
+    --input ./build/com.example.weather.unsigned.bot \
+    --output ./build/com.example.weather.debug.bot
 ```
 
 Gateway behavior when installing debug packages:

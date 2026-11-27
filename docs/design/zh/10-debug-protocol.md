@@ -717,18 +717,18 @@ Step 2: 清理
   └─ 重置 config/ 为默认值（可选）
 
 Step 3: 打包
-  ├─ 按 .agent 包格式打包为 ZIP
-  └─ 输出到 build/<agent_id>-<version>.unsigned.agent
+  ├─ 按 .bot 包格式打包为 ZIP
+  └─ 输出到 build/<agent_id>-<version>.unsigned.bot
 
 Step 4: 签名
   ├─ 调用 acowork-sign 签名
   ├─ 可选：选择密钥（已有 / 新生成）
-  └─ 输出 build/<agent_id>-<version>.agent
+  └─ 输出 build/<agent_id>-<version>.bot
 
 Step 5: 分发
   ├─ 本地安装：Gateway Package Manager 安装到生产位置
   ├─ 仓库上传：推送到配置的仓库源
-  └─ 导出文件：仅保存 .agent 文件到指定路径
+  └─ 导出文件：仅保存 .bot 文件到指定路径
 ```
 
 ### 8.2 发布 API
@@ -741,13 +741,13 @@ POST /api/agents/:id/publish/prepare
 # Step 3-4: 打包 + 签名
 POST /api/agents/:id/publish/build
 body: { "sign_key": null | "/path/to/key" }
-→ { "output_path": "build/com.example.weather-1.0.0.agent" }
+→ { "output_path": "build/com.example.weather-1.0.0.bot" }
 
 # Step 5a: 安装构建产物（ADR-113：必须显式指定目标节点）
 # 名称里的 "locally" 只表示产物来源在本地，不代表默认落点是本机节点。
 # node_id 取自 GET /api/nodes 中的可用节点，Gateway 不做任何推断。
 POST /api/agents/:id/publish/install-locally
-body: { "package_path": "build/com.example.weather-1.0.0.agent", "node_id": "<node-id>" }
+body: { "package_path": "build/com.example.weather-1.0.0.bot", "node_id": "<node-id>" }
 
 # Step 5b: 导出文件
 POST /api/agents/:id/publish/export

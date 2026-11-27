@@ -14,7 +14,7 @@ Design a decentralized, high-security, scalable AI Bot runtime platform. The cor
 |---------|---------|----------|
 | zygote / ART | Bot Runtime binary | Universal execution engine — only one |
 | APK (DEX + resources) | .bot package (config + prompts + skills) | Declarative, no custom code |
-| APK Signature | .agent Signing Block | Package signing, verifies integrity and origin |
+| APK Signature | .bot Signing Block | Package signing, verifies integrity and origin |
 | ActivityManagerService | Gateway | Lifecycle management |
 | Binder IPC | MQTT pub/sub + HTTP reverse proxy | Inter-process communication (ADR-033) |
 | ContentProvider | `acowork-user` user domain | User identity and preference management |
@@ -25,7 +25,7 @@ Design a decentralized, high-security, scalable AI Bot runtime platform. The cor
 
 ## 2. Core Features
 
-- **Standardized Packaging**: Bots are distributed as compressed packages (.agent), containing configuration, Prompts, Skills, and tool declarations — **no executable code**. All packages must be signed; Gateway enforces signature verification during installation.
+- **Standardized Packaging**: Bots are distributed as compressed packages (.bot), containing configuration, Prompts, Skills, and tool declarations — **no executable code**. All packages must be signed; Gateway enforces signature verification during installation.
 - **Unified Execution Engine**: Bot Runtime is the platform's single binary, responsible for loading .bot packages and executing Bot logic (LLM interaction, tool dispatch, memory read/write).
 - **Process-Level Isolation**: Each Bot runs as an independent Bot Runtime process managed by Gateway, with its own workspace, private SQLite memory layer database, filesystem isolation, and optional resource limits (cgroups/containers).
 - **Bot Autonomy**: Bot processes connect directly to LLM APIs, execute tools autonomously, and manage permission checks without relying on Gateway to proxy business logic.

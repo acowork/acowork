@@ -116,7 +116,7 @@ mac    := HMAC-SHA256(secret, "acowork/app-session/v1|<exp>|<len>:<app_id>|<len>
 | Dimension | Decision | Rationale |
 |---|---|---|
 | Install target | **The Gateway host** (under `{data_dir}`) | The supervisor runs inside the Gateway process (`gateway/mod.rs`); a remote node hosts Runtimes today, not application processes or application data |
-| Distribution form | A single `.app` file (ZIP + Signing Block) | Reuses the `.agent` signing system; the cryptography is not rewritten |
+| Distribution form | A single `.app` file (ZIP + Signing Block) | Reuses the `.bot` signing system; the cryptography is not rewritten |
 | Trust default | **Reject unsigned packages** | Installing an app means allowing a local arbitrary process to run indefinitely |
 | memory | Still excluded | Its panel-style UI contract is undefined (§1) |
 
@@ -124,7 +124,7 @@ Remote distribution (pushing an app onto a node) is **not** covered: it would re
 
 ### 6.2 The `.app` package format
 
-A `.app` is a ZIP carrying everything the application needs to run. The key difference from `.agent` is that it **contains an executable**:
+A `.app` is a ZIP carrying everything the application needs to run. The key difference from `.bot` is that it **contains an executable**:
 
 ```
 <app_id>-<version>.app
@@ -145,7 +145,7 @@ A `.app` is a ZIP carrying everything the application needs to run. The key diff
 | Entry paths | No `..`, no absolute paths, no symlinks, no encrypted entries, no nested ZIP | Every entry, before extraction |
 | `bin/` | Must exist and `bin/{process.binary}` must be executable | Install |
 | Platform | `[package].platforms` must contain the current `(os, arch)` | Install |
-| Size | ≤ **200 MB** per package (`.agent` is 50 MB; an app ships a binary and a front end) | While streaming the upload — counted as it arrives, never buffered whole |
+| Size | ≤ **200 MB** per package (`.bot` is 50 MB; an app ships a binary and a front end) | While streaming the upload — counted as it arrives, never buffered whole |
 | Compression | `deflate` / `store` only | Extraction |
 | Unknown top-level entries | Ignored (forward compatibility), never part of any contract | Extraction |
 
@@ -219,7 +219,7 @@ The generic layer of `acowork-sign` is reused; no cryptography is rewritten:
 | Sign / verify | `sign::sign_package` / `verify::verify_package` as-is (independent of package semantics) |
 | Packaging | **Not** `packager::build_agent_package` (it hardcodes `manifest.toml`, `AgentManifest`, and the conversations/memory exclusions). Add `build_app_package`, reusing the three layers above |
 
-Signing identities stay the two kinds used by `.agent` (Developer self-signed / Platform), plus one app-specific rule:
+Signing identities stay the two kinds used by `.bot` (Developer self-signed / Platform), plus one app-specific rule:
 
 | Check | Rule | Error code |
 |---|---|---|
@@ -229,7 +229,7 @@ Signing identities stay the two kinds used by `.agent` (Developer self-signed / 
 | Unsigned | Rejected by default; accepted with a `warn` only when `apps.allow_unsigned = true` | `unsigned_package` |
 | Built-in apps | No package, no signature; shipped with the Gateway build | — |
 
-> Unlike `.agent` Phase 1 ("unsigned is allowed"), `.app` **rejects unsigned packages by default**: installing an app means allowing a local process to run for the lifetime of the machine, a much larger surface than a bot package. `allow_unsigned` exists for development and should be off in production.
+> Unlike `.bot` Phase 1 ("unsigned is allowed"), `.app` **rejects unsigned packages by default**: installing an app means allowing a local process to run for the lifetime of the machine, a much larger surface than a bot package. `allow_unsigned` exists for development and should be off in production.
 
 ### 6.7 Install flow
 
@@ -328,7 +328,7 @@ Every failure maps §6.8's `code` to user-facing copy.
 # Produce an unsigned package from an app source directory (uses the acowork-sign generic layer)
 dev/common/build-app.sh <app-src-dir> --version 1.0.1 --platform windows-x86_64
 
-# Sign (existing binaries, same semantics as .agent)
+# Sign (existing binaries, same semantics as .bot)
 acowork-sign --key ./keys/app-key.pem --cert ./keys/app-key.crt \
              --input ./build/pm-1.0.1.unsigned.app \
              --output ./build/pm-1.0.1.app
@@ -369,7 +369,7 @@ P3.1 is independently verifiable: package PM, install it under a different id (e
 - Delta upgrades (every install is a full package).
 - Inter-app dependency resolution (no `depends_on`).
 - Multi-platform fat packages.
-- Install hooks inside the package (`preinstall` / `postinstall`) — **no package-supplied code runs at install time**, the same red line as `.agent`.
+- Install hooks inside the package (`preinstall` / `postinstall`) — **no package-supplied code runs at install time**, the same red line as `.bot`.
 
 ---
 

@@ -37,7 +37,7 @@ Gateway 同时为两类消费者提供服务：
 
 ## 1. Package Manager
 
-- **安装**：解压 `.agent` 到 `~/.local/share/agent-gateway/agents/<agent_id>/`，校验 manifest 完整性，记录版本。安装前必须验证包签名（详见 [02-agent-package.md](./02-agent-package.md)），签名无效或与已安装版本签名不一致则拒绝安装。
+- **安装**：解压 `.bot` 到 `~/.local/share/agent-gateway/agents/<agent_id>/`，校验 manifest 完整性，记录版本。安装前必须验证包签名（详见 [02-agent-package.md](./02-agent-package.md)），签名无效或与已安装版本签名不一致则拒绝安装。
 - **卸载**：删除对应目录，可选备份用户数据（含私有 SQLite 记忆层）。
 - **升级**：保留 `data/` 和用户修改的 `config/`，替换其他文件。若 runtime_version 不兼容则提示用户。升级时校验新包签名证书指纹必须与已安装版本一致。
 - **仓库支持**：可配置多个 HTTP 仓库源（类似 apt），定期检查更新。仓库提供的 .bot 包必须经过签名。
@@ -473,7 +473,7 @@ Gateway CLI 是一个独立的二进制（`acowork`），为无 GUI 场景提供
 
 ```bash
 # Agent 管理
-acowork install <path>          # 安装 .agent 包（含签名验证）
+acowork install <path>          # 安装 .bot 包（含签名验证）
 acowork uninstall <agent_id>    # 卸载 Agent
 acowork list                    # 列出已安装 Agent 及状态
 acowork start <agent_id>       # 启动 Agent

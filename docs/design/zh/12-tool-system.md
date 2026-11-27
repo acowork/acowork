@@ -13,7 +13,7 @@
 ```
 Tool Dispatcher
 ├── Built-in Tools     # Runtime 内置，Phase 1 即可用
-├── WASM Tools         # .agent 包自带，Wasmtime 沙箱执行
+├── WASM Tools         # .bot 包自带，Wasmtime 沙箱执行
 ├── RAG Tools          # 企业 RAG 接入，查询外部知识库
 └── Gateway Tools      # 需要 Gateway 协调的操作（非 LLM tool_call 触发）
 ```
@@ -306,7 +306,7 @@ Bot 开发者编写 WASM 工具的推荐流程：
 3. 编译：
    cargo build --target wasm32-wasip2 --release
 
-4. 将 .wasm 文件放入 .agent 包的 tools/ 目录
+4. 将 .wasm 文件放入 .bot 包的 tools/ 目录
 
 5. 在 manifest.toml 中声明工具（见 3.2）
 ```

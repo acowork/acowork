@@ -50,7 +50,7 @@ The developer toolchain is complete: `acowork-sign` (with `keygen / sign / verif
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| PKG‑01 | Bots are distributed as `.agent` archives containing configuration, prompts, Skills, tool declarations, **no executables** | P0 | Declarative packaging is the core premise |
+| PKG‑01 | Bots are distributed as `.bot` archives containing configuration, prompts, Skills, tool declarations, **no executables** | P0 | Declarative packaging is the core premise |
 | PKG‑02 | `.bot` packages must be signed; Gateway enforces signature verification on installation | P0 | Security baseline |
 | PKG‑03 | Support two signing identities: Developer (self‑signed) and Platform (platform‑issued) | P0 | Phase 1 minimal signing model |
 | PKG‑04 | System Bots must be signed with the Platform Key | P0 | Prevent impersonation of system Bots |

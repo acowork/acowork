@@ -13,7 +13,7 @@ crates/acowork-gateway/
     │   └── state.rs               # global state (installed Agents, running Agents etc.)
     ├── package_manager/
     │   ├── mod.rs
-    │   ├── install.rs             # .agent package install (extract + signature verify + manifest check)
+    │   ├── install.rs             # .bot package install (extract + signature verify + manifest check)
     │   ├── uninstall.rs           # uninstall (optional backup SQLite memory)
     │   ├── upgrade.rs             # upgrade (preserve data/ + config/, verify signature consistency)
     │   └── repository.rs          # remote repository source (HTTP, Phase 5)

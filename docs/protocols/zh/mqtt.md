@@ -514,7 +514,7 @@ sequenceDiagram
     Note over GW,BROKER: Gateway 本步仅连接 broker；后续 Global Resources Publisher 后台 loop 检测 provider/mcp/lsp/embedding 状态变化后 PUBLISH acowork/global/{kind} (Retained)
 
     Note over GW,RT: 2. Gateway spawn Runtime 进程
-    GW->>RT: spawn (命令行/env: --agent-id, --package-path=.agent 包, --work-dir, --config-dir, --mqtt-port, --http-port=0)
+    GW->>RT: spawn (命令行/env: --agent-id, --package-path=.bot 包, --work-dir, --config-dir, --mqtt-port, --http-port=0)
 
     Note over RT: 3. Runtime 启动：加载本地配置（纯本地文件读写，Gateway 完全不参与）
     RT->>RT: 启动 localhost HTTP server（--http-port=0 分配随机端口）

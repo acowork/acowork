@@ -1528,7 +1528,7 @@ AutobiographicalNode 是 Bot 对自身的认知记录，例如：
 ### 5.5 PackageManager 实现要求
 
 ```rust
-/// Directories that are always excluded when building an .agent package.
+/// Directories that are always excluded when building an .bot package.
 const PACKAGE_ALWAYS_EXCLUDE_DIRS: &[&str] = &[
     "memory",     // SQLite raw DB (exported via node-type filter)
     "workspace",
@@ -1541,7 +1541,7 @@ const PACKAGE_DEFAULT_EXCLUDE_DIRS: &[&str] = &[
     "config",         // User configs
 ];
 
-/// File patterns to always exclude when building an .agent package.
+/// File patterns to always exclude when building an .bot package.
 const PACKAGE_EXCLUDE_PATTERNS: &[&str] = &[
     "*.log",
     "*.tmp",
@@ -1566,7 +1566,7 @@ impl Default for PackageOptions {
     }
 }
 
-/// Build an .agent package from an installed agent directory.
+/// Build an .bot package from an installed agent directory.
 pub fn build_agent_package(
     agent_dir: &Path,
     output: &Path,

@@ -291,7 +291,7 @@
 ```
 ┌────────────────────────────┐
 │ ✨ Create Agent            │  → 打开 CreateWizard（在线创建）
-│ ＋ Install Agent           │  → 打开 .agent 文件选择并安装
+│ ＋ Install Agent           │  → 打开 .bot 文件选择并安装
 └────────────────────────────┘
 ```
 

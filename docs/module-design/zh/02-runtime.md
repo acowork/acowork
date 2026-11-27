@@ -17,7 +17,7 @@ crates/acowork-runtime/
     │   └── budget_guard.rs        # 本地预算预检
     ├── package/
     │   ├── mod.rs
-    │   ├── loader.rs              # .agent ZIP 解析 + manifest 校验
+    │   ├── loader.rs              # .bot ZIP 解析 + manifest 校验
     │   └── prompt_builder.rs      # 从 prompts/ + skills/ 组装 system prompt
     ├── providers/
     │   ├── mod.rs                 # Provider 工厂 + 路由

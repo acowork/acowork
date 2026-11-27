@@ -80,7 +80,7 @@ ACowork 装机后的第一个真实问题不是"怎么用"，而是"能装什么
 | 新装用户 | 装完 ACowork，不知道能装什么 | ✅ 默认 Tab 就是列表 |
 | 有明确需求者 | "我要个写 PRD 的 bot" | ✅ 客户端搜索 |
 | 谨慎者 | 担心 bot 在自己机器上干什么 | ✅ 权限 + 高危警示 + 签名渠道；⚠️ 无本地信任锚（§12 R3） |
-| 开发者 | 自己打了 `.agent`，要装到某台机器 | ✅ Local tab + 节点选择 |
+| 开发者 | 自己打了 `.bot`，要装到某台机器 | ✅ Local tab + 节点选择 |
 | 多机用户 | 同一个包要装到不同节点 | ✅ 底部节点栏 |
 
 ---
@@ -159,7 +159,7 @@ Cloudflare Pages 对不存在的路径返回 **200 + HTML**（实测 `/data/nope
 | REQ-008 | 底部安装目标栏：单节点只显示节点名；多在线节点可切换 | P0 | 切换后计数与安装目标随之变化；节点名取自 `node_name ?? hostname ?? node_id` |
 | REQ-009 | 无在线节点，或目标节点 `can_manage === false` → 安装动作禁用并说明原因 | P0 | 按钮 `disabled`，`title`/辅助文本给出原因；不出现"点了才失败" |
 | REQ-010 | 客户端搜索 | P0 | 匹配 `display_name` / `name` / `role` / `description` / `labels` / `capability_keys` / `skills`；大小写不敏感；多词 AND；无结果显示空态 + 清除 |
-| REQ-011 | Local Tab：选择文件按钮 + `.agent` 说明文案 | P0 | 走现有 `install_agent` 链路；非 `.bot` 文件被拒并提示 |
+| REQ-011 | Local Tab：选择文件按钮 + `.bot` 说明文案 | P0 | 走现有 `install_agent` 链路；非 `.bot` 文件被拒并提示 |
 | REQ-012 | Hub 拉取失败 → 明确错误 + 重试；Local Tab 不受影响 | P0 | 断网时 Bot 库显示错误态，切到 Local 仍可安装 |
 | REQ-013 | 安装结果收尾：刷新列表、选中新实例、toast、**保留对话框** | P0 | 沿用现有 `doInstall` 行为（`AgentList.tsx:266`）；成功**不自动关闭**对话框——一次打开里可连装多个，关闭只由页脚「关闭」/ 头部 `×` / Esc / 遮罩触发 |
 | REQ-014 | 同时只允许一个安装操作在飞 | P0 | 安装期间所有卡片按钮与 Local 入口禁用或显示进行中；不出现第二个并行提交 |
@@ -168,7 +168,7 @@ Cloudflare Pages 对不存在的路径返回 **200 + HTML**（实测 `/data/nope
 | REQ-017 | `deprecated` 条目显示警示与原因 | P1 | 卡片可见标记；仍可安装 |
 | REQ-018 | 卡片显示「本节点已有 N 个实例」灰字（信息性，不改变按钮语义） | P1 | 文案随节点切换变化；不可点击、不参与任何判断 |
 | REQ-019 | 五个语言包 key 齐备 | P0 | `npm run check:i18n` 通过（`{{}}` 双括号；en + zh-CN 必须齐全） |
-| REQ-020 | Local Tab 支持拖放 `.agent` 入对话框 | P1 | 见 F11：先验证 Tauri 窗口级 drag-drop 与 HTML5 `drop` 是否冲突；验证不通则退回"选择文件"单一路径，不作为阻塞项 |
+| REQ-020 | Local Tab 支持拖放 `.bot` 入对话框 | P1 | 见 F11：先验证 Tauri 窗口级 drag-drop 与 HTML5 `drop` 是否冲突；验证不通则退回"选择文件"单一路径，不作为阻塞项 |
 
 ---
 
@@ -199,7 +199,7 @@ graph TD
     D --> E["安装: ensure(目标节点)"]
     D --> F["⋯ 再装一个实例: install(目标节点)"]
     B --> G["本地文件: 选择文件 (拖放 P1)"]
-    E --> H["下载 .agent → 校验 sha256"]
+    E --> H["下载 .bot → 校验 sha256"]
     F --> H
     G --> I["复用 install_agent(packagePath)"]
     H --> I
@@ -345,7 +345,7 @@ Tab 文案 `本地文件` → `本地`（zh）/ `Local`（en）：它现在是�
 | 安装目录 `resource_dir/agent-packages` | ❌ `targets: all` 含 MSI（perMachine）时装在 `Program Files`，普通用户写不进；macOS 往 `.app` 里写会破坏 bundle 签名；应用升级整目录覆盖会吞掉用户文件；dev 下它是 `target/debug` |
 | node 自己的 `packages_dir`（默认 `{gateway base_dir}/packages`） | ❌ 只在 local 单机成立，remote 模式读不到；且把 node 的内部目录布局变成 UI 契约（ADR-009 §5 边界） |
 
-播种：首次启动（或目录不存在时）把 `resource_dir/agent-packages/*.agent` 复制进去。**幂等规则**：按文件名逐个判断，目标已存在则跳过（不比字节、不覆盖）。因此用户删掉的种子不会在下次启动复活，用户改过的包不会被回滚。
+播种：首次启动（或目录不存在时）把 `resource_dir/agent-packages/*.bot` 复制进去。**幂等规则**：按文件名逐个判断，目标已存在则跳过（不比字节、不覆盖）。因此用户删掉的种子不会在下次启动复活，用户改过的包不会被回滚。
 
 #### D11 列表主按钮走 `ensure`，「再装一个实例」走 `/install`
 
@@ -353,7 +353,7 @@ Tab 文案 `本地文件` → `本地`（zh）/ `Local`（en）：它现在是�
 
 #### D12 publish 产物回写 = 复制进库目录
 
-publish 侧不新增任何写盘能力：`build_publish` 已经返回 `output_path`（node 侧写 `{agent_id}-{version}.agent`，[publish.rs:410](../../../core/acowork-node/src/package/publish.rs#L410)；Gateway 传空 `output_dir` 让它落在 node 的 `packages_dir`，[publish_api.rs:111](../../../core/acowork-gateway/src/http/publish_api.rs#L111)）。向导走到 distribute 步骤时，Desktop 把该文件**复制**进库目录，随后 toast「已出现在本地列表」。
+publish 侧不新增任何写盘能力：`build_publish` 已经返回 `output_path`（node 侧写 `{agent_id}-{version}.bot`，[publish.rs:410](../../../core/acowork-node/src/package/publish.rs#L410)；Gateway 传空 `output_dir` 让它落在 node 的 `packages_dir`，[publish_api.rs:111](../../../core/acowork-gateway/src/http/publish_api.rs#L111)）。向导走到 distribute 步骤时，Desktop 把该文件**复制**进库目录，随后 toast「已出现在本地列表」。
 
 选复制、而不是给 node 传 `output_dir` 让它直接写库目录：node 写桌面端目录等于跨进程猜路径，而复制是桌面端对自己文件系统的操作，边界干净、失败也可控。
 
@@ -397,7 +397,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | REQ-021 | 对话框默认选中 Local | P0 | 打开即见文件列表或空态，不发任何网络请求即可用；键盘可切 tab |
 | REQ-022 | 打开对话框即后台预热 Hub index（不 await） | P0 | 打开后立即渲染 Local；切到 Library 时命中缓存直接出卡片；预热失败不弹任何 toast |
-| REQ-023 | Local 列表渲染库目录下全部 `*.agent`，按文件名升序 | P0 | 7 个内置包首屏全出；非 `.bot` 文件不出现 |
+| REQ-023 | Local 列表渲染库目录下全部 `*.bot`，按文件名升序 | P0 | 7 个内置包首屏全出；非 `.bot` 文件不出现 |
 | REQ-024 | 每行含：文件名、`agent_id`、`version`、`name`、大小、权限项数，`description` 两行截断 | P0 | 全部字段来自包内 `manifest.toml`，**不靠文件名猜身份** |
 | REQ-025 | 末行固定「+ 添加 bot 文件」，走现有选择文件路径 | P0 | 列表为空时仍可见、可点；选中后的行为与 v0.1 REQ-011 一致 |
 | REQ-026 | 目标节点无该包实例时，行/卡片的 `安装` 调 `ensure` | P0 | 连点两次不产生第二个实例；`already_present` 时选中已有实例并提示"已在本节点" |
@@ -431,7 +431,7 @@ flowchart LR
 | F12 | `bundled_agent_package_path` 是硬编码 match（[agent.rs:384](../../../apps/acowork-desktop/src-tauri/src/commands/agent.rs#L384)） | 列表化后必须改成枚举目录，否则新增一个内置包要改两处（打包 + match），必漏 |
 | F13 | `inspect_local_package` 只返回 `file_name` / `size_bytes` / `agent_id`（[hub.rs:66](../../../apps/acowork-desktop/src-tauri/src/commands/hub.rs#L66)、[agentHub.ts:76](../../../apps/acowork-desktop/src/lib/agentHub.ts#L76)） | 画行需要 `name` / `version` / `description` / `permissions`，须新增**批量**命令一次读完 N 个 `manifest.toml`；不要在前端 N 次 invoke |
 | F14 | 播种必须幂等且**不覆盖** | 每次启动全量复制的写法会导致：用户改过的包被回滚、用户删掉的种子每次复活 |
-| F15 | 产物名 `{agent_id}-{version}.agent`（[publish.rs:410](../../../core/acowork-node/src/package/publish.rs#L410)） | 同版本重发 = 覆盖同名文件（正常）；不同版本 = 两行，禁止按 `agent_id` 去重（REQ-030） |
+| F15 | 产物名 `{agent_id}-{version}.bot`（[publish.rs:410](../../../core/acowork-node/src/package/publish.rs#L410)） | 同版本重发 = 覆盖同名文件（正常）；不同版本 = 两行，禁止按 `agent_id` 去重（REQ-030） |
 | F16 | Gateway `dev_mode` 默认 `true`（[config.rs:894](../../../core/acowork-gateway/src/config.rs#L894)），验签失败只 `tracing::warn`（[install.rs:58](../../../core/acowork-node/src/package/install.rs#L58)） | D13 的"错误翻译"在默认配置下几乎不触发；它是配置收敛到严格模式后唯一的失败文案，不要因为暂时用不上就删 |
 | F17 | ~~桌面端 `installAgent` 传的 `devMode: true` 是死参数~~ **已订正（Local 库卡）**：选"删掉传参" | 原 `devMode: true` 被 Gateway `read_agent_upload` 的 `_ => {}` 丢弃（[agents.rs:1234](../../../core/acowork-gateway/src/http/agents.rs#L1234)）。已从 `agentStore.installAgent` 的 invoke 参数中删除，并从 `install_agent` 命令签名里去掉 `dev_mode`（唯一调用方是本前端，无人能选）。验签强度只由 Gateway 的 `dev_mode` 配置决定（F3/F16）。`GatewayClient::install_agent` 仍保留 `dev_mode` 形参，因为 `install_bundled_agent`（F5）与 Hub 安装链路在用 |
 

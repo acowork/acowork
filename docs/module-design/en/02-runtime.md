@@ -17,7 +17,7 @@ crates/acowork-runtime/
     │   └── budget_guard.rs        # local budget pre-check
     ├── package/
     │   ├── mod.rs
-    │   ├── loader.rs              # .agent ZIP parsing + manifest validation
+    │   ├── loader.rs              # .bot ZIP parsing + manifest validation
     │   └── prompt_builder.rs      # assemble system prompt from prompts/ + skills/
     ├── providers/
     │   ├─── mod.rs                 # Provider factory + routing

@@ -2,7 +2,7 @@
 
 ## Overview
 
-ACowork is a decentralized, high-security, scalable AI Agent runtime platform. Each Agent is a declarative `.agent` package (config + prompts + skills, no binary), loaded by a universal Runtime binary and managed by a Gateway.
+ACowork is a decentralized, high-security, scalable AI Agent runtime platform. Each Agent is a declarative `.bot` package (config + prompts + skills, no binary), loaded by a universal Runtime binary and managed by a Gateway.
 
 > **Contributing?** This file is the architecture and conventions reference. The
 > contribution contract — build, test, red-line gates, commit format, review process —
@@ -16,7 +16,7 @@ ACowork is a decentralized, high-security, scalable AI Agent runtime platform. E
 Gitee remote is a mirror, GitHub is the review home). Every job calls `dev/ci.sh`, so the
 script is the contract and the workflow is only a scheduler: `redlines` (every
 architecture grep — the list is `run_all_redlines`),
-`core` (check + clippy + test + integration + strict embed), `packages` (shipped `.agent`
+`core` (check + clippy + test + integration + strict embed), `packages` (shipped `.bot`
 freshness + hub mirror interop), `web` (desktop + mobile `npm run test` and `build`).
 
 **Releases** are separate: an annotated `v*` tag triggers
@@ -114,7 +114,7 @@ docs/                  # Public architecture docs
   runbooks/            # Operator runbooks
 
 agents/                # Agent package SOURCES (`<name>-agent/`) + shipped
-                       # build artifacts (`agent-packages/*.agent`)
+                       # build artifacts (`agent-packages/*.bot`)
 dev/                   # Build / package / CI scripts
 ```
 
@@ -123,7 +123,7 @@ Crate specs: [docs/module-design/](docs/module-design/) · Design: [docs/design/
 ### Agent packages and the hub
 
 `agents/<name>-agent/` (manifest + prompts + skills + assets) is the single
-source of truth for the platform agents. `agents/agent-packages/<agent_id>.agent`
+source of truth for the platform agents. `agents/agent-packages/<agent_id>.bot`
 is a build artifact of it — rebuild with `dev/common/build-agent.sh` and commit
 the rebuilt package in the same change; `acowork-sign`'s `example_packages` test
 fails when the zip and the source tree disagree.
