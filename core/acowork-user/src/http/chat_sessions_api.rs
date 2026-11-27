@@ -48,10 +48,10 @@ use crate::state::AppState;
 const MAX_BODY_CHARS: usize = 8000;
 const DEFAULT_PAGE: usize = 50;
 const MAX_PAGE: usize = 200;
-/// Multipart envelope of the largest attachment class (documents, see
-/// [`crate::chat::MAX_DOCUMENT_BYTES`]) plus slack. Same rule as
+/// Multipart envelope: one hop's worth plus slack, the most a single request
+/// can carry (ADR-122 D6/D9 — anything bigger takes `/uploads`). Same rule as
 /// `chat_api::UPLOAD_BODY_LIMIT`.
-const UPLOAD_BODY_LIMIT: usize = crate::chat::MAX_DOCUMENT_BYTES as usize + 1024 * 1024;
+const UPLOAD_BODY_LIMIT: usize = crate::http::GLOBAL_BODY_LIMIT + 1024 * 1024;
 /// Streaming chunk for attachment downloads.
 const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
@@ -1262,8 +1262,9 @@ async fn upload_attachment(
     }
     let bytes = bytes.ok_or_else(|| ApiError::bad_request("multipart field `file` is missing"))?;
     // Checked here as well as in the store so the caller gets a 413 instead
-    // of a generic 500; `limit_for` is the single source of the ceiling.
-    let limit = crate::chat::limit_for(&mime);
+    // of a generic 500; `max_attachment_bytes` is the single source of the
+    // ceiling (ADR-122 D6).
+    let limit = crate::chat::max_attachment_bytes();
     if bytes.len() as u64 > limit {
         return Err(ApiError::payload_too_large(&format!(
             "attachment exceeds {limit} bytes"

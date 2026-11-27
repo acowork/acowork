@@ -57,11 +57,13 @@ const MAX_PAGE: usize = 200;
 
 /// Body cap for the upload route: the largest document plus room for the
 /// multipart envelope. The global [`crate::http::GLOBAL_BODY_LIMIT`]
-/// (64 MiB) is below the 100 MB documents of ADR-076 §决策 9, so this route
-/// raises it for itself rather than lifting the cap for every endpoint.
+/// (64 MiB) is below the attachment ceiling (ADR-122 D6: 1 GiB by default), so
+/// this route raises it for itself rather than lifting the cap for every
+/// endpoint — but only by one hop's worth: a single multipart request cannot
+/// carry more than one hop anyway, so a larger file belongs on `/uploads`.
 /// ponytail: the envelope slack is a guess (boundaries + a filename); a file
-/// within ~1 MiB of the ceiling can still be rejected by the outer limit.
-const UPLOAD_BODY_LIMIT: usize = chat::MAX_DOCUMENT_BYTES as usize + 1024 * 1024;
+/// within ~1 MiB of the hop cap can still be rejected by the outer limit.
+const UPLOAD_BODY_LIMIT: usize = crate::http::GLOBAL_BODY_LIMIT + 1024 * 1024;
 
 /// The chat routes (merged only under `multi_user`).
 pub fn chat_routes() -> Router<AppState> {
@@ -495,8 +497,9 @@ async fn upload_attachment(
     }
 
     // Checked here as well as in the store so the caller gets a 413 instead
-    // of a generic 500; `limit_for` is the single source of the ceiling.
-    let limit = chat::limit_for(&mime);
+    // of a generic 500; `max_attachment_bytes` is the single source of the
+    // ceiling (ADR-122 D6).
+    let limit = chat::max_attachment_bytes();
     if bytes.len() as u64 > limit {
         return Err(ApiError::payload_too_large(&format!(
             "attachment exceeds {limit} bytes"
@@ -1472,20 +1475,27 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-        // Over the image ceiling → 413. 25 MiB, so the global body limit is
-        // not what rejects it — the per-kind check is.
-        let too_big = vec![0u8; chat::MAX_IMAGE_BYTES as usize + 1];
+        // The ceiling itself is probed where it is enforced without
+        // allocating a gigabyte: `chat::one_ceiling_governs_every_attachment_class`
+        // (declared size) and `acowork_core::upload` (store `create`). What is
+        // left to prove here is that a body over one hop is refused by the
+        // route limit rather than buffered.
+        let over_hop = vec![0u8; crate::http::GLOBAL_BODY_LIMIT + 1024 * 1024];
         let resp = router
             .clone()
             .oneshot(upload_req(
                 &files_uri(alice, bob),
-                multipart("file", "big.png", "image/png", &too_big),
+                multipart("file", "big.png", "image/png", &over_hop),
                 Some(token),
             ))
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        drop(too_big);
+        assert!(
+            resp.status().is_client_error(),
+            "a body past one hop must be refused, got {}",
+            resp.status()
+        );
+        drop(over_hop);
 
         // No `file` field at all.
         let resp = router
@@ -1532,19 +1542,20 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
-    /// ADR-076 §决策 9 allows 100 MB documents, but the Gateway's root
-    /// router caps every body at [`GLOBAL_BODY_LIMIT`] (64 MiB). The upload
-    /// route raises that for itself only — this is the regression guard for
-    /// that override, since a silently-restored 64 MiB would only ever show
-    /// up as a 413 on a large file.
+    /// The Gateway's root router caps every body at [`GLOBAL_BODY_LIMIT`]
+    /// (64 MiB) and the upload route raises that for itself by one envelope's
+    /// worth (ADR-122 D6: a single request carries at most one hop; anything
+    /// bigger takes `/uploads`). This is the regression guard for that
+    /// override, since a silently-restored 64 MiB would only ever show up as a
+    /// 413 on a large file.
     #[tokio::test]
     async fn the_upload_route_raises_the_global_body_limit() {
         let f = fixture().await;
         let (router, alice, bob) = (&f.router, &f.alice, &f.bob);
 
         // A field nobody reads is still bytes off the wire: the parser drains
-        // it, so this body must clear the body limit without storing 65 MiB.
-        let mut body = vec![b'x'; crate::http::GLOBAL_BODY_LIMIT + 1024 * 1024];
+        // it, so this body must clear the body limit without storing it.
+        let mut body = vec![b'x'; crate::http::GLOBAL_BODY_LIMIT + 4096];
         body.extend_from_slice(&multipart("file", "small.txt", "text/plain", b"ok"));
 
         let resp = router

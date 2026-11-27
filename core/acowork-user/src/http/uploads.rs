@@ -43,9 +43,8 @@ pub struct CreateUploadBody {
     pub size: u64,
     /// Declared `sha256`, 64 hex characters.
     pub sha256: String,
-    /// Declared MIME type (the browser's `File.type`). Checked here so an
-    /// over-limit file is refused **before** its bytes are sent; the store
-    /// itself knows nothing about attachment classes.
+    /// Declared MIME type (the browser's `File.type`), carried so the stored
+    /// attachment is typed correctly on `complete`.
     #[serde(default)]
     pub mime: String,
 }
@@ -101,12 +100,6 @@ async fn create_upload(
     State(state): State<AppState>,
     Json(body): Json<CreateUploadBody>,
 ) -> Result<Response, ApiError> {
-    let limit = crate::chat::limit_for(&body.mime);
-    if body.size > limit {
-        return Err(ApiError::payload_too_large(&format!(
-            "attachment exceeds {limit} bytes"
-        )));
-    }
     let id = state
         .uploads
         .create(&body.name, body.size, &body.sha256)
@@ -419,31 +412,5 @@ mod tests {
             json(resp).await["id"].as_str(),
             Some(attachment_id.as_str())
         );
-    }
-
-    /// The attachment-class ceiling is enforced at `create`, before a byte is
-    /// sent — the chunk store itself only knows the deployment-wide limit.
-    #[tokio::test]
-    async fn an_over_class_limit_declaration_is_refused_before_any_chunk() {
-        let dir = test_support::temp_dir("chunklimit");
-        let app = router(&dir);
-        let admin = login(&app, "root", test_support::PWD).await;
-        let (sid, token) = session_for(&app, &admin, "dave").await;
-
-        let too_big = crate::chat::MAX_IMAGE_BYTES + 1;
-        let resp = app
-            .clone()
-            .oneshot(req(
-                "POST",
-                &format!("/api/chat-sessions/{sid}/uploads"),
-                Some(&format!(
-                    r#"{{"name":"huge.png","size":{too_big},"sha256":"{}","mime":"image/png"}}"#,
-                    "0".repeat(64)
-                )),
-                Some(&token),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }

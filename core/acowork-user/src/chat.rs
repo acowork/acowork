@@ -47,23 +47,36 @@ use serde::{Deserialize, Serialize};
 /// Separator inside `chat_id` (`min__max`).
 pub const SEP: &str = "__";
 
-/// Upload ceilings, in bytes (ADR-076 §决策 9: images 25 MB, documents
-/// 100 MB, no virus scan).
-pub const MAX_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
-pub const MAX_DOCUMENT_BYTES: u64 = 100 * 1024 * 1024;
+/// The single-file ceiling for a chat attachment (ADR-122 D6).
+///
+/// ADR-076 §决策 9 used to split it by mime (images 25 MB / documents 100 MB),
+/// sized against the transport of the day: one request had to carry the whole
+/// file, and 100 MB forced the upload route above the 64 MiB hop cap. Chunking
+/// removed that reason, so the per-class pair is gone and this delegates to the
+/// one deployment-wide number every upload store enforces
+/// (`ACOWORK_MAX_UPLOAD_BYTES`, 1 GiB by default). Keeping both would be two
+/// ceilings for one file, decided by which route it happened to take.
+///
+/// What is *not* an upload limit, and stays separate: the thumbnail decode
+/// budget below (a rendering cost, not policy) and the transport — a single
+/// multipart request can still only carry one hop's worth, which is why
+/// anything above a chunk must use `/uploads`.
+pub fn max_attachment_bytes() -> u64 {
+    acowork_core::upload::max_file_bytes()
+}
 
 /// Cap on the stored filename, in characters. Cosmetic only — the name never
 /// reaches a path — but it does reach a response header.
 const MAX_FILENAME_CHARS: usize = 200;
 
-/// The size ceiling for a given mime type.
-pub fn limit_for(mime: &str) -> u64 {
-    if mime.starts_with("image/") {
-        MAX_IMAGE_BYTES
-    } else {
-        MAX_DOCUMENT_BYTES
-    }
-}
+/// Largest image we decode to build a thumbnail (24 MiB).
+///
+/// A decode holds the whole picture in memory, so past this a large image
+/// simply uploads without an inline preview — the chat row falls back to the
+/// file chip it already renders for any other type. This is a rendering
+/// budget, deliberately not an upload ceiling: the two were the same number
+/// only while uploads were single-request.
+const MAX_THUMB_SOURCE_BYTES: u64 = 24 * 1024 * 1024;
 
 /// Longest edge of a stored image thumbnail, in pixels. 320 px renders
 /// sharp in the 160 px chat tile at 2× and keeps a 25 MB screenshot under
@@ -152,6 +165,15 @@ fn is_text_previewable(filename: &str) -> bool {
 ///
 /// `dir` is the conversation directory; the caller owns the write order and
 /// the cleanup (see [`store_attachment`]).
+/// First `limit` bytes of a file — enough for a preview, without reading the
+/// rest of it.
+fn read_head(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(limit);
+    fs::File::open(path)?.take(limit as u64).read_to_end(&mut head)?;
+    Ok(head)
+}
+
 fn generate_thumb(
     dir: &Path,
     id: &str,
@@ -160,6 +182,9 @@ fn generate_thumb(
     filename: &str,
 ) -> Option<String> {
     if mime.starts_with("image/") {
+        if bytes.len() as u64 > MAX_THUMB_SOURCE_BYTES {
+            return None; // decode budget, not an upload ceiling
+        }
         let out = thumb_image(bytes)?;
         fs::write(attachment_thumb_path(dir, id, "jpg"), out).ok()?;
         return Some("jpg".to_string());
@@ -467,7 +492,7 @@ pub(crate) fn store_attachment_at(
         return Err("attachment is empty".to_string());
     }
     let mime = normalize_mime(mime);
-    let limit = limit_for(&mime);
+    let limit = max_attachment_bytes();
     if bytes.len() as u64 > limit {
         return Err(format!("attachment exceeds {limit} bytes"));
     }
@@ -528,7 +553,7 @@ pub(crate) fn store_attachment_from_path(
         return Err("attachment is empty".to_string());
     }
     let mime = normalize_mime(mime);
-    let limit = limit_for(&mime);
+    let limit = max_attachment_bytes();
     if size > limit {
         let _ = fs::remove_file(staged);
         return Err(format!("attachment exceeds {limit} bytes"));
@@ -552,14 +577,26 @@ pub(crate) fn store_attachment_from_path(
         return Err(format!("{}: {e}", blob.display()));
     }
 
-    // Thumbnail: decoding needs the whole image/text, so read the placed blob
-    // only when a sidecar is actually produced (never for PDFs and binaries).
-    let needs_thumb = attachment.mime.starts_with("image/") || is_text_previewable(&attachment.filename);
-    let thumb = if needs_thumb {
-        match fs::read(&blob) {
-            Ok(bytes) => generate_thumb(dir, &attachment.id, &bytes, &attachment.mime, &attachment.filename),
-            Err(_) => None,
+    // A sidecar is built only when one is actually produced, and each kind
+    // reads exactly what it needs: an image decode needs the pixels (skipped
+    // past the decode budget), a text preview needs its head — reading a 1 GiB
+    // log back off disk to preview eight lines is the failure mode this avoids.
+    let thumb = if attachment.mime.starts_with("image/") {
+        if size <= MAX_THUMB_SOURCE_BYTES {
+            fs::read(&blob)
+                .ok()
+                .and_then(|bytes| {
+                    generate_thumb(dir, &attachment.id, &bytes, &attachment.mime, &attachment.filename)
+                })
+        } else {
+            None
         }
+    } else if is_text_previewable(&attachment.filename) {
+        read_head(&blob, THUMB_TEXT_BYTES)
+            .ok()
+            .and_then(|head| {
+                generate_thumb(dir, &attachment.id, &head, &attachment.mime, &attachment.filename)
+            })
     } else {
         None
     };
@@ -729,18 +766,27 @@ mod tests {
         }
     }
 
+    /// ADR-122 D6: one ceiling for every attachment class, and it is the
+    /// deployment-wide one — the old image/document split was sized against a
+    /// transport that no longer bounds the file.
     #[test]
-    fn ceilings_split_on_the_mime_they_were_uploaded_as() {
-        assert_eq!(limit_for("image/png"), MAX_IMAGE_BYTES);
-        assert_eq!(limit_for("application/pdf"), MAX_DOCUMENT_BYTES);
-        const { assert!(MAX_IMAGE_BYTES < MAX_DOCUMENT_BYTES) };
+    fn one_ceiling_governs_every_attachment_class() {
+        assert_eq!(
+            max_attachment_bytes(),
+            acowork_core::upload::max_file_bytes()
+        );
 
         let dir = temp_dir();
-        let too_big = vec![0u8; MAX_IMAGE_BYTES as usize + 1];
-        assert!(store_attachment_at(&dir, "big.png", "image/png", &too_big).is_err());
-        // The same bytes are a fine *document* — the ceiling follows the
-        // declared type, which is why the type is validated first.
-        assert!(store_attachment_at(&dir, "big.bin", "application/zip", &too_big).is_ok());
+        let over = max_attachment_bytes() + 1;
+        // `size` is the declared total, checked before any bytes move, so the
+        // ceiling can be probed without allocating a gigabyte.
+        for mime in ["application/pdf", "image/png", "application/zip"] {
+            let staged = dir.join(format!("staged-{}.bin", mime.replace('/', "-")));
+            fs::write(&staged, b"x").expect("write staged");
+            let err = store_attachment_from_path(&dir, "big.bin", mime, &staged, over)
+                .expect_err("over the ceiling must be refused");
+            assert!(err.contains("exceeds"), "{mime}: {err}");
+        }
     }
 
     #[test]
