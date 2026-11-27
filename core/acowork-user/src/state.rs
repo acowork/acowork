@@ -56,15 +56,23 @@ pub struct AppState {
     /// purpose: a failed send is news while it is news, and nothing that restarts
     /// this service should resurrect it as history.
     pub alerts: Arc<AlertStore>,
+    /// In-flight chunked uploads (ADR-122 §3). Under `<data_dir>/.uploads/` so
+    /// the `complete` rename into a session's `files/` stays on one
+    /// filesystem, and so the TTL sweep has a single root to walk.
+    pub uploads: Arc<acowork_core::upload::UploadStore>,
 }
 
 impl AppState {
     pub fn new(config: &UserServiceConfig, auth_service: Arc<AuthService>) -> Self {
         let shared = SharedState::new(config.data_dir.clone(), config.registration_open);
+        let uploads = Arc::new(acowork_core::upload::UploadStore::new(
+            config.data_dir.join(".uploads").join("chat-sessions"),
+        ));
         Self {
             auth_service,
             shared: Arc::new(RwLock::new(shared)),
             alerts: Arc::new(AlertStore::new()),
+            uploads,
         }
     }
 

@@ -1053,6 +1053,17 @@ impl GatewayClient {
             return Err(anyhow::anyhow!("File not found: {}", file_path));
         }
 
+        // ADR-122 D9: under one chunk the single request is strictly cheaper
+        // (one roundtrip, no digest pass). Above it, the chunked route keeps
+        // peak memory at one chunk instead of the whole file — `read`-ing a
+        // 1 GiB attachment in one piece is what kept the old ceiling at 50 MiB.
+        let size = tokio::fs::metadata(file_path).await?.len();
+        if size > acowork_core::upload::CHUNK_BYTES {
+            return self
+                .upload_file_chunked(agent_id, session_id, file_path, format, width, height, size)
+                .await;
+        }
+
         let file_bytes = tokio::fs::read(file_path).await?;
 
         let url = format!(
@@ -1084,6 +1095,124 @@ impl GatewayClient {
             })
             .await?;
         parse_gateway_response(resp).await
+    }
+
+    /// Upload one file through the chunked route (ADR-122 §3).
+    ///
+    /// `POST …/uploads` states name + size + digest, each `PUT …/{id}/{offset}`
+    /// carries one 2 MiB chunk read straight off disk, then `POST …/complete`
+    /// merges, re-verifies the digest and lands the blob. Same response shape
+    /// as [`Self::upload_file`], so callers cannot tell the two apart.
+    ///
+    /// ponytail: a chunk is retried only by `send`'s token replay. A chunk that
+    /// fails on the network aborts the upload and leaves the id to the 24 h TTL
+    /// sweep — no resume across app restarts. The offset is already in the URL,
+    /// so persisting `(uploadId, offset)` is the upgrade path if users report
+    /// losing multi-GB uploads.
+    #[allow(clippy::too_many_arguments)]
+    async fn upload_file_chunked(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        file_path: &str,
+        format: &str,
+        width: Option<u32>,
+        height: Option<u32>,
+        size: u64,
+    ) -> Result<FileUploadResponse> {
+        let file_name = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("attachment.bin")
+            .to_string();
+
+        // The digest is computed by streaming: hashing a 1 GiB blob in memory
+        // would reintroduce the very ceiling this route removes.
+        let digest = {
+            let path = std::path::PathBuf::from(file_path);
+            tokio::task::spawn_blocking(move || -> Result<String> {
+                use sha2::{Digest, Sha256};
+                use std::io::Read;
+                let mut file = std::fs::File::open(&path)?;
+                let mut hasher = Sha256::new();
+                let mut buf = vec![0u8; 1 << 16];
+                loop {
+                    let n = file.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+                Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+            })
+            .await??
+        };
+
+        let base = format!(
+            "{}/api/agents/{}/sessions/{}/uploads",
+            self.base_url,
+            urlencoded(agent_id),
+            urlencoded(session_id),
+        );
+        let resp = self
+            .send(|| {
+                Ok(self.client.post(&base).json(&serde_json::json!({
+                    "name": file_name,
+                    "size": size,
+                    "sha256": digest,
+                })))
+            })
+            .await?;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Created {
+            #[allow(dead_code)]
+            chunk_bytes: u64,
+            upload_id: String,
+        }
+        let Created { upload_id, .. } = parse_gateway_response(resp).await?;
+
+        let mut file = tokio::fs::File::open(file_path).await?;
+        let chunk_bytes = acowork_core::upload::CHUNK_BYTES;
+        let mut buf = vec![0u8; chunk_bytes as usize];
+        let mut offset = 0u64;
+        while offset < size {
+            let want = std::cmp::min(chunk_bytes, size - offset) as usize;
+            tokio::io::AsyncReadExt::read_exact(&mut file, &mut buf[..want]).await?;
+            let chunk = buf[..want].to_vec();
+            let url = format!("{base}/{upload_id}/{offset}");
+            let resp = self
+                .send(|| Ok(self.client.put(&url).body(chunk.clone())))
+                .await?;
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(anyhow::anyhow!(
+                    "chunk at offset {offset} of {size} refused: HTTP {status}"
+                ));
+            }
+            offset += want as u64;
+        }
+
+        let mut query: Vec<String> = Vec::new();
+        if let Some(w) = width {
+            query.push(format!("width={w}"));
+        }
+        if let Some(h) = height {
+            query.push(format!("height={h}"));
+        }
+        let url = if query.is_empty() {
+            format!("{base}/{upload_id}/complete")
+        } else {
+            format!("{base}/{upload_id}/complete?{}", query.join("&"))
+        };
+        let resp = self.send(|| Ok(self.client.post(&url))).await?;
+        let mut landed: FileUploadResponse = parse_gateway_response(resp).await?;
+        // The runtime reports the extension it stored; for an unknown extension
+        // the caller's requested `format` is the more useful echo.
+        if landed.format.is_empty() {
+            landed.format = format.to_string();
+        }
+        Ok(landed)
     }
 
     // ── Vault ──────────────────────────────────────────────────────────

@@ -507,6 +507,73 @@ pub(crate) fn store_attachment_at(
     Ok(attachment)
 }
 
+/// Dir-level [`store_attachment`] for an already-merged staging file
+/// (ADR-122 §3): the chunked upload route verified the digest, so the bytes
+/// are already on disk and only need to be placed.
+///
+/// The blob is `rename`d into `files/<id>`, not copied — same filesystem by
+/// construction, since the chunk store lives under the same data dir. The
+/// thumbnail still needs the pixels (a decode cannot be streamed), so only
+/// the thumbnails read the file back; a document upload therefore never loads
+/// its own bytes.
+pub(crate) fn store_attachment_from_path(
+    dir: &Path,
+    filename: &str,
+    mime: &str,
+    staged: &Path,
+    size: u64,
+) -> Result<Attachment, String> {
+    if size == 0 {
+        let _ = fs::remove_file(staged);
+        return Err("attachment is empty".to_string());
+    }
+    let mime = normalize_mime(mime);
+    let limit = limit_for(&mime);
+    if size > limit {
+        let _ = fs::remove_file(staged);
+        return Err(format!("attachment exceeds {limit} bytes"));
+    }
+
+    let attachment = Attachment {
+        id: uuid::Uuid::new_v4().to_string(),
+        filename: safe_filename(filename),
+        mime: mime.clone(),
+        size,
+        thumb: None,
+    };
+
+    let fdir = files_dir(dir);
+    fs::create_dir_all(&fdir).map_err(|e| format!("{}: {e}", fdir.display()))?;
+
+    // Blob first, metadata second — same crash rule as `store_attachment_at`.
+    let blob = attachment_path(dir, &attachment.id);
+    if let Err(e) = fs::rename(staged, &blob) {
+        let _ = fs::remove_file(staged);
+        return Err(format!("{}: {e}", blob.display()));
+    }
+
+    // Thumbnail: decoding needs the whole image/text, so read the placed blob
+    // only when a sidecar is actually produced (never for PDFs and binaries).
+    let needs_thumb = attachment.mime.starts_with("image/") || is_text_previewable(&attachment.filename);
+    let thumb = if needs_thumb {
+        match fs::read(&blob) {
+            Ok(bytes) => generate_thumb(dir, &attachment.id, &bytes, &attachment.mime, &attachment.filename),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let attachment = Attachment { thumb, ..attachment };
+
+    let meta = attachment_meta_path(dir, &attachment.id);
+    let json = serde_json::to_string(&attachment).map_err(|e| format!("serialize: {e}"))?;
+    if let Err(e) = fs::write(&meta, &json) {
+        let _ = fs::remove_file(&blob);
+        return Err(format!("{}: {e}", meta.display()));
+    }
+    Ok(attachment)
+}
+
 /// Read one attachment back: metadata plus bytes.
 ///
 /// A message can only reference attachments of its own conversation, and only

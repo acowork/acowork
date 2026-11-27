@@ -57,9 +57,10 @@ use crate::usecases::AttachmentService;
 
 /// Largest PDF we inline as a document part (20 MiB).
 ///
-/// Under the 50 MiB an upload may carry at all, and under Anthropic's own
-/// 32 MB document ceiling — base64 inflates the payload by about a third, so
-/// 20 MiB of PDF leaves ~27 MiB on the wire and still fits.
+/// Well under Anthropic's own 32 MB document ceiling — base64 inflates the
+/// payload by about a third, so 20 MiB of PDF leaves ~27 MiB on the wire and
+/// still fits. (The upload ceiling itself is no longer a reason to keep this
+/// small: ADR-122 moved it to 1 GiB and out of the request body entirely.)
 pub const MAX_INLINE_DOCUMENT_BYTES: usize = 20 * 1024 * 1024;
 
 /// Largest page count we inline as a document part.
@@ -277,6 +278,13 @@ mod tests {
         async fn upload_file(
             &self,
             _params: UploadFileParams,
+        ) -> Result<UploadedFileResponse, AttachmentError> {
+            unimplemented!("not exercised by these tests")
+        }
+
+        async fn adopt_staged_file(
+            &self,
+            _params: crate::usecases::StagedUploadParams,
         ) -> Result<UploadedFileResponse, AttachmentError> {
             unimplemented!("not exercised by these tests")
         }

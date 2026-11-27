@@ -742,9 +742,11 @@ pub fn run() {
             // `commands::clipboard::save_clipboard_blob` docs.
             commands::clipboard::save_clipboard_blob,
             // Pre-flight file-size lookup so the chat panel can reject
-            // oversized attachments (≥ 50 MiB runtime cap) BEFORE the
-            // multipart roundtrip. See `commands::chat::get_file_size`.
+            // oversized attachments BEFORE the chunked upload starts. The
+            // ceiling itself is asked for, never mirrored in TS
+            // (`get_upload_limit_bytes`, ADR-122 D6).
             commands::chat::get_file_size,
+            commands::chat::get_upload_limit_bytes,
             // Post-wake renderer recovery: page reports its first
             // painted frame (rAF-driven). See `wake_recovery` docs.
             desktop_recovery_visible,

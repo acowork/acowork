@@ -276,6 +276,30 @@ pub(crate) fn resolve_workspace_root(
 /// Canonicalize + `starts_with` workspace-root traversal guard. Shared by
 /// the workspace mutation handlers and the git query service (ADR-078
 /// decision 3): `../`, absolute paths and symlink escapes are rejected.
+/// Move a fully-verified staging file onto `target` when the two are on
+/// different filesystems (ADR-122 §3 "原子替换" — an `*additional*` workspace
+/// can live on another drive, where `rename` is `EXDEV`).
+///
+/// The copy lands in a sibling dotfile of the target and is then renamed over
+/// it, so the target is either the old file or the new one, never a truncated
+/// one. Blocking IO, like every other call in this module.
+pub(crate) fn place_across_filesystems(
+    staged: &std::path::Path,
+    target: &std::path::Path,
+) -> std::io::Result<()> {
+    let dir = target.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "upload".to_string());
+    let tmp = dir.join(format!(".{name}.uploading"));
+    let result = std::fs::copy(staged, &tmp).and_then(|_| std::fs::rename(&tmp, target));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 pub(crate) fn resolve_within_static(
     work_dir: &Path,
     workspace_id: Option<&str>,
@@ -632,6 +656,57 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         })
     }
 
+    async fn write_file_from_staged(
+        &self,
+        query: FilePathQuery,
+        staged: std::path::PathBuf,
+    ) -> Result<WorkspaceMutationResponse, WorkspaceError> {
+        let (_root, abs_path, rel_path) =
+            self.resolve_within(query.workspace_id.as_deref(), &query.path)?;
+
+        let not_found = || WorkspaceError::NotFound(format!("file does not exist: {rel_path}"));
+        if !abs_path.exists() {
+            let _ = std::fs::remove_file(&staged);
+            return Err(not_found());
+        }
+        if abs_path.is_dir() {
+            let _ = std::fs::remove_file(&staged);
+            return Err(WorkspaceError::InvalidPath(format!(
+                "path is a directory: {rel_path}"
+            )));
+        }
+        // `rename` replaces the target atomically — but only within one
+        // filesystem. The staging file lives under `<work_dir>/.uploads/`,
+        // while an *additional* workspace can be a directory on another drive,
+        // so cross-device is a real case: copy into a sibling temp file there
+        // and rename that, which keeps the replace atomic on the target's own
+        // filesystem (a direct `fs::write` is exactly what this method exists
+        // to avoid, and it would leave a half-written file on a crash).
+        if let Err(e) = std::fs::rename(&staged, &abs_path) {
+            if e.kind() != std::io::ErrorKind::CrossesDevices {
+                let _ = std::fs::remove_file(&staged);
+                return Err(WorkspaceError::Persist(format!(
+                    "failed to place {rel_path}: {e}"
+                )));
+            }
+            place_across_filesystems(&staged, &abs_path)
+                .map_err(|e| WorkspaceError::Persist(format!("failed to place {rel_path}: {e}")))?;
+            let _ = std::fs::remove_file(&staged);
+        }
+
+        let (modified, size) = std::fs::metadata(&abs_path)
+            .map(|m| (metadata_modified_rfc3339(&m), m.len()))
+            .unwrap_or((None, 0));
+        let mut entry = serde_json::json!({"written": true, "path": rel_path, "size": size});
+        if let Some(m) = modified {
+            entry["modified"] = serde_json::Value::String(m);
+        }
+        Ok(WorkspaceMutationResponse {
+            ok: true,
+            entry: Some(entry),
+        })
+    }
+
     async fn delete_file(
         &self,
         query_ws: Option<&str>,
@@ -923,6 +998,30 @@ mod tests {
     /// `agent_workspaces.json` it manages is fully isolated per test.
     fn make_service(dir: &tempfile::TempDir) -> RuntimeWorkspaceMutationService {
         RuntimeWorkspaceMutationService::new(dir.path().to_path_buf())
+    }
+
+    /// ADR-122 §3 atomic replace, cross-device branch: the copy lands in a
+    /// sibling temp file and is renamed over the target, so the target never
+    /// holds a truncated write and no temp file is left behind.
+    #[tokio::test]
+    async fn cross_filesystem_placement_replaces_the_target_atomically() {
+        let dir = tempdir().expect("tempdir");
+        let staged = dir.path().join("staging.bin");
+        let target = dir.path().join("report.docx");
+        std::fs::write(&staged, b"new-bytes").unwrap();
+        std::fs::write(&target, b"old-bytes-longer").unwrap();
+
+        place_across_filesystems(&staged, &target).expect("placement");
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new-bytes");
+        assert!(staged.exists(), "the caller owns the staging file");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".uploading"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
     }
 
     /// A hosted app's visual canvas saves through `contentBase64` (ADR-121):

@@ -198,19 +198,29 @@ function setScrollSnapshot(key: string, snapshot: ChatScrollSnapshot): void {
 let pendingAttachmentSeq = 0;
 
 /**
- * Frontend mirror of `core/acowork-runtime/src/usecases/attachment.rs::MAX_UPLOAD_BYTES`
- * (50 MiB). Used to short-circuit oversized uploads BEFORE any
- * network roundtrip — we read the on-disk size via the Tauri `stat`
- * command and emit a toast immediately when the file would be
- * rejected by the runtime's `AttachmentError::PayloadTooLarge` (HTTP
- * 413) anyway.
+ * The single-file ceiling the runtime enforces, asked for instead of mirrored
+ * (ADR-122 D6). The old `MAX_UPLOAD_BYTES = 50 MiB` copy in this file was the
+ * transport cap, which is no longer what limits a file: the ceiling is now
+ * deployment-configurable (`ACOWORK_MAX_UPLOAD_BYTES`, default 1 GiB), so any
+ * constant here could only be wrong. Cached for the window's lifetime — a
+ * restart is what changes it.
  *
- * Keep the two values in sync; the backend value is the source of
- * truth and is enforced at the runtime, so this number is purely a
- * UX optimization (instant feedback instead of waiting for the
- * multipart upload to complete first).
+ * Still purely a UX optimization: the size pre-check below gives instant
+ * feedback where the runtime would answer 413 only after the bytes travelled.
  */
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+let uploadLimitBytesCache: number | undefined;
+
+async function uploadLimitBytes(): Promise<number | undefined> {
+  if (uploadLimitBytesCache === undefined) {
+    try {
+      uploadLimitBytesCache = await invoke<number>("get_upload_limit_bytes");
+    } catch (err) {
+      log.debug("[ChatPanel] get_upload_limit_bytes failed", err);
+      return undefined; // unknown ceiling: let the runtime decide
+    }
+  }
+  return uploadLimitBytesCache;
+}
 
 /** Human-readable size for toast messages (e.g. "47.3 MB"). */
 function formatBytes(n: number): string {
@@ -1396,22 +1406,21 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     const format = ext;
     const isImage = ["png", "jpg", "jpeg", "gif", "webp"].includes(ext);
 
-    // Pre-flight size check — the runtime enforces a 50 MiB cap
-    // (see `MAX_UPLOAD_BYTES` mirror declared above + backend
-    // `acowork-runtime::usecases::MAX_UPLOAD_BYTES`). Without this
-    // check, a multi-hundred-MB PDF/PPTX would consume bandwidth +
-    // a multipart encode roundtrip before being rejected with a
-    // raw HTTP 413. Bail early with a friendly toast.
+    // Pre-flight size check — the runtime enforces the ceiling and reports it
+    // (`get_upload_limit_bytes`, ADR-122 D6). Without this check a 2 GB file
+    // would spend its whole upload before being refused at `complete`. Bail
+    // early with a friendly toast instead.
     try {
       const size = await invoke<number>("get_file_size", { filePath });
-      if (size > MAX_UPLOAD_BYTES) {
+      const limit = await uploadLimitBytes();
+      if (limit !== undefined && size > limit) {
         addToast({
           type: "warning",
           message: t("chatPanel.uploadTooLarge", {
             filename,
             size: formatBytes(size),
-            limit: formatBytes(MAX_UPLOAD_BYTES),
-          }) ?? `File "${filename}" is ${formatBytes(size)}, exceeds ${formatBytes(MAX_UPLOAD_BYTES)} limit`,
+            limit: formatBytes(limit),
+          }) ?? `File "${filename}" is ${formatBytes(size)}, exceeds ${formatBytes(limit)} limit`,
         });
         return;
       }
@@ -1509,12 +1518,13 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
       // `upload too large: ... bytes (limit 52428800)` text was
       // not user-friendly.
       if (/\bupload too large\b/i.test(msg) || /\b413\b/.test(msg)) {
+        const limit = await uploadLimitBytes();
         addToast({
           type: "warning",
-          message: t("chatPanel.uploadTooLarge", {
-            filename,
-            limit: formatBytes(MAX_UPLOAD_BYTES),
-          }) ?? `"${filename}" exceeds the ${formatBytes(MAX_UPLOAD_BYTES)} attachment limit`,
+          message: limit === undefined
+            ? `"${filename}" exceeds the attachment size limit`
+            : t("chatPanel.uploadTooLarge", { filename, limit: formatBytes(limit) })
+              ?? `"${filename}" exceeds the ${formatBytes(limit)} attachment limit`,
         });
       }
       session.setPendingAttachedItems(prev => prev.map((p) =>

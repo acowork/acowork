@@ -39,15 +39,18 @@
 
 use async_trait::async_trait;
 
-/// Maximum upload size for a single file (50 MiB).
+/// Single-file ceiling for the **single-request** upload route.
 ///
-/// Matches the legacy `upload_document` limit and accommodates a
-/// reasonably-large PDF/PPTX while keeping the runtime honest about
-/// what it accepts without consuming gigabytes of disk. The check is
-/// performed **after** multipart parsing on the accumulated
-/// in-memory byte buffer; rejection returns
-/// [`AttachmentError::PayloadTooLarge`].
-pub const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
+/// ADR-122 D6: the 50 MiB `MAX_UPLOAD_BYTES` constant is gone — one
+/// configurable limit (`acowork_core::upload::max_file_bytes`, default 1 GiB)
+/// now governs a file of any size, and the chunked route is how a client
+/// actually sends one that big. The multipart route keeps the same limit
+/// rather than a stricter one so an older client is not silently broken; in
+/// practice the desktop sends anything over one chunk
+/// (`acowork_core::upload::CHUNK_BYTES`) through the chunked route (D9).
+pub fn max_upload_bytes() -> u64 {
+    acowork_core::upload::max_file_bytes()
+}
 
 /// Errors a caller of [`AttachmentService`] can receive.
 ///
@@ -64,9 +67,9 @@ pub enum AttachmentError {
     #[error("attachment service not ready")]
     ServiceUnavailable,
 
-    /// Upload exceeded [`MAX_UPLOAD_BYTES`]. HTTP 413.
-    #[error("upload too large: {0} bytes (limit {MAX_UPLOAD_BYTES})")]
-    PayloadTooLarge(usize),
+    /// Upload exceeded [`max_upload_bytes`]. HTTP 413.
+    #[error("upload too large: {size} bytes (limit {limit})")]
+    PayloadTooLarge { size: u64, limit: u64 },
 
     /// `document_id` is malformed (charset / length violation). HTTP
     /// 400 — protects against path traversal on the read path.
@@ -104,6 +107,31 @@ pub struct UploadFileParams {
     /// documents or when the client cannot measure.
     pub width: Option<u32>,
     /// `height` for image uploads; same optionality rules as `width`.
+    pub height: Option<u32>,
+}
+
+/// Parameters for [`AttachmentService::adopt_staged_file`] (ADR-122).
+///
+/// The chunked route already merged the chunks into a staging file and
+/// verified its digest, so this carries a **path**, not bytes: re-reading a
+/// 1 GiB blob into a `Vec` to reuse [`AttachmentService::upload_file`] would
+/// undo exactly what the chunked channel exists to avoid.
+pub struct StagedUploadParams {
+    /// Filename the client declared (UI hint / stem source only).
+    pub filename: String,
+    /// Lowercase extension without the dot (e.g. "pdf", "png").
+    pub format: String,
+    /// Merged, digest-verified file. Consumed by the adoption (renamed, or
+    /// removed on a dedup hit) — the caller must not use it afterwards.
+    pub staged: std::path::PathBuf,
+    /// Verified `sha256` of `staged`, lowercase hex. The `document_id` is
+    /// derived from it, so no second read pass is needed.
+    pub sha256: String,
+    /// Verified byte length of `staged`.
+    pub size: u64,
+    /// `width` / `height` for image uploads; same optionality rules as
+    /// [`UploadFileParams`].
+    pub width: Option<u32>,
     pub height: Option<u32>,
 }
 
@@ -146,7 +174,7 @@ pub trait AttachmentService: Send + Sync {
     /// Returns the persisted blob's metadata. The HTTP handler is
     /// expected to forward the response to the desktop verbatim. The
     /// implementation is responsible for:
-    /// - size validation ([`MAX_UPLOAD_BYTES`]),
+    /// - size validation ([`max_upload_bytes`]),
     /// - content-hash doc-id computation,
     /// - atomic write-tmp-rename to
     ///   `<work_dir>/files/<sanitized_stem>_<document_id>.<safe_ext>`
@@ -169,6 +197,18 @@ pub trait AttachmentService: Send + Sync {
     /// frontend supplies it from the `AttachmentMeta` they already
     /// have on hand when issuing the read.
     async fn read_file(&self, document_id: &str) -> Result<Vec<u8>, AttachmentError>;
+
+    /// `POST /sessions/{sid}/uploads/{upload_id}/complete` — adopt an
+    /// already-verified staging file (ADR-122 §3).
+    ///
+    /// Same landing rules as [`AttachmentService::upload_file`] (atomic
+    /// placement, content-derived `document_id`, dedup), but the bytes are
+    /// never held in memory: the `document_id` comes from the digest the
+    /// chunked store already verified while streaming the merge.
+    async fn adopt_staged_file(
+        &self,
+        params: StagedUploadParams,
+    ) -> Result<UploadedFileResponse, AttachmentError>;
 }
 
 // ── On-disk naming contract ────────────────────────────────────────────────

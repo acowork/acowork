@@ -187,17 +187,19 @@ fn sanitize_clipboard_paths(raw: Vec<String>) -> Vec<String> {
 /// (it lives in a different process, but the read is still from this
 /// path).
 ///
-/// Size cap matches the runtime's `MAX_UPLOAD_BYTES` (50 MiB) so an
-/// oversized clipboard paste is rejected here instead of after a
-/// pointless IPC roundtrip — the frontend mirrors this value for the
-/// pre-flight toast (see `chatPanel.uploadTooLarge`).
+/// Size cap for a pasted clipboard image: 50 MiB, this command's own
+/// ceiling rather than a mirror of the runtime's file limit (ADR-122 D6 made
+/// that one deployment-configurable and 1 GiB by default, which is a document
+/// ceiling, not a screenshot one). Enforced here so an oversized paste is
+/// rejected without a pointless IPC roundtrip.
 #[tauri::command]
 pub async fn save_clipboard_blob(
     data_base64: String,
     extension: String,
 ) -> Result<String, String> {
-    // Match `core/acowork-runtime/src/usecases/attachment.rs::MAX_UPLOAD_BYTES`
-    // (50 MiB). Enforced both ends so the IPC reject path also fails fast.
+    // A clipboard image larger than this is not a screenshot anyone meant to
+    // paste; the runtime's own upload ceiling is a separate, much larger
+    // number (ADR-122 D6).
     const MAX_BYTES: usize = 50 * 1024 * 1024;
 
     // Transport is base64, not a JSON number array: a `Vec<u8>` arg is
@@ -386,11 +388,10 @@ mod tests {
         assert_eq!(sanitize_blob_extension("---"), "bin");
     }
 
-    /// Oversized clipboard blobs must be rejected BEFORE writing to
-    /// disk. 50 MiB mirrors `core/acowork-runtime/src/usecases/
-    /// attachment.rs::MAX_UPLOAD_BYTES`; this is the cap the runtime
-    /// also enforces, so we fail fast here instead of after a pointless
-    /// 50 MiB write.
+    /// Oversized clipboard blobs must be rejected BEFORE writing to disk:
+    /// this command's own 50 MiB cap, so a paste fails fast instead of after
+    /// a pointless 50 MiB write (ADR-122 D6 moved the *upload* ceiling,
+    /// not this one).
     #[test]
     fn save_blob_rejects_oversized_payload() {
         // The cap check happens before the disk write, so we can

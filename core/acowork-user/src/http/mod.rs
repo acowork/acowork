@@ -21,6 +21,7 @@ pub mod auth_api;
 pub mod chat_api;
 pub mod chat_sessions_api;
 pub mod profile_api;
+pub mod uploads;
 
 use axum::Router;
 

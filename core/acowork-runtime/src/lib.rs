@@ -16,6 +16,7 @@ pub mod error;
 pub mod http;
 pub mod mcp_ensure;
 pub mod mcp_notify;
+pub mod mcp_status;
 pub mod mqtt;
 pub mod package;
 pub mod platform;

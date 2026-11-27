@@ -59,6 +59,27 @@ impl UserService {
             )));
         }
 
+        // ADR-122 D10: unexpired chunk directories are disk, not state — one
+        // hourly sweep (starting at boot, so an upload abandoned before a
+        // restart is cleared immediately) is the whole policy.
+        {
+            let uploads = Arc::clone(&self.state.uploads);
+            tokio::spawn(async move {
+                uploads
+                    .sweep(acowork_core::upload::UPLOAD_TTL_SECS)
+                    .await;
+                let every = std::time::Duration::from_secs(60 * 60);
+                let mut tick = tokio::time::interval(every);
+                tick.tick().await; // the immediate tick is the sweep above
+                loop {
+                    tick.tick().await;
+                    uploads
+                        .sweep(acowork_core::upload::UPLOAD_TTL_SECS)
+                        .await;
+                }
+            });
+        }
+
         let host = bind.ip();
         let mut port = bind.port();
         let max_port = port.saturating_add(20);

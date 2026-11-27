@@ -63,7 +63,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{get, head, post, put},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -103,7 +103,7 @@ pub enum RuntimeHttpServerError {
 /// service-layer checks remain the source of truth for user-facing
 /// limits:
 ///
-///   - attachments: [`crate::usecases::MAX_UPLOAD_BYTES`] (50 MiB)
+///   - attachments: [`crate::usecases::max_upload_bytes`] (1 GiB default)
 ///   - workspace files: implicit 64 MiB ceiling via this limit;
 ///
 /// anything larger is rejected at the handler with a clean error
@@ -290,7 +290,7 @@ pub(crate) struct HttpState {
     pub(crate) conversation_index: SharedConversationIndex,
     pub(crate) workspace_query:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
-    workspace_mutation:
+    pub(crate) workspace_mutation:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
     /// ADR-078: Late-bind slot for the git query service (read-only
     /// `/git/status` `/git/diff` `/git/log`). Git execution happens in
@@ -311,13 +311,19 @@ pub(crate) struct HttpState {
     /// Read by `/search` for the retrieval policy (ADR-095 D6), which must be
     /// live so the `analyzer_mode` rollback switch takes effect immediately.
     pub(crate) agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
+    /// ADR-122: the two chunked-upload stores this Runtime owns (session
+    /// attachments + workspaces). Built from `work_dir` here rather than
+    /// late-bound — it needs no async resource — so the upload routes are
+    /// live as soon as the HTTP server is.
+    pub(crate) uploads: Option<Arc<crate::http::uploads::UploadStores>>,
     /// ADR-046: Late-bind slot for the unified attachment blob store
     /// (`POST /sessions/{sid}/files` upload + `GET /files/{doc_id}`
     /// download). The HTTP handlers route through this trait instead
     /// of touching the filesystem directly — same ADR-040 pattern as
     /// every other UseCase service. Populated in Phase B (sync —
     /// requires only the boot-time `work_dir`).
-    attachment: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
+    pub(crate) attachment:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
     /// ADR-047: Session config service for GET/PUT /sessions/{sid}/config.
     session_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
     /// RAG provider (late-bind from AgentCore Phase B).
@@ -567,7 +573,26 @@ impl RuntimeHttpServer {
             Some(Arc::new(crate::mcp_notify::McpConfigNotifier::default()));
         let shell_risk_rules =
             crate::security::shell_risk::ShellRiskRules::load(&work_dir).unwrap_or_default();
+        // ADR-122: chunked upload stores + their TTL sweep. Same reasoning as
+        // `mcp_notifier` above — created here so the ~10 `start` call sites
+        // (mostly tests) need no new argument.
+        let uploads = Arc::new(crate::http::uploads::UploadStores::new(&work_dir));
+        {
+            let sweeper = Arc::clone(&uploads);
+            tokio::spawn(async move {
+                // Startup sweep first (an upload abandoned before the last
+                // restart is already overdue), then hourly (D10's 24 h TTL).
+                sweeper.sweep().await;
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+                tick.tick().await; // the immediate tick is the startup sweep
+                loop {
+                    tick.tick().await;
+                    sweeper.sweep().await;
+                }
+            });
+        }
         let state = HttpState {
+            uploads: Some(Arc::clone(&uploads)),
             work_dir,
             package_dir,
             agent_id,
@@ -736,10 +761,34 @@ impl RuntimeHttpServer {
             // global `DefaultBodyLimit::max(GLOBAL_BODY_LIMIT)` layer
             // (64 MiB) installed at the root of the router covers the
             // `Multipart` extractor. The Runtime's own size check
-            // ([`crate::usecases::MAX_UPLOAD_BYTES`] = 50 MiB) then
+            // ([`crate::usecases::max_upload_bytes`], ADR-122 D6) then
             // produces a clean 413 + JSON error body if the payload is
-            // over the user-facing limit.
+            // over the user-facing limit. Anything above one chunk
+            // (2 MiB) is sent through `/sessions/{sid}/uploads` instead.
             .route("/sessions/{sid}/files", post(upload_file))
+            // ADR-122: the chunked route. Same store contract for every
+            // producer; `{store}` here is `/sessions/{sid}`. Bodies are one
+            // 2 MiB chunk, so the per-route limit is set explicitly instead of
+            // inheriting the 64 MiB global (a chunk PUT must never buffer
+            // more than one chunk).
+            .route(
+                "/sessions/{sid}/uploads",
+                post(crate::http::uploads::session_create),
+            )
+            .route(
+                "/sessions/{sid}/uploads/{upload_id}",
+                head(crate::http::uploads::session_head)
+                    .delete(crate::http::uploads::session_abort),
+            )
+            .route(
+                "/sessions/{sid}/uploads/{upload_id}/complete",
+                post(crate::http::uploads::session_complete),
+            )
+            .route(
+                "/sessions/{sid}/uploads/{upload_id}/{offset}",
+                put(crate::http::uploads::session_put)
+                    .layer(DefaultBodyLimit::max(crate::http::uploads::CHUNK_BODY_LIMIT)),
+            )
             .route("/files/{document_id}", get(read_file))
             .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
             // NOTE: the legacy `GET /files/{id}` handler was removed as part
@@ -795,6 +844,15 @@ impl RuntimeHttpServer {
             //   POST   /workspaces/file — create → body {path} (409 on dup)
             //   PUT    /workspaces/file — write  → body {content} (404 on miss)
             //   DELETE /workspaces/file — remove → body {path}
+            // ADR-122: `{store}` = `/workspaces` — the hosted-app save path
+            // slices its bytes into chunks and lets `complete` replace the
+            // target atomically instead of shipping base64 through one JSON
+            // body (ADR-121's save, ADR-122 §4.2).
+            //   POST   /workspaces/uploads                  → {name,size,sha256}
+            //   PUT    /workspaces/uploads/{id}/{offset}    → chunk
+            //   HEAD   /workspaces/uploads/{id}             → Upload-Offset
+            //   POST   /workspaces/uploads/{id}/complete?workspace_id=&path=
+            //   DELETE /workspaces/uploads/{id}
             //   POST   /workspaces/dir  — create → body {path}
             //   DELETE /workspaces/dir  — remove → body {path}
             // All share the `resolve_workspace_root` + canonicalize path-
@@ -806,6 +864,28 @@ impl RuntimeHttpServer {
                     .post(create_workspace_file)
                     .put(write_workspace_file)
                     .delete(delete_workspace_file),
+            )
+            // ADR-122 §4.2: `{store}` = `/workspaces`. The hosted-app save
+            // slices its bytes into chunks and lets `complete` replace the
+            // target atomically, instead of shipping base64 through one JSON
+            // body (ADR-121's save path).
+            .route(
+                "/workspaces/uploads",
+                post(crate::http::uploads::workspace_create),
+            )
+            .route(
+                "/workspaces/uploads/{upload_id}",
+                head(crate::http::uploads::workspace_head)
+                    .delete(crate::http::uploads::workspace_abort),
+            )
+            .route(
+                "/workspaces/uploads/{upload_id}/complete",
+                post(crate::http::uploads::workspace_complete),
+            )
+            .route(
+                "/workspaces/uploads/{upload_id}/{offset}",
+                put(crate::http::uploads::workspace_put)
+                    .layer(DefaultBodyLimit::max(crate::http::uploads::CHUNK_BODY_LIMIT)),
             )
             // ADR-055 L2-7: raw-bytes read for the Gateway's HTML preview
             // iframe (the Gateway reverse-proxies `/workspace-files/…`
@@ -863,6 +943,16 @@ impl RuntimeHttpServer {
             // usable / failed + reason). The Desktop Tools panel polls this
             // after opening a preset server's toggle.
             .route("/agents/{id}/mcp-ensure/{name}", get(get_agent_mcp_ensure))
+            // Retry a failed MCP connect. Fire-and-forget: the reconnect runs
+            // on the same notify → connect+reconcile path a config change
+            // takes, and its progress is observable through `/mcp-tools`'
+            // `server_status` (connecting → gone | failed). A dedicated route
+            // exists so the Tools panel's retry button does not have to
+            // re-PUT the activation list to mean "reconnect".
+            .route(
+                "/agents/{id}/mcp-reconnect",
+                post(post_agent_mcp_reconnect),
+            )
             // ADR-104: dismiss / restore one manifest recommendation. The
             // recommendation itself is package-owned (rewritten every boot);
             // this endpoint persists only the user's dismissal flag.
@@ -2345,7 +2435,7 @@ async fn rename_workspace_item(
 /// string becomes the JSON `error` field. This is the single place
 /// where usecase errors become HTTP responses — adding a new variant
 /// to `WorkspaceError` only requires touching this function.
-fn workspace_error_to_response(
+pub(crate) fn workspace_error_to_response(
     e: crate::usecases::WorkspaceError,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -2369,13 +2459,13 @@ use axum::extract::Multipart;
 /// used by every attachment handler. Mirrors the shape of
 /// `workspace_error_to_response` so a future API-surface change only
 /// touches this function.
-fn attachment_error_to_response(
+pub(crate) fn attachment_error_to_response(
     e: crate::usecases::AttachmentError,
 ) -> (StatusCode, Json<serde_json::Value>) {
     use crate::usecases::AttachmentError as Ae;
     let status = match &e {
         Ae::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-        Ae::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+        Ae::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
         Ae::InvalidDocumentId(_) => StatusCode::BAD_REQUEST,
         Ae::NotFound(_) => StatusCode::NOT_FOUND,
         Ae::Persistence(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -3467,6 +3557,52 @@ async fn get_agent_mcp_ensure(
 // `tools/list` at connect time, so the list the frontend sees always
 // matches what the runtime filters.
 
+/// `POST /agents/{id}/mcp-reconnect` — re-run connect + reconcile now.
+///
+/// The Tools panel's retry for a server whose connect failed. It signals the
+/// same watcher a `PUT /mcp-servers` signals, which re-runs
+/// [`crate::tools::mcp_manager::connect_mcp_with_reconcile_and_filter`] in the
+/// background — the single funnel that also records
+/// [`crate::mcp_status`] for the next `/mcp-tools` read.
+///
+/// A whole-pass reconnect, not a per-server one: the registry rebuilds its
+/// tool index on connect, so a single server cannot be swapped in without
+/// leaving the index describing a dead client. The cost is reconnecting the
+/// healthy servers too (an `npx`-backed stdio server can take seconds); the
+/// benefit is that the state the panel shows is always one coherent pass.
+/// ponytail: whole-pass reconnect, split per-server once the registry supports
+/// an in-place server swap.
+async fn post_agent_mcp_reconnect(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !state.instance_matches(&id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
+                ),
+            })),
+        ));
+    }
+    // A Runtime built without a notifier (tests) has no watch loop to signal;
+    // answering 503 is the honest outcome, not a fake acceptance.
+    let Some(notifier) = &state.mcp_notifier else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "MCP reconnect is unavailable in this runtime" })),
+        ));
+    };
+    notifier.notify();
+    tracing::info!(
+        instance_id = %id,
+        "POST /mcp-reconnect — signaling MCP config change for a full reconnect pass"
+    );
+    Ok(Json(serde_json::json!({ "accepted": true })))
+}
+
 /// `GET /agents/{id}/mcp-tools` — return the full per-tool list.
 async fn get_agent_mcp_tools(
     State(state): State<HttpState>,
@@ -3499,6 +3635,14 @@ async fn get_agent_mcp_tools(
     Ok(Json(serde_json::json!({
         "agent_id": resp.agent_id,
         "servers": resp.servers,
+        // `agent_mcp_tools.json` holds only what the last successful
+        // `tools/list` produced, so a failed (or in-flight) connect is
+        // invisible in `servers` — the server's rows are simply gone. This is
+        // the live half of the same answer: server name → `connecting` |
+        // `failed{error}`. Absent means "connected on the last pass". The
+        // Tools panel renders it instead of showing an enabled switch with an
+        // empty body and no reason.
+        "server_status": crate::mcp_status::snapshot(),
     })))
 }
 

@@ -52,7 +52,19 @@ const MAX_RAW_PREVIEW_BYTES: u64 = 268_435_456;
 /// the workspace tree. Everything else (`.cargo`, `.vscode`, `.gitignore`,
 /// ...) is shown, mirroring the Explorer's default behaviour: hidden
 /// entries are visible unless they are VCS metadata or OS junk files.
-const VSCODE_DEFAULT_EXCLUDES: &[&str] = &[".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"];
+///
+/// `.uploads` is this codebase's one addition (ADR-122): the chunked-upload
+/// staging tree lives under the agent's work dir, which is also the default
+/// workspace root, and a half-received file is machinery, never content.
+const VSCODE_DEFAULT_EXCLUDES: &[&str] = &[
+    ".git",
+    ".svn",
+    ".hg",
+    "CVS",
+    ".DS_Store",
+    "Thumbs.db",
+    ".uploads",
+];
 
 /// True when `name` matches one of VSCode's default `files.exclude`
 /// entries. Applied at every directory level (equivalent to `**/.git`).
@@ -1296,8 +1308,9 @@ mod tests {
 
     /// `list_tree` mirrors VSCode's default `files.exclude`: hidden
     /// entries are shown unless they are VCS metadata / OS junk
-    /// (`.git`, `.svn`, `.hg`, `CVS`, `.DS_Store`, `Thumbs.db`).
-    /// Regression guard for the old blanket "hide all dotfiles" filter.
+    /// (`.git`, `.svn`, `.hg`, `CVS`, `.DS_Store`, `Thumbs.db`) plus the
+    /// ADR-122 chunk staging dir. Regression guard for the old blanket
+    /// "hide all dotfiles" filter.
     #[tokio::test]
     async fn list_tree_shows_hidden_except_vscode_default_excludes() {
         let tmp = tempdir().expect("tempdir");
@@ -1316,6 +1329,7 @@ mod tests {
         std::fs::create_dir(root.join("CVS")).expect("mkdir CVS");
         std::fs::write(root.join(".DS_Store"), "junk").expect("write .DS_Store");
         std::fs::write(root.join("Thumbs.db"), "junk").expect("write Thumbs.db");
+        std::fs::create_dir(root.join(".uploads")).expect("mkdir .uploads");
 
         // A hidden dir with a hidden child — children_count must count
         // `.cargo`'s visible children and skip excluded ones.
@@ -1341,7 +1355,7 @@ mod tests {
             );
         }
         // Excluded entries.
-        for excluded in [".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"] {
+        for excluded in [".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db", ".uploads"] {
             assert!(
                 !names.contains(&excluded),
                 "tree must NOT include {excluded:?}, got: {names:?}"

@@ -756,6 +756,13 @@ mod tests {
             unimplemented!("not exercised by these tests")
         }
 
+        async fn adopt_staged_file(
+            &self,
+            _params: crate::usecases::StagedUploadParams,
+        ) -> Result<UploadedFileResponse, AttachmentError> {
+            unimplemented!("not exercised by these tests")
+        }
+
         async fn read_file(&self, document_id: &str) -> Result<Vec<u8>, AttachmentError> {
             self.blobs
                 .lock()

@@ -47,15 +47,27 @@ function toBase64(bytes: Uint8Array): string {
     return btoa(out);
 }
 
+/** Chunk size of the resumable upload contract (ADR-122 D2). Mirrors
+ *  `acowork_core::upload::CHUNK_BYTES`; the server states its own in the
+ *  create answer, so this is only the producer's opening guess. */
+const UPLOAD_CHUNK_BYTES = 2 * 1024 * 1024;
+
 /**
  * Overwrite one workspace file with `bytes`. Throws when the Runtime
  * refuses (missing file, path escape, invalid payload) — the caller
  * surfaces that to the user instead of reporting a save that didn't happen.
+ *
+ * A save above one chunk takes the chunked route (ADR-122 §3): the bytes no
+ * longer have to fit one body, base64 or the whole file in one request. Under
+ * one chunk the single `PUT` stays — one roundtrip instead of four (D9).
  */
 export async function saveWorkspaceFileBytes(
     file: WorkspaceFileRef,
     bytes: Uint8Array,
 ): Promise<{ size?: number; modified?: string }> {
+    if (bytes.length > UPLOAD_CHUNK_BYTES) {
+        return saveWorkspaceFileChunked(file, bytes);
+    }
     const base = getGatewayUrl().replace(/\/+$/g, "");
     const params = new URLSearchParams({
         workspace_id: file.workspaceId,
@@ -78,6 +90,67 @@ export async function saveWorkspaceFileBytes(
     primeWorkspaceFileBlob(file.agentId, file.workspaceId, file.relPath, bytes);
     const saved = (await resp.json().catch(() => ({}))) as { modified?: string; size?: number };
     return saved;
+}
+
+/**
+ * The same save through `/workspaces/uploads` (ADR-122 §3): digest, chunks,
+ * then `complete` renames the merged file over the target atomically.
+ *
+ * A 404 from `complete` is the same "the target does not exist yet" the `PUT`
+ * answers, so [`writeWorkspaceFileBytes`]'s create-then-retry covers both
+ * paths unchanged: an abandoned merge keeps its chunks, so the retry re-merges
+ * instead of re-sending the bytes.
+ */
+async function saveWorkspaceFileChunked(
+    file: WorkspaceFileRef,
+    bytes: Uint8Array,
+): Promise<{ size?: number; modified?: string }> {
+    // The caller's array is an ArrayBuffer-backed view; the DOM lib's own
+    // types are wider (`ArrayBufferLike`), so narrow once here instead of
+    // copying the bytes to satisfy a type.
+    const view = bytes as Uint8Array<ArrayBuffer>;
+    const base = getGatewayUrl().replace(/\/+$/g, "");
+    const uploads = `${base}/api/agents/${encodeURIComponent(file.agentId)}/workspaces/uploads`;
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", view));
+    const sha256 = Array.from(digest, b => b.toString(16).padStart(2, "0")).join("");
+    const name = file.relPath.split("/").pop() || file.relPath;
+
+    const created = await fetch(uploads, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, size: view.length, sha256 }),
+    });
+    if (!created.ok) {
+        const errText = await created.text().catch(() => "");
+        throw new WorkspaceSaveError(errText || `HTTP ${created.status}`, created.status);
+    }
+    const { uploadId } = (await created.json()) as { uploadId: string };
+
+    for (let offset = 0; offset < view.length; offset += UPLOAD_CHUNK_BYTES) {
+        const end = Math.min(offset + UPLOAD_CHUNK_BYTES, view.length);
+        const resp = await fetch(`${uploads}/${uploadId}/${offset}`, {
+            method: "PUT",
+            body: view.subarray(offset, end),
+        });
+        if (!resp.ok) {
+            const errText = await resp.text().catch(() => "");
+            throw new WorkspaceSaveError(errText || `HTTP ${resp.status}`, resp.status);
+        }
+    }
+
+    const params = new URLSearchParams({
+        workspace_id: file.workspaceId,
+        path: file.relPath,
+    });
+    const done = await fetch(`${uploads}/${uploadId}/complete?${params.toString()}`, {
+        method: "POST",
+    });
+    if (!done.ok) {
+        const errText = await done.text().catch(() => "");
+        throw new WorkspaceSaveError(errText || `HTTP ${done.status}`, done.status);
+    }
+    primeWorkspaceFileBlob(file.agentId, file.workspaceId, file.relPath, bytes);
+    return (await done.json().catch(() => ({}))) as { modified?: string; size?: number };
 }
 
 /** Directory part of a workspace-relative path; "" is the workspace root. */

@@ -619,20 +619,74 @@ export interface ChatAttachmentMeta {
   thumb?: string;
 }
 
-/** Upload one attachment into the session's `files/` dir (§4.2.1). */
+/** Chunk size of the resumable upload contract (ADR-122 D2).
+ *  Mirrors `acowork_core::upload::CHUNK_BYTES`; the server states its own in
+ *  `POST …/uploads` (`chunkBytes`), and this is only the producer's guess for
+ *  the first request. */
+const UPLOAD_CHUNK_BYTES = 2 * 1024 * 1024;
+
+/** Upload one attachment into the session's `files/` dir (§4.2.1).
+ *
+ *  Above one chunk the file takes the chunked route (ADR-122 §3): each hop
+ *  stays small, the offset is a resume point, and the single-file ceiling is
+ *  the backend's (1 GiB by default) instead of the smallest body cap on the
+ *  path. Under one chunk the single request is strictly cheaper (D9). */
 async function uploadChatAttachment(
   chatSessionId: string,
   file: File,
 ): Promise<ChatAttachmentMeta> {
-  const form = new FormData();
-  form.append("file", file);
+  if (file.size <= UPLOAD_CHUNK_BYTES) {
+    const form = new FormData();
+    form.append("file", file);
+    const token = useAuthStore.getState().accessToken;
+    const resp = await fetch(
+      `${getGatewayUrl()}/api/chat-sessions/${encodeURIComponent(chatSessionId)}/files`,
+      { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form },
+    );
+    if (!resp.ok) throw new Error(`upload → ${resp.status}`);
+    return resp.json();
+  }
+
+  // The digest covers the whole file, so the bytes are in memory once — the
+  // same footprint the multipart path above had, and the reason it is the
+  // digest pass, not the transfer, that bounds this producer's peak.
+  // ponytail: a browser has no streaming SHA-256; a WASM/`js-sha256` digest
+  // would drop the peak to one chunk. Do that if a >200 MiB chat attachment
+  // ever becomes normal here.
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const sha256 = Array.from(digest, b => b.toString(16).padStart(2, "0")).join("");
+
   const token = useAuthStore.getState().accessToken;
-  const resp = await fetch(
-    `${getGatewayUrl()}/api/chat-sessions/${encodeURIComponent(chatSessionId)}/files`,
-    { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form },
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const base = `${getGatewayUrl()}/api/chat-sessions/${encodeURIComponent(chatSessionId)}/uploads`;
+
+  const created = await fetch(base, {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({ name: file.name, size: file.size, sha256, mime: file.type }),
+  });
+  if (!created.ok) throw new Error(`upload create → ${created.status}`);
+  const { uploadId } = (await created.json()) as { uploadId: string };
+
+  for (let offset = 0; offset < file.size; offset += UPLOAD_CHUNK_BYTES) {
+    const end = Math.min(offset + UPLOAD_CHUNK_BYTES, file.size);
+    // A `subarray` view, not a copy: the chunk is written straight out of the
+    // buffer the digest already read.
+    const resp = await fetch(`${base}/${uploadId}/${offset}`, {
+      method: "PUT",
+      headers,
+      body: bytes.subarray(offset, end),
+    });
+    if (!resp.ok) throw new Error(`upload chunk at ${offset} → ${resp.status}`);
+  }
+
+  const done = await fetch(
+    `${base}/${uploadId}/complete?mime=${encodeURIComponent(file.type)}`,
+    { method: "POST", headers },
   );
-  if (!resp.ok) throw new Error(`upload → ${resp.status}`);
-  return resp.json();
+  if (!done.ok) throw new Error(`upload complete → ${done.status}`);
+  return done.json();
 }
 
 /** Cache of resolved object URLs, keyed by session/attachment (+thumb). */

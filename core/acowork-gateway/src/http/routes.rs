@@ -410,9 +410,10 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
         // Global body-size cap. See `GLOBAL_BODY_LIMIT` for why we
         // override axum's 2 MiB default at the root of the gateway
-        // router. Per-route service-layer limits (e.g. Runtime's
-        // `MAX_UPLOAD_BYTES` for attachments, gateway's
-        // `MAX_FILE_SIZE` for static file reads) remain the source of
+        // router. Per-route service-layer limits (e.g. the Runtime's
+        // single-file ceiling, `acowork_core::upload::CHUNK_BYTES` for one
+        // ADR-122 chunk, gateway's `MAX_FILE_SIZE` for static file reads)
+        // remain the source of
         // truth for user-facing caps — this layer only ensures those
         // limits produce a clean error body instead of an opaque
         // extractor parse failure.

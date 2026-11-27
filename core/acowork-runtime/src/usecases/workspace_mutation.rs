@@ -216,6 +216,21 @@ pub trait WorkspaceMutationService: Send + Sync {
         body: WriteFileBody,
     ) -> Result<WorkspaceMutationResponse, WorkspaceError>;
 
+    /// `POST /workspaces/uploads/{upload_id}/complete` — replace an existing
+    /// file with an already-merged staging file (ADR-122 §3 / §4.2).
+    ///
+    /// The hosted-app save path: the staged bytes are `rename`d onto the
+    /// target, so the file is never truncated first and a crash mid-save
+    /// leaves the previous content intact. Still resolves through the same
+    /// traversal guard as `write_file`, and still answers `NotFound` for a
+    /// missing target (`PUT /workspaces/file` only overwrites; a Save As
+    /// creates the file first).
+    async fn write_file_from_staged(
+        &self,
+        query: FilePathQuery,
+        staged: std::path::PathBuf,
+    ) -> Result<WorkspaceMutationResponse, WorkspaceError>;
+
     /// `DELETE /workspaces/file` — remove a file.
     async fn delete_file(
         &self,

@@ -636,3 +636,55 @@ describe("the in-flight turn claim (ADR-106 D9)", () => {
     expect(claimOf("cs-1")?.messageId).toBe("m-1");
   });
 });
+
+describe("chat attachment upload (ADR-122)", () => {
+  beforeEach(() => {
+    fetchMock.mockClear();
+    useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
+  });
+
+  it("sends a file above one chunk through /uploads and returns the landed attachment", async () => {
+    const chunk = 2 * 1024 * 1024;
+    const size = chunk + 16;
+    const file = new File([new Uint8Array(size)], "big.pdf", { type: "application/pdf" });
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith("/uploads")) return { ok: true, json: async () => ({ uploadId: "u-1" }) };
+      if (init?.method === "PUT") return { ok: true, json: async () => ({ received: 0 }) };
+      if (u.includes("/complete")) {
+        return {
+          ok: true,
+          json: async () => ({ id: "a-1", filename: "big.pdf", mime: "application/pdf", size }),
+        };
+      }
+      return { ok: false, status: 503, json: async () => ({}), text: async () => "" };
+    });
+
+    const meta = await useChatSessionStore.getState().upload("cs-1", file);
+
+    expect(meta).toEqual({ id: "a-1", filename: "big.pdf", mime: "application/pdf", size });
+    const urls = fetchMock.mock.calls.map(([u]) => String(u));
+    expect(urls[0]).toContain("/api/chat-sessions/cs-1/uploads");
+    expect(urls[1]).toContain(`/api/chat-sessions/cs-1/uploads/u-1/0`);
+    expect(urls[2]).toContain(`/api/chat-sessions/cs-1/uploads/u-1/${chunk}`);
+    expect(urls[3]).toContain("/uploads/u-1/complete?mime=application%2Fpdf");
+    // The single-request route must not be used: its body cap is what the
+    // chunked path exists to escape (ADR-122 §2).
+    expect(urls.some((u) => u.endsWith("/files"))).toBe(false);
+  });
+
+  it("keeps the single-request route under one chunk (D9)", async () => {
+    const file = new File([new Uint8Array(1024)], "small.pdf", { type: "application/pdf" });
+    fetchMock.mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/files")) {
+        return { ok: true, json: async () => ({ id: "a-2", filename: "small.pdf", mime: "application/pdf", size: 1024 }) };
+      }
+      return { ok: false, status: 503, json: async () => ({}), text: async () => "" };
+    });
+
+    await useChatSessionStore.getState().upload("cs-1", file);
+
+    expect(fetchMock.mock.calls).toHaveLength(1);
+    expect(String(fetchMock.mock.calls[0]![0])).toContain("/api/chat-sessions/cs-1/files");
+  });
+});

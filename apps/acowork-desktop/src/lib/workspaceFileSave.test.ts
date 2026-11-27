@@ -65,6 +65,38 @@ describe("saveWorkspaceFileBytes", () => {
         expect(decode(String(init.body))).toEqual(bytes);
     });
 
+    it("sends a save above one chunk through /workspaces/uploads (ADR-122)", async () => {
+        // Above 2 MiB the bytes leave as raw chunks; nothing is base64'd and
+        // nothing goes to the single-request `/workspaces/file` route.
+        const chunk = 2 * 1024 * 1024;
+        const bytes = new Uint8Array(chunk + 3).map((_, i) => i % 251);
+        fetchMock.mockImplementation(async (url: string) =>
+            String(url).endsWith("/workspaces/uploads")
+                ? { ok: true, json: async () => ({ uploadId: "u-1" }) }
+                : { ok: true, json: async () => ({ size: bytes.length, modified: "2026-01-01T00:00:00Z" }) },
+        );
+
+        await saveWorkspaceFileBytes(file, bytes);
+
+        const urls = fetchMock.mock.calls.map(([url]) => String(url));
+        expect(urls[0]).toBe("http://gateway:19876/api/agents/agent%201/workspaces/uploads");
+        expect(urls[1]).toBe("http://gateway:19876/api/agents/agent%201/workspaces/uploads/u-1/0");
+        expect(urls[2]).toBe(`http://gateway:19876/api/agents/agent%201/workspaces/uploads/u-1/${chunk}`);
+        expect(urls[3]).toBe(
+            "http://gateway:19876/api/agents/agent%201/workspaces/uploads/u-1/complete?workspace_id=ws%2F1&path=docs%2Fa+b.docx",
+        );
+        expect(urls.some((u) => u.includes("/workspaces/file"))).toBe(false);
+        // The chunk body is the raw slice, not JSON: one full chunk, then the
+        // 3-byte tail.
+        const first = (fetchMock.mock.calls[1] as [string, RequestInit])[1].body as Uint8Array;
+        const second = (fetchMock.mock.calls[2] as [string, RequestInit])[1].body as Uint8Array;
+        expect([first.length, second.length]).toEqual([chunk, 3]);
+        expect([first[0], first[chunk - 1]]).toEqual([0, (chunk - 1) % 251]);
+        // Identity, not deep equality: `toHaveBeenCalledWith` on a 2 MiB
+        // array spends the whole test budget pretty-printing the mismatch.
+        expect(prime.mock.calls[0]?.[3]).toBe(bytes);
+    });
+
     it("throws the Runtime's message and keeps the cache when the write fails", async () => {
         fetchMock.mockResolvedValue({
             ok: false,

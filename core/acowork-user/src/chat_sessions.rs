@@ -1582,6 +1582,31 @@ pub fn store_attachment(
     crate::chat::store_attachment_at(&session_dir(data_dir, session_id), filename, mime, bytes)
 }
 
+/// [`store_attachment`] for a chunked upload's staging file (ADR-122 §3):
+/// same participation rule, same landing, no in-memory copy of the bytes.
+pub fn store_attachment_from_path(
+    data_dir: &Path,
+    session_id: &str,
+    from: &str,
+    filename: &str,
+    mime: &str,
+    staged: &Path,
+    size: u64,
+) -> Result<crate::chat::Attachment, String> {
+    validate_session_id(session_id)?;
+    let session = load(data_dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == from) {
+        return Err("sender is not a participant of this session".to_string());
+    }
+    crate::chat::store_attachment_from_path(
+        &session_dir(data_dir, session_id),
+        filename,
+        mime,
+        staged,
+        size,
+    )
+}
+
 /// Read one attachment back: metadata + blob path. `Ok(None)` covers both
 /// "no such attachment" and "not a well-formed id" — the API answers 404
 /// either way, same rule as `chat::load_attachment_meta`.

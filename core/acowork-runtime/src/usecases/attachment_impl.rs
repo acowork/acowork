@@ -85,8 +85,8 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use crate::usecases::attachment::{
-    AttachmentError, AttachmentService, MAX_UPLOAD_BYTES, UploadFileParams, UploadedFileResponse,
-    name_matches_document_id, on_disk_name,
+    AttachmentError, AttachmentService, StagedUploadParams, UploadFileParams, UploadedFileResponse,
+    max_upload_bytes, name_matches_document_id, on_disk_name,
 };
 
 /// Concrete [`AttachmentService`] backed by `<work_dir>/files/`.
@@ -161,12 +161,36 @@ impl RuntimeAttachmentService {
     /// `compute_document_id_is_content_deterministic`.
     fn compute_document_id(bytes: &[u8]) -> String {
         use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(bytes);
-        let digest = hasher.finalize();
-        let prefix_hex: String = digest[..6].iter().map(|b| format!("{:02x}", b)).collect();
-        let suffix_hex: String = digest[6..8].iter().map(|b| format!("{:02x}", b)).collect();
-        format!("{prefix_hex}-{suffix_hex}")
+        let digest = Sha256::digest(bytes);
+        Self::document_id_from_digest(&digest).expect("fresh digest is well-formed")
+    }
+
+    /// Derive `document_id` from an already-computed `SHA-256` digest.
+    ///
+    /// This is the derivation point for the chunked route (ADR-122 §3): the
+    /// upload store verifies the client's declared digest while streaming the
+    /// merge, so the landing path must not read the bytes a second time just
+    /// to hash them.
+    fn document_id_from_digest(digest: &[u8]) -> Result<String, AttachmentError> {
+        if digest.len() < 8 {
+            return Err(AttachmentError::Persistence(
+                "content digest is too short".to_string(),
+            ));
+        }
+        let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        Ok(format!("{}-{}", &hex[..12], &hex[12..16]))
+    }
+
+    /// Same derivation, from the lowercase-hex `sha256` a chunked upload
+    /// verified (`acowork_core::upload::Completer::sha256`).
+    fn document_id_from_sha256_hex(sha256: &str) -> Result<String, AttachmentError> {
+        let bytes = sha256.as_bytes();
+        if bytes.len() != 64 || !bytes.iter().all(|b| b.is_ascii_hexdigit()) {
+            return Err(AttachmentError::Persistence(format!(
+                "malformed sha256: {sha256:?}"
+            )));
+        }
+        Ok(format!("{}-{}", &sha256[..12], &sha256[12..16]))
     }
 
     /// List every UTF-8-valid filename in `dir`. Used by both the
@@ -298,8 +322,12 @@ impl AttachmentService for RuntimeAttachmentService {
         &self,
         params: UploadFileParams,
     ) -> Result<UploadedFileResponse, AttachmentError> {
-        if params.bytes.len() > MAX_UPLOAD_BYTES {
-            return Err(AttachmentError::PayloadTooLarge(params.bytes.len()));
+        let limit = max_upload_bytes();
+        if params.bytes.len() as u64 > limit {
+            return Err(AttachmentError::PayloadTooLarge {
+                size: params.bytes.len() as u64,
+                limit,
+            });
         }
 
         let dir = self.ensure_files_dir().await?;
@@ -325,6 +353,46 @@ impl AttachmentService for RuntimeAttachmentService {
             filename: params.filename,
             format: params.format,
             size_bytes: params.bytes.len() as u64,
+            width: params.width,
+            height: params.height,
+        })
+    }
+
+    async fn adopt_staged_file(
+        &self,
+        params: StagedUploadParams,
+    ) -> Result<UploadedFileResponse, AttachmentError> {
+        let dir = self.ensure_files_dir().await?;
+        let document_id = Self::document_id_from_sha256_hex(&params.sha256)?;
+        Self::validate_document_id(&document_id)?;
+
+        // Single audit point, same lock as `write_blob_atomic`: two
+        // concurrent adoptions of identical bytes must not both land.
+        let _guard = self.write_lock.lock().await;
+
+        if Self::count_matches(&dir, &document_id).await? > 0 {
+            // Dedup hit: the earlier blob is authoritative (identical bytes by
+            // construction), so the staging file is dropped instead of renamed.
+            let _ = fs::remove_file(&params.staged).await;
+        } else {
+            let final_path = dir.join(on_disk_name(&document_id, &params.format, &params.filename));
+            // The staging file lives under `<work_dir>/.uploads/`, i.e. the same
+            // filesystem, so this is the atomic replace ADR-122 §3 requires.
+            fs::rename(&params.staged, &final_path).await.map_err(|e| {
+                AttachmentError::Persistence(format!(
+                    "rename {} -> {}: {}",
+                    params.staged.display(),
+                    final_path.display(),
+                    e
+                ))
+            })?;
+        }
+
+        Ok(UploadedFileResponse {
+            document_id,
+            filename: params.filename,
+            format: params.format,
+            size_bytes: params.size,
             width: params.width,
             height: params.height,
         })
@@ -430,6 +498,62 @@ mod tests {
                 r.document_id
             );
         }
+    }
+
+    /// ADR-122 D5: the chunked route hands over an already-verified staging
+    /// file. It must land exactly like an upload — digest-derived id, real
+    /// extension — and a second staging file of identical bytes must dedup to
+    /// the first blob instead of storing a copy.
+    #[tokio::test]
+    async fn adopt_staged_file_lands_by_digest_and_dedups_identical_bytes() {
+        use sha2::{Digest, Sha256};
+
+        let (dir, svc) = fresh_service().await;
+        let payload = b"chunked-merge-payload".to_vec();
+        let sha256: String = Sha256::digest(&payload)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+
+        let staged_a = dir.path().join("staging-a.bin");
+        std::fs::write(&staged_a, &payload).unwrap();
+        let landed = svc
+            .adopt_staged_file(StagedUploadParams {
+                filename: "report.pdf".to_string(),
+                format: "pdf".to_string(),
+                staged: staged_a.clone(),
+                sha256: sha256.clone(),
+                size: payload.len() as u64,
+                width: None,
+                height: None,
+            })
+            .await
+            .unwrap();
+        assert!(!staged_a.exists(), "the staging file must be moved, not copied");
+        let blob = dir
+            .path()
+            .join("files")
+            .join(format!("report_{}.pdf", landed.document_id));
+        assert!(blob.exists(), "expected blob at {}", blob.display());
+
+        // Same bytes, different name: the earlier blob is authoritative.
+        let staged_b = dir.path().join("staging-b.bin");
+        std::fs::write(&staged_b, &payload).unwrap();
+        let again = svc
+            .adopt_staged_file(StagedUploadParams {
+                filename: "copy.pdf".to_string(),
+                format: "pdf".to_string(),
+                staged: staged_b.clone(),
+                sha256,
+                size: payload.len() as u64,
+                width: None,
+                height: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(again.document_id, landed.document_id);
+        assert!(!staged_b.exists(), "a dedup hit drops the staging file");
+        assert_eq!(std::fs::read_dir(dir.path().join("files")).unwrap().count(), 1);
     }
 
     /// `upload_file` writes to `<dir>/<sanitized_stem>_<document_id>.<safe_ext>`.

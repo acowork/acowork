@@ -206,6 +206,15 @@ async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
         > {
             unimplemented!()
         }
+        async fn adopt_staged_file(
+            &self,
+            _params: acowork_runtime::usecases::attachment::StagedUploadParams,
+        ) -> Result<
+            acowork_runtime::usecases::attachment::UploadedFileResponse,
+            acowork_runtime::usecases::attachment::AttachmentError,
+        > {
+            unimplemented!()
+        }
         async fn read_file(
             &self,
             document_id: &str,

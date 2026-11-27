@@ -29,7 +29,8 @@ pub use agent_tools::{
     MergedToolsResponse, PutBuiltinToolsBody, PutMcpServersBody, PutMcpToolsBody,
 };
 pub use attachment::{
-    AttachmentError, AttachmentService, MAX_UPLOAD_BYTES, UploadFileParams, UploadedFileResponse,
+    AttachmentError, AttachmentService, StagedUploadParams, UploadFileParams,
+    UploadedFileResponse, max_upload_bytes,
 };
 pub use chat_usage::ChatUsageService;
 pub use debug_service::DebugService;

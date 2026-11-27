@@ -19,7 +19,7 @@ use std::time::Duration;
 use axum::body::Bytes;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{OriginalUri, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header::RETRY_AFTER},
     response::{IntoResponse, Response},
     routing::{any, get, post, put},
@@ -349,6 +349,30 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/files/{document_id}",
             get(proxy_download_file),
         )
+        // ADR-122 §3: the chunked upload contract, verbatim. Two stores live
+        // behind these paths — `/sessions/{sid}/uploads` (attachments) and
+        // `/workspaces/uploads` (hosted-app save) — and the Gateway adds
+        // nothing to either: the device that owns the bytes owns the rules.
+        //
+        // One handler for all of them, deriving the upstream path from the
+        // request URI: five verbs × two stores as five bespoke handlers would
+        // be ten copies of "strip `/api/agents/{id}`, forward the rest".
+        // (The two wildcard patterns exist because a wildcard segment must
+        // match at least one character, and `POST …/uploads` is the bare
+        // create call.)
+        .route(
+            "/api/agents/{id}/sessions/{sid}/uploads",
+            any(proxy_upload_chunk),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{sid}/uploads/{*rest}",
+            any(proxy_upload_chunk),
+        )
+        .route("/api/agents/{id}/workspaces/uploads", any(proxy_upload_chunk))
+        .route(
+            "/api/agents/{id}/workspaces/uploads/{*rest}",
+            any(proxy_upload_chunk),
+        )
         // Routes 6-9: Workspace config CRUD
         .route(
             "/api/agents/{id}/workspaces/{ws_id}",
@@ -432,6 +456,14 @@ pub fn proxy_routes() -> Router<AppState> {
         .route(
             "/api/agents/{id}/mcp-ensure/{name}",
             get(proxy_get_mcp_ensure),
+        )
+        // Retry a failed MCP connect. Pure reverse-proxy to the Runtime's
+        // `POST /agents/{id}/mcp-reconnect`: the reconnect runs in the Agent
+        // process and its progress is read back from `/mcp-tools`'
+        // `server_status`, so the Gateway only forwards the signal.
+        .route(
+            "/api/agents/{id}/mcp-reconnect",
+            post(proxy_post_mcp_reconnect),
         )
         // ADR-104: dismiss / restore one manifest-declared MCP
         // recommendation. Pure reverse-proxy — the recommendation list is
@@ -1689,6 +1721,54 @@ async fn proxy_upload_file(
     .await
 }
 
+/// Reverse-proxy the ADR-122 chunked-upload verbs to the Runtime.
+///
+/// `PUT …/{upload_id}/{offset}` bodies are one 2 MiB chunk, so the generic
+/// `Bytes` buffering this proxy already does is bounded by the contract rather
+/// than by the caller (the whole reason for the fixed chunk size, ADR-122 D2).
+/// The upstream path is taken from the original URI, which keeps this one
+/// handler correct for both stores and all five verbs.
+async fn proxy_upload_chunk(
+    State(state): State<AppState>,
+    // Two route shapes feed this handler (`{id}` + `{sid}` and `{id}` alone),
+    // so the params arrive as a map rather than a tuple.
+    Path(params): Path<std::collections::HashMap<String, String>>,
+    method: axum::http::Method,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(id) = params.get("id").cloned() else {
+        return (StatusCode::BAD_REQUEST, "unexpected upload path").into_response();
+    };
+    let full = uri.path();
+    let prefix = format!("/api/agents/{id}");
+    let Some(path) = full.strip_prefix(&prefix) else {
+        return (StatusCode::BAD_REQUEST, "unexpected upload path").into_response();
+    };
+    let query = uri.query().unwrap_or("");
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    // A method axum accepted always converts; a failure here would mean the
+    // upstream call silently changed verb, so say so instead of guessing.
+    let Ok(upstream_method) = reqwest::Method::from_bytes(method.as_str().as_bytes()) else {
+        return (StatusCode::METHOD_NOT_ALLOWED, "unsupported upload verb").into_response();
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        path,
+        query,
+        upstream_method,
+        payload,
+        &headers,
+    )
+    .await
+}
+
 /// Reverse-proxy `GET /api/agents/{id}/files/{document_id}`
 /// to Runtime's `GET /files/{document_id}` (ADR-046 blob download).
 ///
@@ -2292,6 +2372,30 @@ async fn proxy_get_mcp_ensure(
 ) -> Response {
     let path = format!("/agents/{}/mcp-ensure/{}", id, name);
     proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/mcp-reconnect`
+/// to the Runtime's `POST /agents/{id}/mcp-reconnect`.
+///
+/// The Tools panel's retry for a failed connect. Fire-and-forget: the Runtime
+/// only signals its MCP config watcher, and the outcome is read back through
+/// `/mcp-tools` (`server_status`), exactly like any other connect pass.
+async fn proxy_post_mcp_reconnect(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{}/mcp-reconnect", id);
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::POST,
+        None,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `PUT /api/agents/{id}/mcp-servers`

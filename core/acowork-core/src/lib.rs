@@ -95,6 +95,7 @@ pub mod supervisor;
 pub mod timeout_config;
 pub mod tools;
 pub mod turn_speaker;
+pub mod upload;
 pub mod workspace;
 
 // Re-exports for convenience

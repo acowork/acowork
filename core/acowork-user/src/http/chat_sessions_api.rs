@@ -222,6 +222,11 @@ pub fn chat_session_routes() -> Router<AppState> {
             "/internal/chat-sessions/{session_id}/files/{attachment_id}/{message_id}/{target}",
             get(system_download_message_attachment),
         )
+        // ADR-122 §3: the chunked path for a file too large to send in one
+        // body. Same `{store}`, same participation authority at `complete`;
+        // the single-request `POST …/files` stays for everything under one
+        // chunk (D9).
+        .merge(crate::http::uploads::upload_routes())
 }
 
 // ── Request / response types ──────────────────────────────────────────
@@ -2057,7 +2062,7 @@ async fn data_dir_any(state: &AppState) -> std::path::PathBuf {
 
 /// Offload a blocking filesystem step off the reactor (same helper shape as
 /// `chat_api::offload`, with the error mapped through `internal`).
-async fn offload<T, F>(f: F) -> Result<T, ApiError>
+pub(crate) async fn offload<T, F>(f: F) -> Result<T, ApiError>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
     T: Send + 'static,
