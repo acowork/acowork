@@ -1335,6 +1335,9 @@ impl NodeControlPlane {
                 .merge(crate::fs_browse::router(node_http_state.clone()))
                 .merge(crate::package_http::router(node_http_state.clone()))
                 .merge(crate::node_api::router(node_http_state.clone()))
+                // ADR-123: this node's storage rows + the fan-out over the
+                // Runtimes it hosts (Gateway → Node → Runtime).
+                .merge(crate::storage_api::router(node_http_state.clone()))
                 // ADR-091 §5.5: the eight `/lsp/...` registry routes.
                 .merge(crate::lsp_api::router(node_http_state));
             let listener = match tokio::net::TcpListener::bind(&proxy_bind).await {

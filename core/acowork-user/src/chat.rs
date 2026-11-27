@@ -445,6 +445,16 @@ pub fn ordered<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
+/// Root of the user-to-user pair store (`{data_dir}/users`).
+///
+/// The pair layout is this module's to own (ADR-076 §决策 8), so a caller that
+/// only needs "how big is the whole tree" (ADR-123's storage report) asks for
+/// the root instead of re-deriving the path — a second `.join("users")` is
+/// exactly what the ci red line is there to stop.
+pub fn pair_store_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("users")
+}
+
 /// Canonical `chat_id` for a pair — order-independent.
 pub fn chat_id(a: &str, b: &str) -> String {
     let (lo, hi) = ordered(a, b);

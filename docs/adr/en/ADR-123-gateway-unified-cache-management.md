@@ -57,11 +57,10 @@ The ADR-122 review found the transfer store is a shared multi-agent write surfac
 ```mermaid
 graph LR
     D["Desktop settings/gateway cache-management card"] -->|"GET aggregated report / POST cleanup"| G["Gateway: aggregate + forward (no disk scans, no deletion execution)"]
-    G --> L["Gateway's own: logs / package download cache (the sole local-statistics exception)"]
-    G -->|"user-service admin endpoints"| U["user: chat files/ + transfer store"]
-    G -->|"memory_proxy"| M["memory: instances/* usage"]
-    G -->|"pm / doc admin endpoints"| P["pm: SQLite / doc: library"]
-    G -->|"Node reverse proxy → Runtime HTTP"| R["Runtime: leftover .uploads / session caches / workspace"]
+    G --> L["Gateway's own: logs (the sole local-statistics exception)"]
+    G -->|"user internal endpoints"| U["user: expired transfers + leftover upload chunks"]
+    G -->|"embed endpoints"| E["embed: downloaded models (incl. .downloading leftovers)"]
+    G -->|"Node endpoints (fan-out to local Runtimes)"| R["node: node logs / runtime: expired .uploads + logs"]
     W["Gateway volume-level watermark check (D7, default 90%)"] -->|"alarm event"| D2["Desktop dialog → click → cache-management card"]
 ```
 
@@ -69,14 +68,20 @@ graph LR
 
 | Service | Cache class (cleanable) | Data class (display / controlled cleanup only) | Report channel |
 |---|---|---|---|
-| Gateway itself | `data/logs`, package-manager download cache | — | local (the sole red-line-1 exception) |
-| user service | transfer-store completed/expired entries (controlled, paired with ADR-122 D10 TTL) | chat `files/` attachments, in-flight transfers, account data | user admin endpoints |
-| memory service | — | `instances/*/memory.db` + vector indexes | `memory_proxy` |
-| pm service | — | project/task SQLite | pm admin endpoints |
-| doc service | — | document library | doc admin endpoints |
-| Runtime (per Node) | leftover `.uploads` chunks, session temp caches | agent workspace, session data, per-agent assets | Node reverse proxy → Runtime HTTP |
+| Gateway itself | `data/logs` (files past the retention window) | `package-registry`, `data/apps` | local (the sole red-line-1 exception) |
+| user service | expired transfer entries (`transfers-expired`, paired with ADR-122 D10 TTL), `uploads` chunk leftovers | chat `files/` attachments, in-flight transfers | user `GET /internal/storage-report` / `POST /internal/storage-cleanup` |
+| embed service | downloaded models other than the loaded one, `.downloading` leftovers | — (the loaded model is not offered for cleanup) | embed `GET /storage/report` / `POST /storage/cleanup` |
+| node service (per Node) | node logs | installed packages (`packages`) | node `GET /storage/report` / `POST /storage/cleanup` |
+| Runtime (per Node, aggregated by the node) | expired `.uploads` chunks, logs | session data, agent workspace | node fan-out → Runtime `GET /internal/storage-report` / `POST /internal/storage-cleanup` |
+| memory / pm / doc | — | no report endpoint (see below) | — |
 
 One classification criterion: **does deletion lose a user/business asset?** Cache class = regenerable or due-for-recycling temporaries; everything else is data class.
+
+**memory / pm / doc ship no self-report endpoint in v1** (user ruling, 2026-11-23: "nothing to clean up, so no cache-management interface"). All three hold data class only (memory.db + vector indexes, project/task SQLite, the document library), so the cleanup branch of such an endpoint would have no action behind it — a numbers-only interface puts a button on screen that can never be pressed. Their read-only data rows are omitted for the same reason: the card does not show usage nobody can act on. A new service that genuinely owns cleanable bytes joins the card by implementing the two endpoints.
+
+**Implementation-time corrections (divergences found while writing the code, landed per the real semantics):**
+- `package-registry` is **data class**. The ADR originally called it a "package-manager download cache", but it is the only distribution source for `.bot` packages — deleting it makes every Node install/upgrade a 404, i.e. deletion loses a business asset.
+- The original inventory missed **embed**: the ONNX models under `{data_dir}/models` (a single fp16 model runs into hundreds of MB) are the largest reclaimable cache on the machine and must appear in the reporting surface.
 
 ### 3.2 Alarm flow
 
@@ -98,7 +103,7 @@ One classification criterion: **does deletion lose a user/business asset?** Cach
 
 ## 5. Consequences
 
-- Upside: one governance surface; a new service joins by implementing two endpoints; users get full visibility and control over disk usage; the Gateway boundary stays clean (no scans, no deletion execution, no auto-remediation); ADR-122's transfer store needs no quota of its own.
+- Upside: one entry point — cache management appears only on the Gateway tab; the "cache management" placeholder that General → Storage reserved for ADR-123 is removed by this ADR, leaving that card with the data directory and the single-file upload ceiling only. One governance surface; a new service joins by implementing two endpoints; users get full visibility and control over disk usage; the Gateway boundary stays clean (no scans, no deletion execution, no auto-remediation); ADR-122's transfer store needs no quota of its own.
 - Downside / residual risk (explicitly accepted): the alarm is after-the-fact visibility + manual reclamation — **it produces no backpressure**. A runaway writer can keep filling the disk between alarm and user response, harming same-machine SQLite services (memory/pm/doc write failures). Mitigations: ADR-122 D10's 24 h TTL auto-recycling, the response headroom the 90% threshold leaves, and the dialog's immediacy. Accepted by user ruling (Q2-bis); if incidents materialize, the upgrade path is in §1.4.
 - Rollback: the card, the aggregation endpoint and the alarm event are all additive — removing them returns to the "no governance surface" state; per-service self-report endpoints are read-only + explicit-cleanup, no destructive surface.
 
@@ -116,4 +121,5 @@ One classification criterion: **does deletion lose a user/business asset?** Cach
 |---|---|---|
 | Unified cache management replaces per-store quotas | "单独给这个设限意义不大，应该是整个 gateway 有个缓存管理……类似微信的缓存数据管理，可以自行删除缓存" | D1, D4, D6 |
 | Global watermark = alarm shape | "全局磁盘水位要加，类似于服务器磁盘报警，比如说 90%，要 desktop 弹框提醒用户，用户点击弹框跳转到 gateway 缓存管理页面……gateway 只负责报警到前端" | D5, D7, §1.4 |
+| Services with nothing to clean get no self-report endpoint | "没什么可清理的服务，就不用开发缓存管理接口了，比如你列出来的 memory、pm、doc" | §3.1 (the memory/pm/doc exclusion) |
 | The four invariants | "数据和缓存都由服务自报，并且删除只能删除缓存，具体删多少由各个服务自己决定，gateway 不参与业务，只做通信转发。这个是合理的，要守住" | §1.3 red lines 1–4 |

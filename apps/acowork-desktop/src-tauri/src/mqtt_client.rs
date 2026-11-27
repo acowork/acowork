@@ -190,6 +190,16 @@ pub const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     // *event* — the catch-up for anything missed while disconnected is
     // the subscriber's refetch on each MQTT connect edge.
     ("acowork/user/profiles/changed", MqttQoS::AtLeastOnce),
+    // ── Disk-watermark alarm state (ADR-123 D5/D7) ──
+    // The Gateway samples the volume `data_dir` lives on and publishes a
+    // **retained** `DiskWatermark` JSON here whenever the used share crosses
+    // `[cache].disk_alarm_percent` (and hourly after, so a dismissed dialog
+    // comes back). Retained is the whole catch-up mechanism: a Desktop that
+    // starts while the disk is already 95 % full learns it on subscribe
+    // instead of waiting up to one poll interval. Same prefix rule as above —
+    // outside `acowork/global/`, which every Runtime decodes as a protobuf
+    // `DataEnvelope`.
+    ("acowork/desktop/storage", MqttQoS::AtLeastOnce),
     // ADR-043: Retained per-session config + state. Runtime publishes
     // config (title/model/provider/workspace/reasoning_effort/temperature)
     // and state (status/message_count/tokens/ratio/context_usage) on

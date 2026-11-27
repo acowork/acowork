@@ -11,3 +11,4 @@ pub mod pool;
 pub mod registry;
 pub mod server;
 pub mod shutdown;
+pub mod storage;

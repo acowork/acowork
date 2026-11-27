@@ -1205,7 +1205,6 @@
     "maxUploadSize": "Max file size",
     "maxUploadSizeHint": "One ceiling for every upload — chat attachments, bot file saves and intent attachments. Chunked uploads resume where they stopped, so a large file no longer has a separate limit from a small one. Takes effect for uploads started after the Gateway and its upload services restart.",
     "cacheManagement": "Cache management",
-    "cacheManagementSoon": "Reserved for ADR-123: downloaded models, memory databases and cached documents will be listed and prunable here.",
     "about": "About",
     "resetOnboarding": "Reset Onboarding",
     "resetOnboardingDesc": "Reset the onboarding wizard to reconfigure your Gateway connection and API keys. Gateway models cache will be reloaded from disk (no re-download needed).",
@@ -1218,7 +1217,6 @@
     "nodesOffline": "Offline",
     "nodesUnassigned": "Unassigned",
     "nodesUnassignedDesc": "Bots without a known hosting node",
-    "cacheTitle": "Cache & storage",
     "cache": {
       "volumeLine": "Volume: {{used}} used of {{total}} ({{percent}}%)",
       "volumeUnknown": "Volume watermark unavailable",

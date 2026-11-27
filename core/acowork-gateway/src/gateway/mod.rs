@@ -1497,6 +1497,18 @@ impl Gateway {
             });
         }
 
+        // ADR-123 D5/D7: sample the volume `data_dir` lives on and publish a
+        // **retained** watermark on `acowork/desktop/storage` when the used
+        // share crosses `[cache].disk_alarm_percent`. A volume-level `statfs`
+        // reads no service directory, so this stays clear of the fs red line.
+        // The only action is the alarm: no write refusal, no automatic
+        // cleanup, no per-store quota (ADR-123 §1.4).
+        let _storage_watch_handle = crate::storage_watch::spawn_watcher(
+            std::path::PathBuf::from(&self.config.data_dir),
+            self.config.cache.clone(),
+            mqtt_gw_client.as_deref().cloned(),
+        );
+
         // Reconcile loop: periodic safety net for the
         // `running_agents` ↔ `agent_registry` consistency contract.
         //
@@ -1951,6 +1963,7 @@ mod tests {
             security: crate::config::SecurityConfig::default(),
             relay: crate::config::RelayClientConfig::default(),
             apps: crate::config::AppsConfig::default(),
+            cache: crate::config::CacheConfig::default(),
         }
     }
 

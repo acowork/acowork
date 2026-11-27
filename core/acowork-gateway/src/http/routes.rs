@@ -378,6 +378,11 @@ pub fn build_router(state: AppState) -> Router {
         // diagnostic panel. Remote Desktops reach this over the same
         // HTTP surface as everything else (P2-1).
         .merge(crate::http::services_api::services_routes())
+        // ADR-123 §3: unified cache management. The Gateway aggregates every
+        // participating service's `storage-report` and forwards the user's
+        // cleanup click — it never scans a service tree and never deletes a
+        // data-class byte itself (§1.3 red lines 1–4).
+        .merge(crate::http::cache_api::cache_routes())
         // ADR-084: the whole user domain (accounts, profiles, avatars,
         // user-to-user chat) now lives in the `acowork-user` process. The
         // Gateway prose nothing here — `user_proxy` forwards the public

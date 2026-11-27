@@ -16,6 +16,7 @@ pub mod search_summary;
 pub mod session_control;
 pub mod server;
 pub mod skills;
+pub mod storage;
 pub mod uploads;
 
 pub use server::{

@@ -155,26 +155,95 @@ impl Transfers {
             }
             *last = now;
         }
-        let purged = self.chunks.sweep(TRANSFER_TTL_SECS).await;
-        let mut removed = 0usize;
-        if let Ok(mut entries) = tokio::fs::read_dir(&self.blobs).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let stale = entry
-                    .metadata()
-                    .await
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.elapsed().ok())
-                    .map(|age| age.as_secs() as i64 > TRANSFER_TTL_SECS)
-                    .unwrap_or(false);
-                if stale && tokio::fs::remove_file(entry.path()).await.is_ok() {
-                    removed += 1;
-                }
+        let purged = self.sweep_chunks().await;
+        let removed = self.purge_expired().await;
+        if purged > 0 || removed > 0 {
+            tracing::info!(purged, removed_bytes = removed, "transfer store swept");
+        }
+    }
+
+    /// Landed-entry roots, for the storage report (ADR-123).
+    pub fn blobs_dir(&self) -> &Path {
+        &self.blobs
+    }
+
+    /// The chunk store fed by the Gateway's upload verbs.
+    pub fn chunks_dir(&self) -> &Path {
+        self.chunks.root()
+    }
+
+    /// Drop aborted chunk uploads past the TTL (ADR-122 D10).
+    pub async fn sweep_chunks(&self) -> usize {
+        self.chunks.sweep(TRANSFER_TTL_SECS).await
+    }
+
+    /// `(active_bytes, expired_bytes)` of the landed store, in one pass.
+    ///
+    /// `expired` is the cache-class row the Desktop may clean; `active` is
+    /// in-flight transfer payload (a data-class row: it may still be pulled by
+    /// its grantee). Both use the same TTL rule as the sweep — see
+    /// [`Self::is_stale`] — so the number on the card is the number the sweep
+    /// will actually collect.
+    pub async fn landed_bytes_by_age(&self) -> (u64, u64) {
+        let (mut active, mut expired) = (0u64, 0u64);
+        let Ok(mut entries) = tokio::fs::read_dir(&self.blobs).await else {
+            return (0, 0);
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            if Self::is_stale(&meta, TRANSFER_TTL_SECS) {
+                expired += meta.len();
+            } else {
+                active += meta.len();
             }
         }
-        if purged > 0 || removed > 0 {
-            tracing::info!(purged, removed, "transfer store swept");
+        (active, expired)
+    }
+
+    /// Delete every landed entry past the TTL; returns the bytes removed.
+    ///
+    /// The one implementation of the TTL rule for this store: the hourly sweep
+    /// and the user-triggered cleanup (ADR-123 D2) both land here.
+    pub async fn purge_expired(&self) -> u64 {
+        self.purge_older_than(TRANSFER_TTL_SECS).await
+    }
+
+    /// [`Self::purge_expired`] with an explicit age, so a test can drive the
+    /// delete path without waiting a day (or faking an mtime).
+    async fn purge_older_than(&self, max_age_secs: i64) -> u64 {
+        let mut freed = 0u64;
+        let Ok(mut entries) = tokio::fs::read_dir(&self.blobs).await else {
+            return 0;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
+            if !meta.is_file() || !Self::is_stale(&meta, max_age_secs) {
+                continue;
+            }
+            let len = meta.len();
+            if tokio::fs::remove_file(entry.path()).await.is_ok() {
+                freed += len;
+            }
         }
+        freed
+    }
+
+    /// Clamp clock skew: a file with a `modified` in the future counts as
+    /// fresh, so a backwards system-clock adjustment cannot make the sweep
+    /// eat a transfer that is still inside its TTL.
+    fn is_stale(meta: &std::fs::Metadata, max_age_secs: i64) -> bool {
+        meta.modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|age| age.as_secs() as i64 > max_age_secs)
+            .unwrap_or(false)
     }
 }
 
@@ -644,5 +713,31 @@ mod tests {
         let reloaded = second.record(&record.id).await.expect("record");
         assert_eq!(reloaded.creator_instance_id, "inst-a");
         assert_eq!(reloaded.granted_to, vec!["inst-b".to_string()]);
+    }
+
+    /// ADR-123: the report's cache/data split and the cleanup both hang off the
+    /// same TTL rule, and a transfer inside the TTL must NEVER be collected by
+    /// either — that would delete a file somebody is still entitled to pull.
+    #[tokio::test]
+    async fn a_fresh_transfer_is_data_and_never_purged() {
+        let dir = test_support::temp_dir("transfers-storage-rows");
+        let state = state(&dir);
+        let store = &state.transfers;
+        tokio::fs::create_dir_all(store.blobs_dir()).await.unwrap();
+        tokio::fs::write(store.blobs_dir().join("payload.bin"), b"12345")
+            .await
+            .unwrap();
+
+        // Fresh ⇒ counted as active, nothing expired, cleanup frees nothing.
+        assert_eq!(store.landed_bytes_by_age().await, (5, 0));
+        assert_eq!(store.purge_expired().await, 0);
+        assert!(store.blobs_dir().join("payload.bin").exists());
+
+        // The very same entry, one second older than a zero-second age limit, is
+        // collectable — and the cleanup reports the bytes it really removed.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert_eq!(store.purge_older_than(0).await, 5);
+        assert!(!store.blobs_dir().join("payload.bin").exists());
+        assert_eq!(store.landed_bytes_by_age().await, (0, 0));
     }
 }

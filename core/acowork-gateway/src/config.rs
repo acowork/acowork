@@ -220,6 +220,54 @@ pub struct GatewayConfig {
     /// Hosted-application install trust knobs (ADR-116 / design doc 34 §6.6).
     #[serde(default)]
     pub apps: AppsConfig,
+
+    /// Unified cache management + global disk-watermark alarm (ADR-123).
+    #[serde(default)]
+    pub cache: CacheConfig,
+}
+
+/// ADR-123 D5/D7: the global disk watermark.
+///
+/// A **volume-level** fact about the machine the Gateway runs on, sampled from
+/// `data_dir` with `statfs`-style free-space queries — no service directory is
+/// ever traversed to produce it (ADR-123 §1.3 red line 1's one other exception).
+/// The Gateway's only action when the watermark trips is to alarm the Desktop
+/// (D5): no write refusal, no automatic cleanup, and no per-store quota
+/// (ADR-122 Q2 / ADR-123 §1.4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheConfig {
+    /// Alarm when the used share of the volume reaches this percent.
+    #[serde(default = "default_disk_alarm_percent")]
+    pub disk_alarm_percent: f64,
+    /// How often the volume is sampled, in seconds.
+    #[serde(default = "default_disk_check_interval_secs")]
+    pub disk_check_interval_secs: u64,
+    /// Minimum gap between two alarming publishes while the level stays above
+    /// the threshold (ADR-123 §6 Q2: one dialog per crossing, not a storm).
+    #[serde(default = "default_disk_alarm_cooldown_secs")]
+    pub alarm_cooldown_secs: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            disk_alarm_percent: default_disk_alarm_percent(),
+            disk_check_interval_secs: default_disk_check_interval_secs(),
+            alarm_cooldown_secs: default_disk_alarm_cooldown_secs(),
+        }
+    }
+}
+
+fn default_disk_alarm_percent() -> f64 {
+    90.0
+}
+
+fn default_disk_check_interval_secs() -> u64 {
+    300
+}
+
+fn default_disk_alarm_cooldown_secs() -> u64 {
+    3600
 }
 
 /// Hosted-application packaging / install configuration.
@@ -1052,6 +1100,10 @@ impl GatewayConfig {
                 .as_ref()
                 .map(|c| c.apps.clone())
                 .unwrap_or_default(),
+            cache: file_config
+                .as_ref()
+                .map(|c| c.cache.clone())
+                .unwrap_or_default(),
         };
 
         config.validate()?;
@@ -1175,6 +1227,7 @@ impl Default for GatewayConfig {
             security: SecurityConfig::default(),
             relay: RelayClientConfig::default(),
             apps: AppsConfig::default(),
+            cache: CacheConfig::default(),
         }
     }
 }

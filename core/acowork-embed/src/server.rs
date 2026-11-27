@@ -1055,6 +1055,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/models/{id}/cancel-download", post(cancel_download))
         .route("/models/{id}/status", get(model_status))
         .route("/models/{id}", delete(delete_model))
+        // ADR-123: this service's storage rows + the cleanup verb for the
+        // model directories. Gateway-only surface (the Gateway is the sole
+        // aggregator); never proxied to the Desktop.
+        .route("/storage/report", get(crate::storage::storage_report))
+        .route("/storage/cleanup", post(crate::storage::storage_cleanup))
         .with_state(state)
 }
 

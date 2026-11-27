@@ -25,6 +25,9 @@ pub mod rate;
 pub mod relay;
 pub mod resource_cache;
 pub mod security;
+// ADR-123 D5/D7: the volume watermark watcher (retained publish on
+// `acowork/desktop/storage`).
+pub mod storage_watch;
 pub mod util;
 pub mod vault;
 

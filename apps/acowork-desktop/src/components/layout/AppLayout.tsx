@@ -70,6 +70,7 @@ import { MIN_FILE_WIDTH, MIN_RIGHT_WIDTH, clampFileWidth, filePaneCeiling, fitPa
 import { initFilePanelAutoState, reduceFilePanelAuto } from "./filePanelAutoCollapse";
 import { saveHostedAppFile as saveAppFile } from "../../lib/workspaceFileSave";
 import { SaveAsDialog } from "../apps/SaveAsDialog";
+import { DiskAlarmDialog } from "../common/DiskAlarmDialog";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
@@ -1601,6 +1602,11 @@ export function AppLayout() {
           Mounted once here; both the editor preview and the app canvas open it
           through `saveAsStore`. */}
       <SaveAsDialog />
+
+      {/* ADR-123 D5/D7: disk-watermark alarm. Mounted once here because
+          AppLayout owns the view/tab state the "go clean" button has to
+          switch — the dialog itself only reacts to the Gateway's event. */}
+      <DiskAlarmDialog onOpenStorage={handleOpenGatewaySettings} />
 
     </div>
   );

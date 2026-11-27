@@ -340,6 +340,33 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             return;
         }
 
+        // ── Disk-watermark alarm state (ADR-123 D5/D7) ──
+        //
+        // Retained JSON from the Gateway's `storage_watch`: the volume
+        // watermark plus `alarm_since` (unix seconds the alarm turned on, so
+        // the webview can treat one alarmed episode as one dialog) and
+        // `checked_at`. Forwarded verbatim — the payload's shape is
+        // `acowork_core::storage::DiskWatermark` flattened with those two
+        // fields, and the frontend only reads `alarm` / `used_percent` /
+        // `available_bytes` / `threshold_percent` / `alarm_since`.
+        //
+        // Deliberately no policy here: this only tells the webview the disk is
+        // full. Cleaning up stays a user click on the cache-management card
+        // (ADR-123 §1.4 — the Gateway never auto-cleans).
+        if msg.topic == "acowork/desktop/storage" {
+            match serde_json::from_slice::<serde_json::Value>(&msg.payload) {
+                Ok(payload) => {
+                    let _ = app_handle.emit("disk-watermark", payload);
+                }
+                Err(e) => tracing::warn!(
+                    "[MQTT] disk watermark payload decode failed ({} bytes): {}",
+                    msg.payload.len(),
+                    e
+                ),
+            }
+            return;
+        }
+
         // ── User-profile change signal ──
         //
         // The user service publishes this after every account/profile

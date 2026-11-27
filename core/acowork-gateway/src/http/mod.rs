@@ -12,6 +12,9 @@ pub mod bootstrap_api;
 // ADR-106 D5/D9: the Chat surface's execution-block read (cache + Runtime
 // projection orchestration) — the only place that composes the two.
 pub mod chat_blocks;
+// ADR-123 §3: the unified cache-management aggregate + forward surface
+// (`GET /api/cache/report`, `POST /api/cache/cleanup`).
+pub mod cache_api;
 pub mod config_api;
 pub mod cron_api;
 pub mod debug_mqtt;

@@ -842,7 +842,6 @@
     "maxUploadSize": "单文件上限",
     "maxUploadSizeHint": "所有上传共用一个上限：聊天附件、Bot 文件保存、intent 附件。分块上传可续传，因此大文件不再和小文件分档。修改在 Gateway 与上传服务重启后对新的上传生效。",
     "cacheManagement": "缓存管理",
-    "cacheManagementSoon": "为 ADR-123 预留：后续在这里列出并可清理已下载模型、记忆数据库与文档缓存。",
     "about": "关于",
     "resetOnboarding": "重置引导流程",
     "resetOnboardingDesc": "重置引导向导以重新配置 Gateway 连接和 API 密钥。Gateway 模型缓存将从磁盘重新加载（无需重新下载）。",
@@ -855,7 +854,6 @@
     "nodesOffline": "离线",
     "nodesUnassigned": "未分配",
     "nodesUnassignedDesc": "无法匹配到已知节点的 Bot",
-    "cacheTitle": "缓存与存储",
     "cache": {
       "volumeLine": "磁盘：已用 {{used}} / 共 {{total}}（{{percent}}%）",
       "volumeUnknown": "磁盘水位不可用",

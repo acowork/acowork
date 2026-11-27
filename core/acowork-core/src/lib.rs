@@ -91,6 +91,7 @@ pub mod relay;
 pub mod retrieval;
 pub mod session_meta;
 pub mod shutdown;
+pub mod storage;
 pub mod supervisor;
 pub mod timeout_config;
 pub mod tools;

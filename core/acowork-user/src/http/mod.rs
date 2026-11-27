@@ -21,6 +21,7 @@ pub mod auth_api;
 pub mod chat_api;
 pub mod chat_sessions_api;
 pub mod profile_api;
+pub mod storage_api;
 pub mod transfers;
 pub mod uploads;
 
@@ -60,6 +61,10 @@ pub fn build_router(state: &AppState) -> Router<AppState> {
     Router::new()
         .merge(user_router(state))
         .route("/internal/user-profiles", axum::routing::get(profile_snapshot))
+        // ADR-123: the user domain's self-reported storage rows + the cleanup
+        // verb for its cache-class ones. Same loopback-only trust model as the
+        // snapshot above.
+        .merge(crate::http::storage_api::storage_routes())
         .merge(crate::health::health_route())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

@@ -57,11 +57,10 @@ ADR-122 评审发现 transfer store 是共享多 agent 写面，存在磁盘耗�
 ```mermaid
 graph LR
     D["Desktop settings/gateway 缓存管理卡片"] -->|"GET 聚合报告 / POST 清理"| G["Gateway：聚合 + 转发（不扫盘、不执行删除）"]
-    G --> L["Gateway 自有：logs / 包下载缓存（唯一本地统计例外）"]
-    G -->|"user 服务 admin 端点"| U["user：chat files/ + transfer store"]
-    G -->|"memory_proxy"| M["memory：instances/* 占用"]
-    G -->|"pm / doc admin 端点"| P["pm：SQLite ／ doc：文档库"]
-    G -->|"Node 反代 → Runtime HTTP"| R["Runtime：.uploads 残留 / 会话缓存 / workspace"]
+    G --> L["Gateway 自有：logs（唯一本地统计例外）"]
+    G -->|"user internal 端点"| U["user：过期中转件 + 上传分块残留"]
+    G -->|"embed 端点"| E["embed：已下载模型（含 .downloading 残留）"]
+    G -->|"Node 端点（fan-out 本机 Runtime）"| R["node：node 日志 ／ runtime：.uploads 过期块 + 日志"]
     W["Gateway 卷级水位检测（D7，默认 90%）"] -->|"报警事件"| D2["Desktop 弹框 → 点击跳转缓存管理卡片"]
 ```
 
@@ -69,14 +68,20 @@ graph LR
 
 | 服务 | 缓存类（可清理） | 数据类（仅展示 / 受控清理） | 报告通道 |
 |---|---|---|---|
-| Gateway 自身 | `data/logs` 日志、包管理器下载缓存 | — | 本地（红线 1 唯一例外） |
-| user 服务 | transfer store 已完成/过期中转件（受控，配合 ADR-122 D10 TTL） | chat `files/` 附件、在途 transfer 件、账号数据 | user admin 端点 |
-| memory 服务 | — | `instances/*/memory.db` + 向量索引 | `memory_proxy` |
-| pm 服务 | — | 项目/任务 SQLite | pm admin 端点 |
-| doc 服务 | — | 文档库 | doc admin 端点 |
-| Runtime（每 Node） | `.uploads` 残留块、会话临时缓存 | agent workspace、会话数据、per-agent 资产 | Node 反代 → Runtime HTTP |
+| Gateway 自身 | `data/logs`（超保留期的日志文件） | `package-registry`、`data/apps` | 本地（红线 1 唯一例外） |
+| user 服务 | 已过期中转件（`transfers-expired`，配合 ADR-122 D10 TTL）、`uploads` 分块残留 | chat `files/` 附件、在途 transfer 件 | user `GET /internal/storage-report` / `POST /internal/storage-cleanup` |
+| embed 服务 | 已下载模型（非当前加载）、`.downloading` 残留 | —（当前加载的模型不计入可清理） | embed `GET /storage/report` / `POST /storage/cleanup` |
+| node 服务（每 Node） | Node 日志 | 已安装包（`packages`） | node `GET /storage/report` / `POST /storage/cleanup` |
+| Runtime（每 Node，经 node 汇总） | `.uploads` 超期块、日志 | 会话数据、agent workspace | node fan-out → Runtime `GET /internal/storage-report` / `POST /internal/storage-cleanup` |
+| memory / pm / doc | — | 不提供报告端点（见下） | — |
 
 分类判据只有一条：**删除后是否丢失用户/业务资产**。缓存类 = 可由系统重新生成或本就该回收的临时物；其余一律数据类。
+
+**memory / pm / doc 首版不实现自报端点**（2026-11-23 用户拍板：「没什么可清理的服务，就不用开发缓存管理接口了」）。三者持有的全是数据类（memory.db + 向量索引、项目/任务 SQLite、文档库），端点的清理分支背后没有任何可执行动作——只报数字的接口会摆出一个永远点不动的按钮。它们的数据类只读行也一并省略：卡片不展示无从处置的占用，避免「看得到、清不掉」。新服务只要真有可清理字节，接入两个端点即自动出现在卡片上。
+
+**实现期修正（写码时发现的原文偏差，已按实际语义落地）**：
+- `package-registry` 归**数据类**。原文写作「包管理器下载缓存」，但它是 `.bot` 包的唯一分发源——删掉会让所有 Node 的安装/升级 404，属于「删了丢业务资产」。
+- 原文漏了 **embed**：`{data_dir}/models` 下的 ONNX 模型（单个 fp16 模型上百 MB）是这台机器上最大的一块可回收缓存，必须进报告面。
 
 ### 3.2 报警流
 
@@ -98,7 +103,7 @@ graph LR
 
 ## 5. 后果
 
-- **收益**：单一治理面，新服务实现两个端点即纳入；用户对磁盘占用有完整可见性与处置权；Gateway 边界保持干净（不扫盘、不执行删除、不自动处置）；ADR-122 transfer store 无需自建配额。
+- **收益**：单一入口——缓存管理只出现在 Gateway 标签，`General → 存储` 中原先为 ADR-123 预留的「缓存管理」占位块随本 ADR 落地一起删除，那张卡片只保留数据目录与单文件上传上限；单一治理面，新服务实现两个端点即纳入；用户对磁盘占用有完整可见性与处置权；Gateway 边界保持干净（不扫盘、不执行删除、不自动处置）；ADR-122 transfer store 无需自建配额。
 - **代价与残留风险（显式接受）**：报警是事后可见 + 人工回收，**不产生背压**——失控写入者可在报警与用户响应之间继续写满磁盘，殃及同机 SQLite 服务（memory/pm/doc 写失败）。缓解：ADR-122 D10 的 24 h TTL 自动回收、90% 阈值留出的响应余量、弹框的即时性。该风险由用户拍板接受（Q2-bis）；若实测出现事故，升级路径见 §1.4。
 - **回滚**：卡片、聚合端点、报警事件均为新增面，删除即回退到「无治理面」状态；各服务自报端点为只读 + 显式清理，无破坏面。
 
@@ -116,4 +121,5 @@ graph LR
 |---|---|---|
 | 统一缓存管理取代 per-store 配额 | 「单独给这个设限意义不大，应该是整个 gateway 有个缓存管理……类似微信的缓存数据管理，可以自行删除缓存」 | D1、D4、D6 |
 | 全局水位 = 报警形态 | 「全局磁盘水位要加，类似于服务器磁盘报警，比如说 90%，要 desktop 弹框提醒用户，用户点击弹框跳转到 gateway 缓存管理页面……gateway 只负责报警到前端」 | D5、D7、§1.4 |
+| 无缓存可清的服务不接自报端点 | 「没什么可清理的服务，就不用开发缓存管理接口了，比如你列出来的 memory、pm、doc」 | §3.1（memory/pm/doc 排除项） |
 | 四条不变量 | 「数据和缓存都由服务自报，并且删除只能删除缓存，具体删多少由各个服务自己决定，gateway 不参与业务，只做通信转发。这个是合理的，要守住」 | §1.3 红线 1–4 |

@@ -61,4 +61,5 @@ pub mod proxy;
 pub mod service;
 pub mod sidecar;
 pub mod state;
+pub mod storage_api;
 

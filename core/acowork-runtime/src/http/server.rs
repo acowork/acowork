@@ -635,6 +635,17 @@ impl RuntimeHttpServer {
         // (ADR-077).
         let app = Router::new()
             .route("/health", get(health))
+            // ADR-123: this Runtime's storage rows. Gateway-only surface —
+            // reached as Gateway → Node (`/storage/report` fan-out) → here;
+            // the public proxy never routes this prefix.
+            .route(
+                "/internal/storage-report",
+                get(crate::http::storage::storage_report),
+            )
+            .route(
+                "/internal/storage-cleanup",
+                post(crate::http::storage::storage_cleanup),
+            )
             .route(
                 "/sessions",
                 get(list_sessions)

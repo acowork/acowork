@@ -22,6 +22,7 @@ import { GatewayAddressPicker } from "../connection/GatewayAddressPicker";
 import { isHttpsUrl } from "../../lib/gatewayUrl";
 import { ProfileTab } from "./ProfileTab";
 import { ServicesPanel } from "./ServicesPanel";
+import { CacheStorageCard } from "./CacheStorageCard";
 import { SectionPane } from "../common/SectionPane";
 import { OutlineSettingsIcon as SettingsIcon } from "../common/SettingsIcon";
 import { Tooltip } from "../common/Tooltip";
@@ -115,6 +116,7 @@ export function GatewayTab() {
   }, []);
   // P1: collapse state for the new diagnostic cards.
   const [servicesOpen, setServicesOpen] = useState(true);
+  const [cacheOpen, setCacheOpen] = useState(true);
   const [eventsOpen, setEventsOpen] = useState(true);
   // Per-node level-1 collapse state inside the Nodes section.
   const [openNodeIds, setOpenNodeIds] = useState<Record<string, boolean>>({});
@@ -542,6 +544,21 @@ export function GatewayTab() {
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <ServicesPanel />
+        </ExpandableRow>
+      </ListBox>
+
+      {/* ADR-123 §4: unified cache management. Every service's storage rows
+          with a delete button only where the owner says the bytes are
+          cleanable; data-class rows are shown, never offered a delete. */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={cacheOpen}
+          onToggle={() => setCacheOpen((v) => !v)}
+          title={t("settings.cacheManagement")}
+          ariaLabel={t("settings.cacheManagement")}
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
+        >
+          <CacheStorageCard />
         </ExpandableRow>
       </ListBox>
 
@@ -1454,16 +1471,6 @@ function GeneralTab() {
             </div>
             <p className="mt-1 text-10 text-text-tertiary">
               {t("settings.maxUploadSizeHint")}
-            </p>
-          </div>
-
-          {/* Cache management — ADR-123 reserves this block */}
-          <div>
-            <label className="block mb-1.5 text-xs text-text-tertiary ">
-              {t("settings.cacheManagement")}
-            </label>
-            <p className="text-10 text-text-tertiary">
-              {t("settings.cacheManagementSoon")}
             </p>
           </div>
         </ExpandableRow>
