@@ -569,6 +569,106 @@ fn attachments_upload_reference_download_and_cross_session_refusal() {
     assert!((400..500).contains(&code), "foreign attachment id refused ({code}): {body}");
 }
 
+/// ADR-122 §3: the chat attachment store's chunked path, driven the way the
+/// composer drives it — through the Gateway's transparent user proxy, against
+/// the real user service.
+///
+/// This is the seam no in-process test reaches: the store's own tests call the
+/// user service's router directly, and the multipart test above proves the old
+/// route still works. What neither covers is "the bytes the Desktop sends in
+/// 2 MiB pieces over `/api/chat-sessions/{sid}/uploads` land as the same blob
+/// the message references and the download returns".
+#[test]
+fn chunked_chat_attachment_round_trip_through_the_gateway() {
+    let _serial = lock_chain();
+    let (gw, token, _root) = boot_multi_user("chunk");
+    let http = gw.http_port;
+    let sid = default_pair(http, &token, "agent-chunk-1")["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Two chunks' worth, so the offset arithmetic is exercised, and a payload
+    // whose bytes depend on the offset so a duplicated or reordered chunk
+    // cannot pass unnoticed.
+    let chunk = acowork_core::upload::CHUNK_BYTES as usize;
+    let size = chunk + 4096;
+    let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let sha = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(&payload);
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+
+    let auth = [("Authorization", &format!("Bearer {token}") as &str)];
+    let (code, _, body) = http_request(
+        http,
+        "POST",
+        &format!("/api/chat-sessions/{sid}/uploads"),
+        Some(serde_json::to_vec(&serde_json::json!({
+            "name": "big.pdf", "size": payload.len(), "sha256": sha,
+        })).unwrap().as_slice()),
+        "application/json",
+        &auth,
+    );
+    assert_eq!(code, 201, "create through the Gateway: {}", body_str(&body));
+    let upload_id = json_parse(&body_str(&body))["uploadId"]
+        .as_str()
+        .expect("uploadId")
+        .to_string();
+
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let end = (offset + chunk).min(payload.len());
+        let (code, _, b) = http_request(
+            http,
+            "PUT",
+            &format!("/api/chat-sessions/{sid}/uploads/{upload_id}/{offset}"),
+            Some(&payload[offset..end]),
+            "application/octet-stream",
+            &auth,
+        );
+        assert_eq!(code, 200, "chunk at {offset}: {}", body_str(&b));
+        offset = end;
+    }
+
+    let (code, _, body) = http_request(
+        http,
+        "POST",
+        &format!("/api/chat-sessions/{sid}/uploads/{upload_id}/complete?mime=application/pdf"),
+        None,
+        "application/json",
+        &auth,
+    );
+    assert_eq!(code, 201, "complete creates the attachment: {}", body_str(&body));
+    let landed = json_parse(&body_str(&body));
+    let aid = landed["id"].as_str().expect("landed attachment id").to_string();
+    assert_eq!(landed["size"].as_u64(), Some(payload.len() as u64));
+
+    // The landed attachment is usable exactly like a multipart one: the
+    // message references it, the store echoes its metadata, the download is
+    // byte-exact.
+    let m = serde_json::json!({"body": "big one", "to": "", "attachment_ids": [aid]});
+    let (code, body, _) = http_post_json_auth(
+        http,
+        &format!("/api/chat-sessions/{sid}/messages"),
+        &serde_json::to_vec(&m).unwrap(),
+        &token,
+    );
+    assert!((200..300).contains(&code), "message with chunked attachment: {code} {body}");
+    let (code, _, bytes) = http_get_auth(http, &format!("/api/chat-sessions/{sid}/files/{aid}"), &token);
+    assert_eq!(code, 200, "download of the chunked upload");
+    assert_eq!(bytes, payload, "byte-exact chunked round trip");
+
+    // D9: the single-request route is still the short path for small files,
+    // and both kinds coexist in one session.
+    let (small_id, _) = upload_file(http, &token, &sid, "small.txt", "text/plain", b"hello");
+    let (code, _, bytes) = http_get_auth(http, &format!("/api/chat-sessions/{sid}/files/{small_id}"), &token);
+    assert_eq!(code, 200);
+    assert_eq!(bytes, b"hello".to_vec());
+}
+
 fn upload_file(port: u16, token: &str, sid: &str, name: &str, mime: &str, bytes: &[u8]) -> (String, serde_json::Value) {
     let boundary = "----acoworkE2EBoundary";
     let mut body = Vec::new();
