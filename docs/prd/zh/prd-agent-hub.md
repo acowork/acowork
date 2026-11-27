@@ -6,18 +6,18 @@
 | 作者 | Product |
 | 日期 | 2026-06 |
 | 涉及仓库 | `ACowork`（bot 源与打包）、`ACoworkAgentHub`（注册中心、签名发布、hub.acowork.ai）、`ACoworkWebSite`（导航入口） |
-| 关联 | Roadmap Phase 7「remote `.bot` registry / Bot store」（Planning）；`dev/common/build-agent.sh`；`agents/agent-packages/` |
+| 关联 | Roadmap Phase 7「remote `.bot` registry / Bot store」（Planning）；`dev/common/build-agent.sh`；`bots/bot-packages/` |
 | 非目标声明 | 本文档不覆盖 skills 目录、付费分发、在线试用 |
 
 > **当前实现（2026-11）**：D1–D10 的产品决策仍然成立，但落地位置变了。官网那套静态页（`ACoworkWebSite/agents/*` + `dev/common/sync-agent-hub.py` + `dev/agent-hub/hub.test.js`）已被 `ACoworkAgentHub` 仓库取代：该仓库自己持有 bot 源目录、CI 打包签名、`index.json` 与站点，§11/§12 中指向 `ACoworkWebSite` 的行因此成为历史记录，保留不改写。
 >
-> **平台 bot 的真源是 `ACowork/agents/<name>-agent/`**，Hub 的 `agents/official/**` 是`tools/sync-official.py` 生成的镜像（逐字节拷贝，并在 `hub.json.mirror.source_commit` 记录所镜像的提交）。跨仓同步机制与两条检查（硬：镜像是否等于它声称的提交；软：master 是否已前进）见 `ACoworkAgentHub/CONTRIBUTING.md` 与 `docs/publishing.md`。
+> **平台 bot 的真源是 `ACowork/bots/<name>-bot/`**，Hub 的 `agents/official/**` 是`tools/sync-official.py` 生成的镜像（逐字节拷贝，并在 `hub.json.mirror.source_commit` 记录所镜像的提交）。跨仓同步机制与两条检查（硬：镜像是否等于它声称的提交；软：master 是否已前进）见 `ACoworkAgentHub/CONTRIBUTING.md` 与 `docs/publishing.md`。
 
 ---
 
 ## 1. 问题定义
 
-**用户侧**：ACowork 处于 alpha，官方已经写好 7 个可直接用的 bot（Product / PM / QA / Architect / Senior Engineer / Docs / Ponytail），并且已经产出了签好名的 `.bot` 包。但今天**没有任何地方能让一个人看到"ACowork 有哪些现成 bot、各自能干什么、要什么权限、怎么装"**。想用的唯一路径是知道 `agents/agent-packages/` 这个目录的存在——这是一个只有源码读者才知道的路径。
+**用户侧**：ACowork 处于 alpha，官方已经写好 7 个可直接用的 bot（Product / PM / QA / Architect / Senior Engineer / Docs / Ponytail），并且已经产出了签好名的 `.bot` 包。但今天**没有任何地方能让一个人看到"ACowork 有哪些现成 bot、各自能干什么、要什么权限、怎么装"**。想用的唯一路径是知道 `bots/bot-packages/` 这个目录的存在——这是一个只有源码读者才知道的路径。
 
 **平台侧**：Bot 是 ACowork 的核心分发单元（等价于 Chrome 的扩展、VS Code 的插件），但它的分发目前完全依赖 git clone。生态能不能起来，取决于第三方作者有没有一个"发布有地方去、用户有地方找"的锚点。
 
@@ -78,7 +78,7 @@
 
 ### D3：`.bot` 二进制放站点同源目录，但放独立子目录
 
-**决定**：`agents/downloads/*.bot`，由脚本从 `ACowork/agents/agent-packages/` 拷入。
+**决定**：`agents/downloads/*.bot`，由脚本从 `ACowork/bots/bot-packages/` 拷入。
 
 **理由与权衡**：
 
@@ -94,7 +94,7 @@
 
 ### D4：元数据必须生成，禁止手抄
 
-**决定**：`agents.json` 由脚本从 `agents/*/manifest.toml` 解析生成。
+**决定**：`agents.json` 由脚本从 `bots/*/manifest.toml` 解析生成。
 
 **理由**：手抄第二份元数据 = 制造第一份必然过期的文档。manifest 是 bot 的唯一真相源，Hub 只是它的一个投影。这条同时保证了未来 Desktop App 的 registry 与网页看到的是同一份数据。
 
@@ -160,7 +160,7 @@
 {
   "schema_version": 2,
   "generated_at": "2026-06-01T00:00:00Z",
-  "source": { "repo": "acowork/ACowork", "ref": "<sha>", "path": "agents/" },
+  "source": { "repo": "acowork/ACowork", "ref": "<sha>", "path": "bots/" },
   "agents": [{
     "agent_id": "com.acowork.product-manager",
     "version": "1.0.0",

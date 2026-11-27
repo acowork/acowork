@@ -34,7 +34,7 @@ acowork-ai/
 │       └── web/                  # React frontend (four-column layout UI)
 ├── docs/                         # design documents (public)
 ├── tests/                        # integration tests
-└── agents/                     # example Agent packages
+└── bots/                       # example Bot packages
 ```
 
 ### 2.1 Workspace Cargo.toml

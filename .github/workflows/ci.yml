@@ -63,7 +63,7 @@ jobs:
       - name: Integration
         run: ./dev/ci.sh integration
 
-  # The shipped `.bot` files are generated from `agents/*`. Two guards:
+  # The shipped `.bot` files are generated from `bots/*`. Two guards:
   # one inside this repo (does the artifact match its source?), one against
   # the hub, whose mirror publishes the same bytes under the same agent_id.
   packages:

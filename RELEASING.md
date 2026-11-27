@@ -34,7 +34,7 @@ node dev/common/version.mjs assert v0.1.0   # prove a tag matches VERSION
 `./dev/ci.sh check` and `./dev/ci.sh all` run `check`, so a PR that bumps one
 file and forgets the others fails CI.
 
-**Agent packages are versioned independently.** `agents/*/manifest.toml` has
+**Bot packages are versioned independently.** `bots/*/manifest.toml` has
 its own `version` and a `runtime_version` compatibility floor. Bump `version`
 only for agents you changed, in the same commit as the source edit plus the
 rebuilt `.bot`.
@@ -43,14 +43,14 @@ rebuilt `.bot`.
 
 ## 2. Agent packages and the hub mirror
 
-The desktop installer embeds `agents/agent-packages/` as a Tauri resource, so
+The desktop installer embeds `bots/bot-packages/` as a Tauri resource, so
 packages must be rebuilt **before** installers are produced. `build-agent.sh`
 pins `SOURCE_DATE_EPOCH` to the last commit that touched the agent directory,
 so a release build must come from a **clean, committed** work tree.
 
 ```bash
-./dev/common/build-agent.sh agents/<name>-agent
-cargo run --release --bin acowork-verify -- agents/agent-packages/<id>.bot
+./dev/common/build-agent.sh bots/<name>-bot
+cargo run --release --bin acowork-verify -- bots/bot-packages/<id>.bot
 ```
 
 CI's `packages` job proves the shipped `.bot` matches its source tree. It
@@ -69,7 +69,7 @@ fingerprint matches the installed one (`CONTRIBUTING.md` §Signing rules).
 `ceda819f36375e755976fcce1f45c85ba6393a36d3e4ffdd9b16688347501463`
 
 Keep the key that signed them. It lives in the git-ignored
-`agents/.signing-keys/`, staged by the maintainer; `build-agent.*` silently
+`bots/.signing-keys/`, staged by the maintainer; `build-agent.*` silently
 generates a **new** key when `developer.key` is missing, so a fresh clone must
 never be the release checkout. Changing this fingerprint later is a documented
 uninstall/reinstall migration, not a re-sign.

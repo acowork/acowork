@@ -205,7 +205,7 @@ pub enum Commands {
         /// Sign the package with developer key
         #[arg(long)]
         sign: bool,
-        /// Signing key directory (default: agents/.signing-keys)
+        /// Signing key directory (default: bots/.signing-keys)
         #[arg(long, env = "ACOWORK_PACKAGE_KEY_DIR")]
         key_dir: Option<String>,
     },

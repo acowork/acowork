@@ -787,18 +787,18 @@ run_ort_api_redline() {
 # amending §4.4 of the plan first. `testing` is here because its deliverable is
 # test files; `debugging`/`refactoring` because their fix is the source change.
 AGENT_SKILL_FILE_WRITE_ALLOWLIST="
-senior-engineer-agent/skills/debugging
-senior-engineer-agent/skills/refactoring
-senior-engineer-agent/skills/testing
+senior-engineer-bot/skills/debugging
+senior-engineer-bot/skills/refactoring
+senior-engineer-bot/skills/testing
 "
 # The packages §4.1 of the plan converts. `github.ponytail`, `document-manager`
 # and the older `agnes-*` / `project-manager` packages are out of scope: their
 # prompts are third-party or shipped earlier, so this rule does not judge them.
 AGENT_SKILL_PACKAGES="
-product-manager-agent
-quality-assurance-agent
-senior-engineer-agent
-software-architect-agent
+product-manager-bot
+quality-assurance-bot
+senior-engineer-bot
+software-architect-bot
 "
 run_agent_skill_tool_redline() {
     echo "Checking agent-skill file_write red line (plan §4.4 + §8)..."
@@ -808,21 +808,21 @@ run_agent_skill_tool_redline() {
     # A renamed or deleted allowlisted skill must fail loudly instead of
     # silently shrinking the rule to "nobody may use file_write".
     for pair in $AGENT_SKILL_FILE_WRITE_ALLOWLIST; do
-        if [ ! -f "$root/agents/$pair/SKILL.md" ]; then
-            echo "ERROR: allowlist entry '$pair' has no SKILL.md under agents/."
+        if [ ! -f "$root/bots/$pair/SKILL.md" ]; then
+            echo "ERROR: allowlist entry '$pair' has no SKILL.md under bots/."
             exit 1
         fi
     done
 
     for pkg in $AGENT_SKILL_PACKAGES; do
-        for path in "$root"/agents/"$pkg"/skills/*/SKILL.md; do
+        for path in "$root"/bots/"$pkg"/skills/*/SKILL.md; do
             [ -f "$path" ] || continue
             # project-participation names `file_write` once, in a Role line that
             # says where code goes; it is not a persistence instruction and it
             # declares no such tool.
             case "$path" in */skills/project-participation/SKILL.md) continue ;; esac
             grep -q 'file_write' "$path" || continue
-            pair="${path#"$root"/agents/}"
+            pair="${path#"$root"/bots/}"
             pair="${pair%/SKILL.md}"
             if ! printf '%s\n' "$AGENT_SKILL_FILE_WRITE_ALLOWLIST" | grep -qxF "$pair"; then
                 offenders="$offenders $pair"
@@ -1198,7 +1198,7 @@ run_site_bot_term_redline() {
 
 # Assertion 4: extension uniqueness on the core-repo / script side — no code
 # path may PRODUCE a `.agent` package any more (D6: packages ship as `.bot`).
-# Caliber: grep over tracked files in core/ + dev/ + agents/ (git ls-files
+# Caliber: grep over tracked files in core/ + dev/ + bots/ (git ls-files
 # inherently excludes target/, core/target/, target-e2e/, dist/, build/,
 # node_modules/) for the producer forms:
 #   format!("...{}.agent"  /  f"...{x}.agent"   — package file name assembly
@@ -1227,7 +1227,7 @@ run_package_ext_redline() {
     #   with_extension("agent")   — extension rewrite
     #   eq_ignore_ascii_case("agent") / extension() == Some("agent") — suffix compare
     #   ".agent"                  — bare literal (exclusion sets, gate constants)
-    offenders=$(cd "$root" && git ls-files -z -- core dev agents \
+    offenders=$(cd "$root" && git ls-files -z -- core dev bots \
         | grep -zE '\.(rs|sh|ps1|py)$' \
         | xargs -0 grep -nE 'format!\("([^"\\]|\\.)*\.agent\\?"|f"([^"\\]|\\.)*\.agent"|ends_with\("\.agent"\)|endswith\("\.agent"\)|endswith\(.\.agent.|with_extension\("agent"\)|eq_ignore_ascii_case\("agent"\)|extension\(\) == Some\("agent"|"\.agent"' 2>/dev/null \
         | grep -vE '^dev/ci\.sh:' \
@@ -1235,7 +1235,7 @@ run_package_ext_redline() {
 # Self-exclusion of dev/ci.sh above: this very grep's pattern strings would
 # otherwise match themselves (category ① — the checker is not a producer).
     # The one grep -v above is whitelisted: example_packages.rs asserts that
-    # NO `.agent` artifact exists in agents/agent-packages/ — the literal is
+    # NO `.agent` artifact exists in bots/bot-packages/ — the literal is
     # the detection pattern of that guard, not a producer. Category ①.
     # (Rationale recorded in T7's PM activity, per the whitelist rule above.)
     local count

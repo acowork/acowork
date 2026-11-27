@@ -5,7 +5,7 @@
 > 关联设计：[`21-pm-project-management.md`](./21-pm-project-management.md)（§6 本文修订其工具面）、[`20-doc-online-document.md`](./20-doc-online-document.md)（§6 同）
 > 关联 ADR：[`ADR-073-agent-instance-identity-decomposition`](../../adr/zh/ADR-073-agent-instance-identity-decomposition.md)（instance_id 唯一身份）· [`ADR-098-unified-standard-group-model`](../../adr/zh/ADR-098-unified-standard-group-model.md)（项目群聊）· [`ADR-102-turnorigin-vocabulary-and-pm-dispatch-chain`](../../adr/zh/ADR-102-turnorigin-vocabulary-and-pm-dispatch-chain.md)（PM 派工链）· [`ADR-104-agent-manifest-declaration-surface`](../../adr/zh/ADR-104-agent-manifest-declaration-surface.md)（manifest 声明面）
 > 关联 PRD：[`docs/prd/zh/prd-doc-pm.md`](../../prd/zh/prd-doc-pm.md)
-> 实现落点：[`core/acowork-pm/src/mcp/`](../../../core/acowork-pm/src/mcp/) · [`core/acowork-doc/src/mcp/`](../../../core/acowork-doc/src/mcp/) · [`agents/project-manager-agent/`](../../../agents/project-manager-agent/) · [`agents/document-manager-agent/`](../../../agents/document-manager-agent/)
+> 实现落点：[`core/acowork-pm/src/mcp/`](../../../core/acowork-pm/src/mcp/) · [`core/acowork-doc/src/mcp/`](../../../core/acowork-doc/src/mcp/) · [`bots/project-manager-bot/`](../../../bots/project-manager-bot/) · [`bots/document-manager-bot/`](../../../bots/document-manager-bot/)
 > 执行计划：[`docs/plan/zh/pm-doc-mcp-agent-integration-plan.md`](../../plan/zh/pm-doc-mcp-agent-integration-plan.md)
 >
 > **一句话**：PM MCP 从 12 工具重整为 **14**（合并 3、增强 2、新增 5），Doc MCP 补 4 个缺口，两个官方 bot 的 prompt + 14 个 skill 全部改写到这套工具面上——当前它们对 `pm_*` / `doc_*` 的引用是 **0 处**。
@@ -17,7 +17,7 @@
 ### 1.1 现状证据
 
 ```
-grep -rniE 'pm_[a-z]+|doc_[a-z]+|mcp' agents/project-manager-agent agents/document-manager-agent
+grep -rniE 'pm_[a-z]+|doc_[a-z]+|mcp' bots/project-manager-bot bots/document-manager-bot
 → 74 处命中，全部为 mcp_memory__*；pm_* / doc_* 命中 0 处
 ```
 

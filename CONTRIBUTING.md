@@ -64,7 +64,7 @@ it also runs the frontend smoke suite, which boots a real Gateway and is not a p
 | Rust core | Bug fixes, error handling, new API surface | `core/acowork-*/src/` |
 | Desktop / Mobile UI | React components, i18n fixes, perf work | `apps/acowork-desktop/src/`, `apps/acowork-mobile/src/` |
 | i18n | Adding a locale, fixing a missing key | `apps/acowork-desktop/src/i18n/locales/` |
-| Bot packages | New example bots, better skill docs | `agents/` |
+| Bot packages | New example bots, better skill docs | `bots/` |
 | Docs | ADR translations, protocol reference corrections | `docs/` |
 
 ---
@@ -167,7 +167,7 @@ apps/
   acowork-mobile/      Tauri v2 mobile app
 
 docs/                  Architecture docs — design, ADR, PRD, protocols, runbooks
-agents/                Agent packages shipped with the app
+bots/                  Bot packages shipped with the app
 dev/                   Build, packaging, CI, deployment scripts
 ```
 
@@ -470,7 +470,7 @@ change — not as a follow-up.
 
 ## Adding or changing a bot package
 
-Bot packages live in `agents/` and are declarative: `manifest.toml` + `prompts/` +
+Bot packages live in `bots/` and are declarative: `manifest.toml` + `prompts/` +
 `skills/` + `assets/`. They contain **no executable code**.
 
 ```bash
@@ -485,9 +485,9 @@ verifies the signature.
 ### Signing rules
 
 - **Never commit a private key.** See [`SECURITY.md`](SECURITY.md). The signing keys used
-  by `dev/common/build-agent.*` land in `agents/.signing-keys/` — that directory is
+  by `dev/common/build-agent.*` land in `bots/.signing-keys/` — that directory is
   git-ignored and generated per machine, so regenerate it with
-  `cargo run --bin acowork-keygen -- --type developer --output-dir agents/.signing-keys`
+  `cargo run --bin acowork-keygen -- --type developer --output-dir bots/.signing-keys`
   rather than committing it.
 - Signing keys are generated per machine by `acowork-keygen`. The developer key type
   signs for local development; the platform key type is reserved for official builds.

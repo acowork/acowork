@@ -113,8 +113,8 @@ docs/                  # Public architecture docs
   protocols/{zh,en}/   # HTTP + MQTT + RAG protocol reference
   runbooks/            # Operator runbooks
 
-agents/                # Agent package SOURCES (`<name>-agent/`) + shipped
-                       # build artifacts (`agent-packages/*.bot`)
+bots/                  # Bot package SOURCES (`<name>-bot/`) + shipped
+                       # build artifacts (`bot-packages/*.bot`)
 dev/                   # Build / package / CI scripts
 ```
 
@@ -122,8 +122,8 @@ Crate specs: [docs/module-design/](docs/module-design/) · Design: [docs/design/
 
 ### Agent packages and the hub
 
-`agents/<name>-agent/` (manifest + prompts + skills + assets) is the single
-source of truth for the platform agents. `agents/agent-packages/<agent_id>.bot`
+`bots/<name>-bot/` (manifest + prompts + skills + assets) is the single
+source of truth for the platform bots. `bots/bot-packages/<agent_id>.bot`
 is a build artifact of it — rebuild with `dev/common/build-agent.sh` and commit
 the rebuilt package in the same change; `acowork-sign`'s `example_packages` test
 fails when the zip and the source tree disagree.

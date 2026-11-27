@@ -323,7 +323,7 @@ graph TD
 
 ### 14.1 问题
 
-装完 Desktop，7 个已签名的 bot 包就已经躺在安装目录（`tauri.conf.json` 把 `agents/agent-packages` 映射成 `resource_dir/agent-packages`，[tauri.conf.json:55](../../../apps/acowork-desktop/src-tauri/tauri.conf.json#L55)），但产品里**没有任何入口把它们列出来**：用户唯一的本地路径是"我手上刚好有一个 `.bot` 文件"（[AgentLibraryDialog.tsx:850](../../../apps/acowork-desktop/src/components/agent-list/AgentLibraryDialog.tsx#L850) 的 `LocalPane` 只有一个 pick/drop 区）。出厂内容用户看不见，等于没出厂。
+装完 Desktop，7 个已签名的 bot 包就已经躺在安装目录（`tauri.conf.json` 把 `bots/bot-packages` 映射成 `resource_dir/bot-packages`，[tauri.conf.json:55](../../../apps/acowork-desktop/src-tauri/tauri.conf.json#L55)），但产品里**没有任何入口把它们列出来**：用户唯一的本地路径是"我手上刚好有一个 `.bot` 文件"（[AgentLibraryDialog.tsx:850](../../../apps/acowork-desktop/src/components/agent-list/AgentLibraryDialog.tsx#L850) 的 `LocalPane` 只有一个 pick/drop 区）。出厂内容用户看不见，等于没出厂。
 
 同时 `install_bundled_agent` 已经能按名字装这些包（[agent.rs:276](../../../apps/acowork-desktop/src-tauri/src/commands/agent.rs#L276)），但名字→文件是一张硬编码 match（[agent.rs:384](../../../apps/acowork-desktop/src-tauri/src/commands/agent.rs#L384)），且只有 onboarding 在用。**数据在一处、入口在另一处、命名在第三处。**
 
