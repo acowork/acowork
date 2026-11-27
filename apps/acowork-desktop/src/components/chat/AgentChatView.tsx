@@ -1595,7 +1595,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               uploaded bytes above are a separate list with a separate channel. */}
           <AttachedContextChips surface="chat" />
           {(uploadingFiles.length > 0 || pendingAttachments.length > 0) && (
-            <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+            <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pt-1">
               <UploadingFileChips files={uploadingFiles} onCancel={cancelUpload} />
               {pendingAttachments.map((a) => (
                 <ChatAttachmentChip

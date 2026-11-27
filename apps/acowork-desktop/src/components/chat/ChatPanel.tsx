@@ -2579,8 +2579,13 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
             {/* Pending attachment chips (ADR-046: unified entry-point).
                 Documents use the existing `DocumentChip`; images get a thumbnail
                 variant. Both render from `pendingAttachedItems`. */}
+            {/* `pt-1 pb-2`, not `pt-2`: this row sits directly on the field row,
+                whose left `+` is a 32px circle filling that row's whole height.
+                With no bottom padding a 56px thumbnail came to rest against the
+                `+` while the capsule's own `py-[5px]` plus `pt-2` left 13px of
+                air above it. 4+5 above, 8 below — the same margin on both sides. */}
             {session.pendingAttachedItems.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+              <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pt-1">
                 {session.pendingAttachedItems.map((p) => {
                   const item = p.item;
                   // Workspace reference: already-resolved `attached_*` items.

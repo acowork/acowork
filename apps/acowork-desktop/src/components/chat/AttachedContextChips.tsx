@@ -63,7 +63,7 @@ export function AttachedContextChips({ surface = "exec" }: { surface?: "exec" | 
         );
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+    <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pt-1">
       {attachedContext.map((item) => {
         const handleOpen = () => {
           void openAttachedRef({
