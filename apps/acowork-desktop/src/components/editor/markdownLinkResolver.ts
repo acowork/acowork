@@ -253,11 +253,10 @@ export type OpenResolutionResult =
  * and open the first one that exists. All 404s fall through silently.
  *
  * `action` chooses between edit mode (`openFile`) and read-only preview
- * mode (`openPreview`). Markdown links to `.md`/`.markdown` open in
- * preview mode; everything else opens in edit mode — see caller-side
- * `pickOpenActionForPath` (workspace-panel convention: image → preview,
- * else → Monaco) for the default and `MarkdownPreviewView.pickOpenAction`
- * for the markdown-preview override.
+ * mode (`openPreview`). The caller decides through `pickOpenActionForPath`
+ * (the workspace-panel convention: a format with a viewer → preview, else
+ * Monaco), and `MarkdownPreviewView.pickOpenAction` overrides it inside a
+ * rendered markdown document.
  *
  * Concurrent calls are intentionally allowed: each call HEAD-probes
  * independently and the `openFile`/`openPreview` actions are idempotent
@@ -416,7 +415,10 @@ export function handleChatMarkdownLinkClick(href: string): void {
     const workspaceId = useWorkspaceStore.getState().getSessionWorkspaceId(sessionId);
 
     const { path, line } = parseChatLinkHref(href);
-    const action = pickOpenActionForPath(path);
+    // `#L42` on a link means "show me that line", and the preview viewer has no
+    // line jump — so an anchored link stays on the source editor even for a
+    // format that would otherwise preview.
+    const action = line != null ? "openFile" : pickOpenActionForPath(path);
 
     let candidates = resolveAssetAcrossWorkspaces(agentId, workspaceId, "", path);
     if (candidates.length === 0 && path.startsWith("/")) {

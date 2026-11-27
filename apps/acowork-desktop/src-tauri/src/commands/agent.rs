@@ -416,11 +416,11 @@ fn bundled_agent_package_path(
         "android-node-agent" => "com.acowork.android-node.bot",
         other => {
             return resource_dir
-                .join("agent-packages")
+                .join("bot-packages")
                 .join(format!("{}.bot", other));
         }
     };
-    resource_dir.join("agent-packages").join(package_name)
+    resource_dir.join("bot-packages").join(package_name)
 }
 
 /// Uninstall an agent
@@ -570,15 +570,15 @@ mod bundled_package_tests {
     use super::bundled_agent_package_path;
 
     /// The packaged-agent tree as it is shipped: `tauri.conf.json` maps
-    /// `../../../agents/agent-packages` onto `resource_dir/agent-packages`,
-    /// so the directory that holds `agent-packages/` on disk plays the role
+    /// `../../../bots/bot-packages` onto `resource_dir/bot-packages`,
+    /// so the directory that holds `bot-packages/` on disk plays the role
     /// of `resource_dir` here.
     fn shipped_resource_dir() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("..")
-            .join("agents")
+            .join("bots")
     }
 
     /// Every resource name onboarding can send must resolve to a package that
@@ -614,7 +614,7 @@ mod bundled_package_tests {
             assert!(
                 resolved.is_file(),
                 "{name} resolved to {}, which does not exist — bundled_agent_package_path \
-                 and the contents of agents/agent-packages/ disagree",
+                 and the contents of bots/bot-packages/ disagree",
                 resolved.display()
             );
             let bytes = std::fs::read(&resolved).unwrap_or_else(|e| {
@@ -635,8 +635,8 @@ mod bundled_package_tests {
         let resolved = bundled_agent_package_path(std::path::Path::new("/res"), "custom-agent");
         assert_eq!(
             resolved,
-            std::path::Path::new("/res").join("agent-packages").join("custom-agent.bot"),
-            "the catch-all arm must keep the agent-packages directory and a .bot file name"
+            std::path::Path::new("/res").join("bot-packages").join("custom-agent.bot"),
+            "the catch-all arm must keep the bot-packages directory and a .bot file name"
         );
     }
 }

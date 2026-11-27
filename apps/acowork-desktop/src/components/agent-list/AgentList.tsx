@@ -869,6 +869,7 @@ export function AgentList({ width }: AgentListProps) {
                       })
                     }
                     permissionsLabel={t("agentList.nodePermissions")}
+                    compact={isCollapsed}
                   />
                   {/* ADR-087 D5: install is a NODE-manage action
                       (`check_node_manage` in the install handler), so the
@@ -1262,6 +1263,11 @@ interface NodeGroupHeaderProps {
   onManagePermissions: () => void;
   /** Tooltip for the permissions icon. */
   permissionsLabel: string;
+  /** Sidebar dragged down to the avatar rail (`AgentList`'s `isCollapsed`).
+   *  The band is then 64px wide and cannot seat a glyph + a name + the gear:
+   *  the row's `shrink-0` children overflowed the flex button and painted the
+   *  monitor on top of the permissions gear. */
+  compact: boolean;
 }
 
 function NodeGroupHeader({
@@ -1273,6 +1279,7 @@ function NodeGroupHeader({
   canManage,
   onManagePermissions,
   permissionsLabel,
+  compact,
 }: NodeGroupHeaderProps) {
   return (
     <div
@@ -1310,7 +1317,13 @@ function NodeGroupHeader({
         aria-expanded={!collapsed}
         aria-label={`Toggle node group: ${nodeName}`}
         title={statusLabel}
-        className="flex min-w-0 flex-1 items-center gap-1.5 px-3 py-1 text-left"
+        className={cn(
+          "flex min-w-0 flex-1 items-center py-1 text-left",
+          // Rail width: tighter gutters so the three survivors (chevron, dot,
+          // gear) fit in 64px. At `px-3` they came to 68px and the row
+          // overflowed again.
+          compact ? "gap-1 px-1" : "gap-1.5 px-3",
+        )}
       >
         <ChevronRight
           className={cn(
@@ -1320,12 +1333,16 @@ function NodeGroupHeader({
         />
         {/* ponytail: 12px Monitor = "this row is a machine, not an agent".
             Purely decorative next to the dot — if a second machine glyph is
-            ever needed (e.g. remote vs local), split by node kind. */}
-        <Monitor className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
+            ever needed (e.g. remote vs local), split by node kind.
+            Dropped on the rail: there is no room for it beside the gear, and
+            at 64px the monitor is what used to land on top of the gear. */}
+        {!compact && <Monitor className="h-3 w-3 shrink-0 opacity-70" aria-hidden />}
         {/* Online dot trails the name: the row now leads with "a machine
             called X", and the status reads as a trailing badge rather than
-            a second leading glyph competing with the monitor icon. */}
-        <span className="truncate">{nodeName}</span>
+            a second leading glyph competing with the monitor icon.
+            The name goes on the rail for the same reason as the monitor; the
+            dot stays, because it is the band's only remaining information. */}
+        {!compact && <span className="truncate">{nodeName}</span>}
         <span
           className={cn(
             "h-1.5 w-1.5 shrink-0 rounded-full",
@@ -1343,7 +1360,12 @@ function NodeGroupHeader({
           title={permissionsLabel}
           aria-label={permissionsLabel}
           data-testid="node-permissions-btn"
-          className="mr-2 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary"
+          className={cn(
+            "flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary",
+            // The rail keeps this button (it is the band's only action) and
+            // trims its outer margin to pay for the narrower row.
+            compact ? "mr-1" : "mr-2",
+          )}
         >
           {/* ponytail: icon only shrinks to 90% (14 -> 12.6px) for a lighter
               glyph; the button box stays h-6 w-6 so padding + hit area are

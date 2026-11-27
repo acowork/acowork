@@ -63,7 +63,7 @@ jobs:
       - name: Integration
         run: ./dev/ci.sh integration
 
-  # The shipped `.bot` files are generated from `agents/*`. Two guards:
+  # The shipped `.bot` files are generated from `bots/*`. Two guards:
   # one inside this repo (does the artifact match its source?), one against
   # the hub, whose mirror publishes the same bytes under the same agent_id.
   packages:
@@ -79,7 +79,7 @@ jobs:
       - name: The hub registry (source of the mirrored packages)
         uses: actions/checkout@v4
         with:
-          repository: acowork/ACoworkAgentHub
+          repository: acowork/ACoworkBotHub
           persist-credentials: false
           path: .ci/hub
       - name: Shipped packages match their source tree
@@ -90,7 +90,7 @@ jobs:
       - name: Hub packages satisfy the manifest contract
         working-directory: core
         env:
-          ACOWORK_HUB_AGENTS: ${{ github.workspace }}/.ci/hub/agents
+          ACOWORK_HUB_AGENTS: ${{ github.workspace }}/.ci/hub/bots
         run: cargo test -p acowork-core --test hub_interop -- --ignored
       - name: Fetch master (the soft check compares against it)
         # actions/checkout fetches only the triggering ref, so `origin/master`

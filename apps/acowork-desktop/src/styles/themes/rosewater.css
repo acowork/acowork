@@ -36,8 +36,8 @@
   --color-border-divider: hsl(340 calc(var(--theme-chroma) * 0.85) 83%);
   --color-menu-divider: hsl(340 calc(var(--theme-chroma) * 0.85) 81%);
   --color-text: hsl(340 calc(var(--theme-chroma) * 0.45) 28%);
-  --color-text-secondary: hsl(339 calc(var(--theme-chroma) * 0.45) 40%);
-  --color-text-tertiary: hsl(338 calc(var(--theme-chroma) * 0.45) 52%);
+  --color-text-secondary: hsl(339 calc(var(--theme-chroma) * 0.45) 35%);
+  --color-text-tertiary: hsl(338 calc(var(--theme-chroma) * 0.45) 44%);
   --color-text-disabled: hsl(337 calc(var(--theme-chroma) * 0.45) 66%);
   --color-menu-text: hsl(340 calc(var(--theme-chroma) * 0.45) 30%);
   --color-menu-icon: hsl(339 calc(var(--theme-chroma) * 0.7) 56%);
@@ -88,7 +88,7 @@
   --color-menu-divider: hsl(335 calc(var(--theme-chroma) * 0.85) 20%);
   --color-text: hsl(340 calc(var(--theme-chroma) * 0.45) 90%);
   --color-text-secondary: hsl(340 calc(var(--theme-chroma) * 0.45) 80%);
-  --color-text-tertiary: hsl(340 calc(var(--theme-chroma) * 0.45) 60%);
+  --color-text-tertiary: hsl(340 calc(var(--theme-chroma) * 0.45) 65%);
   --color-text-disabled: hsl(340 calc(var(--theme-chroma) * 0.45) 38%);
   --color-menu-text: hsl(340 calc(var(--theme-chroma) * 0.45) 85%);
   --color-menu-icon: hsl(340 calc(var(--theme-chroma) * 0.7) 46%);

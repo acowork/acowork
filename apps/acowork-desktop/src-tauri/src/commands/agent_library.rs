@@ -5,7 +5,7 @@
 //!
 //! The library is a **user-owned directory**, not the shipped resource folder:
 //! `app_local_data_dir()/agent-library`. The bundled `resource_dir/
-//! agent-packages/*.bot` are copied in once (D10) because the resource tree
+//! bot-packages/*.bot` are copied in once (D10) because the resource tree
 //! is read-only in per-machine installs, is replaced wholesale on upgrade, and
 //! is `target/debug` in dev builds — none of which may hold user data.
 //!
@@ -41,9 +41,9 @@ use crate::gateway_client::EnsureAck;
 use crate::state::AppState;
 
 /// Directory name the packaged agents land in inside `resource_dir`
-/// (`tauri.conf.json` → `resources { "../../../agents/agent-packages":
-/// "agent-packages" }`).
-const BUNDLED_DIR: &str = "agent-packages";
+/// (`tauri.conf.json` → `resources { "../../../bots/bot-packages":
+/// "bot-packages" }`).
+const BUNDLED_DIR: &str = "bot-packages";
 
 /// Directory created under `app_local_data_dir()`.
 const LIBRARY_DIR: &str = "agent-library";
@@ -187,7 +187,7 @@ pub(crate) fn library_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(base.join(LIBRARY_DIR))
 }
 
-/// `resource_dir/agent-packages` — the read-only shipped packages.
+/// `resource_dir/bot-packages` — the read-only shipped packages.
 fn bundled_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let base = app
         .path()
@@ -1169,7 +1169,7 @@ type = "FilesystemRead"
     /// test reports a skip instead of failing when it is absent.
     #[test]
     fn the_shipped_packages_all_parse_into_healthy_rows() {
-        let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../agents/agent-packages");
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bots/bot-packages");
         if !bundled.exists() {
             eprintln!("skipped: {} is not present in this checkout", bundled.display());
             return;
@@ -1209,7 +1209,7 @@ type = "FilesystemRead"
             eprintln!("skipped: set ACW_LOCAL_LIB_PROBE=1 to touch the real library dir");
             return;
         }
-        let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../agents/agent-packages");
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bots/bot-packages");
         let library = Path::new(&local_app_data).join("com.acowork.desktop").join(LIBRARY_DIR);
 
         let copied = seed_from(&bundled, &library).expect("seed the real library");
@@ -1455,7 +1455,7 @@ builtin_avatar = \"icon-15\"",
     /// evidence that the Local card shows real fields rather than blanks.
     #[test]
     fn the_shipped_packages_carry_role_labels_capabilities_and_skills() {
-        let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../agents/agent-packages");
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bots/bot-packages");
         if !bundled.exists() {
             eprintln!("skipped: {} is not present in this checkout", bundled.display());
             return;

@@ -159,8 +159,6 @@ function checkMsgids() {
 const SITE_AGENT_BASELINE = 0;
 
 const SITE_WHITELIST = [
-    // ① code identifier — repository name; D1 renames the DISPLAY name only.
-    [/ACoworkAgentHub/g, 'repository name (D1: repo name preserved)'],
     // ① code identifier — upstream file name (contributor contract doc).
     [/AGENTS\.md/g, 'upstream file name'],
     // ① code identifier — directory layout / API paths / real commands users
@@ -199,7 +197,7 @@ function stripComments(text, kind) {
 
 function checkSite() {
     const website = process.env.ACOWORK_WEBSITE_DIR || join(ROOT, '..', 'ACoworkWebSite');
-    const hub = process.env.ACOWORK_HUB_DIR || join(ROOT, '..', 'ACoworkAgentHub');
+    const hub = process.env.ACOWORK_HUB_DIR || join(ROOT, '..', 'ACoworkBotHub');
     let total = 0;
     const offenders = [];
     const plan = [

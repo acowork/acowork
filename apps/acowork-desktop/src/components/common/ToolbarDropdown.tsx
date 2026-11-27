@@ -41,6 +41,8 @@ export function ToolbarDropdownTrigger({
     textHidden,
     btnId,
     disabled,
+    showChevron = true,
+    ariaPressed,
 }: {
     icon: ReactNode;
     label: string;
@@ -52,7 +54,7 @@ export function ToolbarDropdownTrigger({
     onToggle: () => void;
     wrapperRef?: React.Ref<HTMLDivElement>;
     buttonClassName?: string;
-    children: ReactNode;
+    children?: ReactNode;
     /** Tooltip text (falls back to label if not provided) */
     tooltip?: string;
     /** When true, force-hide the label text and chevron (JS-driven collapse) */
@@ -66,6 +68,12 @@ export function ToolbarDropdownTrigger({
      * unreachable while closed.
      */
     disabled?: boolean;
+    /** A trigger that toggles state instead of opening a menu passes `false`:
+     *  the chevron is the "there is a list inside" affordance. */
+    showChevron?: boolean;
+    /** Set on a toggle trigger, so assistive tech reports on/off rather than
+     *  an unexplained label change. */
+    ariaPressed?: boolean;
 }) {
     return (
         // `flex` (not `inline-block`): as a flex item the root's
@@ -86,6 +94,7 @@ export function ToolbarDropdownTrigger({
                     onClick={onToggle}
                     disabled={disabled}
                     aria-disabled={disabled || undefined}
+                    aria-pressed={ariaPressed}
                     className={cn(
                         toolbarButton,
                         "min-w-0 max-w-full",
@@ -101,11 +110,13 @@ export function ToolbarDropdownTrigger({
                         className={cn(collapseClass, "min-w-0 max-w-[120px] truncate")}
                         style={{ fontSize: LABEL_FONT_SIZE, display: textHidden ? "none" : undefined }}
                     >{label}</span>
-                    <ChevronDown
-                        data-toolbar-chevron=""
-                        className={cn("h-3 w-3 shrink-0 text-text-tertiary", collapseClass)}
-                        style={{ display: textHidden ? "none" : undefined }}
-                    />
+                    {showChevron && (
+                        <ChevronDown
+                            data-toolbar-chevron=""
+                            className={cn("h-3 w-3 shrink-0 text-text-tertiary", collapseClass)}
+                            style={{ display: textHidden ? "none" : undefined }}
+                        />
+                    )}
                 </button>
             </Tooltip>
             {children}

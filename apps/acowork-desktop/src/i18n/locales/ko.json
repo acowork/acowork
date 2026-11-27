@@ -2414,7 +2414,8 @@
     "title_one": "이번 턴 산출물",
     "openFailed": "{{filename}}을(를) 열 수 없습니다",
     "imageAlt": "{{filename}} 썸네일",
-    "size": "{{size}}"
+    "size": "{{size}}",
+    "copyLink": "링크 복사"
   },
   "saveAs": {
     "title": "다른 이름으로 저장",

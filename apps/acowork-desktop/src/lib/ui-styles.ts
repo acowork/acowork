@@ -89,11 +89,21 @@ export const toolbarIconButton =
  * The `+` fill is `--color-chat-input-bg` on purpose: the circle then matches
  * the frame the card sits in, so the eye reads three layers (frame > card >
  * circle) instead of one flat white row.
+ *
+ * Send is the INVERTED-INK circle: `--color-text` for the fill and
+ * `--color-bg` for the glyph. Deriving both from the pack's ink means the
+ * circle flips by itself — dark fill with a light glyph in a light theme,
+ * light fill with a dark glyph in a dark theme. The `btn-solid` token is not
+ * usable here: it is the cross-mode primary fill and stays dark in BOTH
+ * themes, which rendered the send glyph as the same dark disc twice.
+ * `hover:text-bg` is required, not decorative: it overrides the
+ * `hover:text-text-secondary` inherited from `toolbarIconButton`, which would
+ * otherwise paint the glyph the same colour as its own hover fill.
  */
 export const composerPlusButton =
   `h-[32px] w-[32px] rounded-full bg-chat-input-bg text-text-secondary hover:text-text`;
 export const composerSendButton =
-  `h-[32px] w-[32px] rounded-full bg-btn-solid text-white hover:bg-btn-solid-hover hover:text-white`;
+  `h-[32px] w-[32px] rounded-full bg-text text-bg hover:bg-text-secondary hover:text-bg`;
 
 // Toolbar "open / active" chrome now lives in
 // `components/common/dropdownTheme.ts` (`DROPDOWN_TRIGGER_ACTIVE_CLASS`).

@@ -1,6 +1,6 @@
 //! Shipped `.bot` packages must match the source they were built from.
 //!
-//! `agents/agent-packages/*.bot` is a build artifact (ADR-104), and the
+//! `bots/bot-packages/*.bot` is a build artifact (ADR-104), and the
 //! repository has already paid for that twice: once when the packages still
 //! said "No shell tools" after the manifests stopped saying it, and once when
 //! the two benchmark agents were rewritten while users kept installing the
@@ -15,7 +15,7 @@
 //! wrong as a stale body).
 //!
 //! The fix is always the same:
-//! `dev/common/build-agent.sh agents/<agent-dir>` (or `.ps1` on Windows),
+//! `dev/common/build-agent.sh bots/<bot-dir>` (or `.ps1` on Windows),
 //! then commit the rebuilt `.bot`.
 
 use std::collections::BTreeMap;
@@ -23,12 +23,12 @@ use std::path::{Path, PathBuf};
 
 use zip::ZipArchive;
 
-/// Repository `agents/` directory, resolved from the crate root.
-fn agents_dir() -> PathBuf {
+/// Repository `bots/` directory, resolved from the crate root.
+fn bots_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("agents")
+        .join("bots")
 }
 
 /// Directories whose contents belong to the agent and must be published
@@ -76,8 +76,8 @@ fn walk(dir: &Path, base: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
 
 #[test]
 fn shipped_packages_match_their_source_tree() {
-    let root = agents_dir();
-    let packages = root.join("agent-packages");
+    let root = bots_dir();
+    let packages = root.join("bot-packages");
 
     let mut checked = 0usize;
     let mut compared: Vec<String> = Vec::new();
@@ -132,7 +132,7 @@ fn shipped_packages_match_their_source_tree() {
         }
 
         // The hint has to be a command that actually runs: the builder takes a
-        // path under `agents/`, not a bare directory name, and the POSIX
+        // path under `bots/`, not a bare directory name, and the POSIX
         // builder needs `zip`, which Git Bash on Windows does not ship.
         let rel = agent_dir
             .strip_prefix(&root)
@@ -142,8 +142,8 @@ fn shipped_packages_match_their_source_tree() {
             packaged.get("manifest.toml").map(|b| b.as_slice()),
             Some(source_manifest.as_bytes()),
             "{}: packaged manifest.toml differs from the source — rebuild it with \
-             `dev/common/build-agent.ps1 -AgentDir agents/{rel}` on Windows, or \
-             `dev/common/build-agent.sh agents/{rel}` elsewhere (needs `zip`), \
+             `dev/common/build-agent.ps1 -AgentDir bots/{rel}` on Windows, or \
+             `dev/common/build-agent.sh bots/{rel}` elsewhere (needs `zip`), \
              then commit the regenerated .bot",
             package.display(),
         );

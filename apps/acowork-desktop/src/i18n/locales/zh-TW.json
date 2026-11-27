@@ -2404,7 +2404,8 @@
     "title_one": "本輪產出",
     "openFailed": "無法開啟 {{filename}}",
     "imageAlt": "{{filename}} 的縮圖",
-    "size": "{{size}}"
+    "size": "{{size}}",
+    "copyLink": "複製連結"
   },
   "saveAs": {
     "title": "另存新檔",

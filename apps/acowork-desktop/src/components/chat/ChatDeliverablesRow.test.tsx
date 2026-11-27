@@ -26,8 +26,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const fetchWorkspaceFileBlobUrl = vi.fn();
 const fetchWorkspaceFileBlob = vi.fn();
+const writeText = vi.fn();
 const openFile = vi.fn(async (..._args: unknown[]) => {});
 const openPreview = vi.fn(async (..._args: unknown[]) => {});
+const openDocPreview = vi.fn((..._args: unknown[]) => {});
 
 vi.mock("../../lib/workspaceFileBlob", () => ({
   fetchWorkspaceFileBlobUrl: (...args: unknown[]) =>
@@ -35,7 +37,7 @@ vi.mock("../../lib/workspaceFileBlob", () => ({
   fetchWorkspaceFileBlob: (...args: unknown[]) => fetchWorkspaceFileBlob(...(args as [])),
 }));
 vi.mock("../../stores/fileEditorStore", () => ({
-  useFileEditorStore: { getState: () => ({ openFile, openPreview }) },
+  useFileEditorStore: { getState: () => ({ openFile, openPreview, openDocPreview }) },
 }));
 vi.mock("../../i18n/useTranslation", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -68,6 +70,24 @@ const report = {
   bytes: 512,
 };
 
+/** A row carrying an online-document deliverable (`metadata.docs`). */
+function docRow(docs: unknown[]): ChatMessage {
+  return {
+    id: "row-2",
+    type: "system",
+    content: "",
+    timestamp: 0,
+    metadata: { type: "deliverables", files: [], docs },
+  } as ChatMessage;
+}
+
+const doc = {
+  docId: "doc-1a2b",
+  path: "项目管理/p-1/评审/spec.md",
+  name: "spec",
+  version: 3,
+};
+
 /**
  * A download that behaves like the network: it resolves on a later task, and
  * rejects with `AbortError` if the caller aborts first. A promise that settles
@@ -88,6 +108,9 @@ function mockSignalAwareDownload(result: { blobUrl: string; mime: string }) {
 }
 
 beforeEach(() => {
+  writeText.mockReset();
+  writeText.mockResolvedValue(undefined);
+  Object.assign(navigator, { clipboard: { writeText } });
   mockSignalAwareDownload({ blobUrl: "blob:mock-url", mime: "image/png" });
 });
 
@@ -156,10 +179,10 @@ describe("ChatDeliverablesRow", () => {
     );
     expect(openFile).not.toHaveBeenCalled();
 
-    // A document keeps the chat-side rule: source in Monaco, not a rendered
-    // preview (the same decision `openWorkspaceRef` makes for a ref chip).
+    // A Markdown document previews too — the same answer the workspace tree
+    // gives it, so one file does not open differently per surface.
     fireEvent.click(screen.getByText("report.md"));
-    expect(openFile).toHaveBeenLastCalledWith("a1", "ws-1", "docs/report.md");
+    expect(openPreview).toHaveBeenLastCalledWith("a1", "ws-1", "docs/report.md");
   });
 
   it("falls back to a chip when the bytes cannot be fetched", async () => {
@@ -167,7 +190,9 @@ describe("ChatDeliverablesRow", () => {
     render(<ChatDeliverablesRow message={row([shot])} agentId="a1" />);
 
     // The file is still openable — a failed thumbnail is not a failed file.
-    await waitFor(() => expect(screen.getByRole("button")).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /logo-1a2b3c4d\.png/ })).toBeTruthy(),
+    );
     expect(screen.queryByRole("img")).toBeNull();
     expect(screen.getByText("logo-1a2b3c4d.png")).toBeTruthy();
   });
@@ -176,5 +201,31 @@ describe("ChatDeliverablesRow", () => {
     render(<ChatDeliverablesRow message={row([shot, { ...shot }])} agentId="a1" />);
     await waitFor(() => expect(screen.getByRole("img")).toBeTruthy());
     expect(screen.getAllByRole("img")).toHaveLength(1);
+  });
+
+  /**
+   * The copy affordance exists to hand a reference to ANOTHER agent, so what it
+   * writes is pinned: the doc's library path (the `ref` `doc_read` takes) and a
+   * workspace-relative path — not the card's title, not a viewer URL.
+   */
+  it("copies a document's library path, not its title", async () => {
+    render(<ChatDeliverablesRow message={docRow([doc])} agentId="a1" />);
+
+    fireEvent.click(screen.getByTestId("deliverable-copy-link"));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(doc.path));
+    // The copy is a sibling of the card: it must not also open the document.
+    expect(openDocPreview).not.toHaveBeenCalled();
+  });
+
+  it("copies a workspace file's relative path", async () => {
+    render(<ChatDeliverablesRow message={row([report])} agentId="a1" />);
+
+    fireEvent.click(screen.getByTestId("deliverable-copy-link"));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(report.rel_path));
+    // The copy is a sibling of the card: it must not also open the file.
+    expect(openFile).not.toHaveBeenCalled();
+    expect(openPreview).not.toHaveBeenCalled();
   });
 });

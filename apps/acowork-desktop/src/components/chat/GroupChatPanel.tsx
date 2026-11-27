@@ -2052,7 +2052,7 @@ export function GroupChatPanel() {
                 instruction, and an instruction the surface swallowed would be
                 indistinguishable from one never given. */}
             {addressRows.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+              <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pt-1">
                 {addressRows.map(({ instanceId, name, pick }) => (
                   <Fragment key={instanceId}>
                     {pick.forceNew && (
@@ -2093,7 +2093,7 @@ export function GroupChatPanel() {
             {/* Pending-attachment tray — chips with a remove affordance,
                 same grammar as the 1:1 chat composer. */}
             {(uploadingFiles.length > 0 || pendingAttachments.length > 0) && (
-              <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+              <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pt-1">
                 <UploadingFileChips
                   files={uploadingFiles}
                   onCancel={cancelUpload}

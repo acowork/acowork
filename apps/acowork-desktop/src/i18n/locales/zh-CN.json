@@ -2914,7 +2914,8 @@
     "title_one": "本轮产出",
     "openFailed": "无法打开 {{filename}}",
     "imageAlt": "{{filename}} 的缩略图",
-    "size": "{{size}}"
+    "size": "{{size}}",
+    "copyLink": "复制链接"
   },
   "saveAs": {
     "title": "另存为",

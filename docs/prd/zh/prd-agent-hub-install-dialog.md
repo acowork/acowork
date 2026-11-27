@@ -36,7 +36,7 @@ ACowork 装机后的第一个真实问题不是"怎么用"，而是"能装什么
 | 事实 | 出处 |
 | --- | --- |
 | Hub 站点已上线，8 个签名 bot | `https://hub.acowork.ai/data/index.json`（实测 200，`Access-Control-Allow-Origin: *`） |
-| Hub 站点自己写着"下载后在 Desktop App 中导入" | `ACoworkAgentHub/site/index.html` 首屏文案 |
+| Hub 站点自己写着"下载后在 Desktop App 中导入" | `ACoworkBotHub/site/index.html` 首屏文案 |
 | 官网 PRD 把这条列为验收标准：schema 被 Desktop 直接消费 | [prd-agent-hub.md](./prd-agent-hub.md) §2 G4「schema 被 Desktop App 直接消费，无需改造」 |
 | 桌面端目前没有任何 Hub / registry 相关代码 | `grep -rn "hub.acowork\|agent_hub" apps/acowork-desktop/src` 无结果 |
 | Gateway 已有异步安装能力（202 + OperationAck） | `core/acowork-gateway/src/http/agents.rs:1463`（`install_agent`）、`:1376`（`ensure_agent`） |
@@ -323,7 +323,7 @@ graph TD
 
 ### 14.1 问题
 
-装完 Desktop，7 个已签名的 bot 包就已经躺在安装目录（`tauri.conf.json` 把 `agents/agent-packages` 映射成 `resource_dir/agent-packages`，[tauri.conf.json:55](../../../apps/acowork-desktop/src-tauri/tauri.conf.json#L55)），但产品里**没有任何入口把它们列出来**：用户唯一的本地路径是"我手上刚好有一个 `.bot` 文件"（[AgentLibraryDialog.tsx:850](../../../apps/acowork-desktop/src/components/agent-list/AgentLibraryDialog.tsx#L850) 的 `LocalPane` 只有一个 pick/drop 区）。出厂内容用户看不见，等于没出厂。
+装完 Desktop，7 个已签名的 bot 包就已经躺在安装目录（`tauri.conf.json` 把 `bots/bot-packages` 映射成 `resource_dir/bot-packages`，[tauri.conf.json:55](../../../apps/acowork-desktop/src-tauri/tauri.conf.json#L55)），但产品里**没有任何入口把它们列出来**：用户唯一的本地路径是"我手上刚好有一个 `.bot` 文件"（[AgentLibraryDialog.tsx:850](../../../apps/acowork-desktop/src/components/agent-list/AgentLibraryDialog.tsx#L850) 的 `LocalPane` 只有一个 pick/drop 区）。出厂内容用户看不见，等于没出厂。
 
 同时 `install_bundled_agent` 已经能按名字装这些包（[agent.rs:276](../../../apps/acowork-desktop/src-tauri/src/commands/agent.rs#L276)），但名字→文件是一张硬编码 match（[agent.rs:384](../../../apps/acowork-desktop/src-tauri/src/commands/agent.rs#L384)），且只有 onboarding 在用。**数据在一处、入口在另一处、命名在第三处。**
 
@@ -369,7 +369,7 @@ publish 侧不新增任何写盘能力：`build_publish` 已经返回 `output_pa
 
 #### D14 `examples/` 更名为 `agents/`（已执行）
 
-理由：这个目录的出厂内容是"我们随包发布的 bot"，不是"示例"；更名后与 ACoworkAgentHub 的已发布源树 `agents/<publisher>/<bot>/` 命名对齐。
+理由：这个目录的出厂内容是"我们随包发布的 bot"，不是"示例"；更名后与 ACoworkBotHub 的已发布源树 `agents/<publisher>/<bot>/` 命名对齐。
 
 范围：功能性命中 + 现行文档改，**ADR 正文保原样**（ADR 里写的 `agents/...` 是决策当时的事实，改写等于篡改历史）。子目录 `agent-packages/` 名字不变（产物路径被 ADR-104 定死，改名只放大 churn）。
 

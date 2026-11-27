@@ -2413,7 +2413,8 @@
     "title_one": "このターンの成果物",
     "openFailed": "{{filename}} を開けません",
     "imageAlt": "{{filename}} のサムネイル",
-    "size": "{{size}}"
+    "size": "{{size}}",
+    "copyLink": "リンクをコピー"
   },
   "saveAs": {
     "title": "名前を付けて保存",

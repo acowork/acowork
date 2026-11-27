@@ -20,8 +20,9 @@
  * A workspace deliverable is `(workspace_id, rel_path)` — the same coordinates
  * the workspace panel uses. Clicking one goes through the **same chat-side
  * rule every other clickable reference in chat uses**
- * (`pickOpenActionForPath`: a format with an in-app viewer — image, PDF,
- * Office, craft document — opens there, source and data files open in Monaco),
+ * (`pickOpenActionForPath`: a format with an in-app viewer — image, Markdown,
+ * HTML, PDF, Office, craft document — opens there, source and data files open
+ * in Monaco),
  * so it lands in the *existing* editor tab and there is no second viewer to
  * maintain. Binary formats in particular must not take the text path: the read
  * interface returns them base64-encoded, which is what used to render as a wall
@@ -35,8 +36,9 @@
  * hook the editor preview uses, and cached by the same LRU; nothing about a
  * deliverable travels over the message channel.
  */
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Loader2, PackageOpen } from "lucide-react";
+import { CopyButton } from "../common/CopyButton";
 import type { ChatMessage } from "../../lib/types";
 import {
   deliverableFileName,
@@ -134,26 +136,79 @@ export function ChatDeliverablesRow({ message, agentId }: ChatDeliverablesRowPro
       </div>
       <div className="mt-1.5 flex flex-wrap items-center gap-2">
         {showFiles &&
-          files.map((file) =>
-            isImageDeliverable(file) ? (
-              <DeliverableThumbnail
-                key={`${file.workspaceId}:${file.relPath}`}
-                file={file}
-                agentId={agentId as string}
-                onOpen={openEntry}
-              />
-            ) : (
-              <DeliverableChip
-                key={`${file.workspaceId}:${file.relPath}`}
-                file={file}
-                onOpen={openEntry}
-              />
-            ),
-          )}
+          files.map((file) => (
+            <DeliverableLinkCopy
+              key={`${file.workspaceId}:${file.relPath}`}
+              text={file.relPath}
+            >
+              {isImageDeliverable(file) ? (
+                <DeliverableThumbnail
+                  file={file}
+                  agentId={agentId as string}
+                  onOpen={openEntry}
+                />
+              ) : (
+                <DeliverableChip file={file} onOpen={openEntry} />
+              )}
+            </DeliverableLinkCopy>
+          ))}
         {docs.map((doc) => (
-          <DeliverableDocCard key={doc.docId} doc={doc} onOpen={openDoc} />
+          <DeliverableLinkCopy key={doc.docId} text={doc.path}>
+            <DeliverableDocCard doc={doc} onOpen={openDoc} />
+          </DeliverableLinkCopy>
         ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The hover-revealed copy affordance shared by all three card kinds.
+ *
+ * What lands on the clipboard is the reference the platform already passes
+ * around: a document's library path (the `ref` `doc_read` takes, and the value
+ * `pm_submit_task`'s `doc_refs` accepts) or a workspace-relative file path.
+ * That is what makes the copied text usable when pasted into another agent's
+ * conversation — a clickable viewer link would only work inside this app.
+ *
+ * Hidden until the pointer arrives, so it never takes a click meant for the
+ * card, and held open through the copy confirmation (`CopyButton`'s
+ * `onCopiedChange`): a checkmark that fades on mouse-out reports nothing.
+ *
+ * The reveal is an **opaque overlay**, not a reserved gutter: hovering a card
+ * washes it to `surface-hover`, and spending permanent padding on every chip
+ * for a control that only exists while the pointer is there wasted width for
+ * nothing. The slot therefore carries the opaque `bg-surface` itself — that is
+ * load-bearing. The button's only background is its own hover tint
+ * (`hover:bg-accent/10`, translucent, and a hover variant beats a
+ * same-specificity `bg-surface` whatever the class order), so passing
+ * `bg-surface` to `CopyButton` painted nothing and the chip's name and size
+ * showed straight through the icon. What it covers while open is the trailing
+ * size / version text, which is exactly what the tooltip repeats.
+ */
+function DeliverableLinkCopy({ text, children }: { text: string; children: React.ReactNode }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="group/link relative inline-flex">
+      {children}
+      <span
+        className={cn(
+          "absolute bottom-0.5 right-0.5 rounded bg-surface transition-opacity",
+          copied
+            ? "opacity-100"
+            : "pointer-events-none opacity-0 group-hover/link:pointer-events-auto group-hover/link:opacity-100",
+          "focus-within:pointer-events-auto focus-within:opacity-100",
+        )}
+      >
+        <CopyButton
+          text={text}
+          iconOnly
+          ariaLabel={t("deliverables.copyLink")}
+          onCopiedChange={setCopied}
+          testId="deliverable-copy-link"
+        />
+      </span>
     </div>
   );
 }

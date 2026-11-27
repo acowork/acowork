@@ -26,7 +26,7 @@ grep -c 'name = "file_write"' agents/{product-manager,quality-assurance,senior-e
 | **E1** | 4 个 bot 的 23 个 skill 里有 **41 行**写「save with `file_write`」，而 4 个 manifest **都没声明 `file_write`**（只有 `file_edit`）。按 ADR-029，未声明的工具不会出现在 `agent_tools.json` 的启用集里 → 这 41 句是**不可执行的指令** | `agents/*/manifest.toml` `[[tools]]` |
 | **E2** | 同一批 skill 声明了 **46 行** `file_read`，同样一个都没声明 → `validate_graph` 在打包/安装期只会给出 warning（[manifest.rs:950](../../../core/acowork-core/src/manifest.rs#L950)），bot 实际退化成用 `bash` / `shell` 读文件 | 同上 |
 | **E3** | Product / QA 的 manifest 有 `hosted = "pm"` 但**无 tool 白名单**（= 「没有意见」，激活后全开，与 ADR-104 「白名单就是初始启用集」的注释自相矛盾）；SSE / Architect **完全没有 `pm` / `doc` 声明** | `agents/product-manager-agent/manifest.toml`、`.../software-architect-agent/manifest.toml` |
-| **E4** | 线上项目 `p-66e68d1a`（ACowork）：**56 个任务 / 12 个成员 / `项目管理/**` 下 0 个文档**。已完成的调研任务 `t-bcb6215e` 的交付物是 `E:\projects\tranxon\ACoworkAgentHub\docs\research\*.md`（本地路径 + commit），且**任务描述本身**就要求「写成文件、路径写进结果文本」 | `pm_get_project` / `doc_list` / `pm_get_task` 实测 |
+| **E4** | 线上项目 `p-66e68d1a`（ACowork）：**56 个任务 / 12 个成员 / `项目管理/**` 下 0 个文档**。已完成的调研任务 `t-bcb6215e` 的交付物是 `E:\projects\tranxon\ACoworkBotHub\docs\research\*.md`（本地路径 + commit），且**任务描述本身**就要求「写成文件、路径写进结果文本」 | `pm_get_project` / `doc_list` / `pm_get_task` 实测 |
 
 **结论与设计 32 §1.1 同构**：工具在手上、prompt 里没有它们 → 真实行为退化成「chat 里汇报 + bash 落本地文件」。差别只是这次的主体从 PM/Docs 换成了参与方。
 

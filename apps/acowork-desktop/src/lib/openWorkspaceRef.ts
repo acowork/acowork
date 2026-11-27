@@ -75,10 +75,10 @@ interface OpenAttachedRefArgs {
  *
  * Behaviour by `item.type`:
  *   - `file` / `attached_file`         → action picked by
- *       `pickOpenActionForPath(absPath)` — images go to `openPreview`,
- *       everything else (including JSON, Markdown, HTML, source code) goes
- *       to `openFile` so Monaco renders the source rather than the markdown
- *       preview fallback (which used to freeze on multi-MB JSON files).
+ *       `pickOpenActionForPath(absPath)` — a format with an in-app viewer
+ *       (image, Markdown, HTML, CSV, PDF/Office, craft app) goes to
+ *       `openPreview`, everything else to `openFile` so Monaco streams large
+ *       JSON/source files rather than freezing the preview renderer.
  *   - `selection` / `attached_selection` → `openFile(..., startLine)`. The
  *       cursor jumps to `startLine`; multi-line selection highlight is
  *       intentionally **not** implemented yet (deferred — needs

@@ -29,7 +29,7 @@ import type { SpeakerKind } from "./speakerBubble";
 import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock, RefreshCw } from "lucide-react";
 import type { ChatMessage, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
-import { SessionVisibilityMenu } from "./SessionVisibilityToggle";
+import { SessionVisibilityButton } from "./SessionVisibilityToggle";
 import { blockIndexOfRawMessage } from "./messageFolder";
 import { PlaceholderBar } from "./PlaceholderBar";
 import { useSessionScope } from "./useSessionScope";
@@ -2598,8 +2598,13 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
             {/* Pending attachment chips (ADR-046: unified entry-point).
                 Documents use the existing `DocumentChip`; images get a thumbnail
                 variant. Both render from `pendingAttachedItems`. */}
+            {/* `pt-1 pb-2`, not `pt-2`: this row sits directly on the field row,
+                whose left `+` is a 32px circle filling that row's whole height.
+                With no bottom padding a 56px thumbnail came to rest against the
+                `+` while the capsule's own `py-[5px]` plus `pt-2` left 13px of
+                air above it. 4+5 above, 8 below — the same margin on both sides. */}
             {session.pendingAttachedItems.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+              <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pt-1">
                 {session.pendingAttachedItems.map((p) => {
                   const item = p.item;
                   // Workspace reference: already-resolved `attached_*` items.
@@ -2816,7 +2821,11 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           />
 
           {/* Bottom strip — model / reasoning / workspace / read visibility,
-              transparent on the page background just below the capsule.
+              transparent on the page background just below the capsule, its
+              first button starting where the `+` circle ends: `pl-[38px]` is
+              the capsule's left border (1) + inner padding (5) + the 32px
+              circle, so the strip hangs off that circle's right edge instead
+              of starting under it.
               `@container/tb` + `setToolbarRef` stay here: the fold engine
               measures THIS row and folds the labelled buttons to icons as the
               panel narrows, left to right (`data-toolbar-cluster="left"`,
@@ -2826,7 +2835,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
               labels the full width. */}
           <div
             ref={setToolbarRef}
-            className="@container/tb mt-0.5 flex items-center gap-2 px-3 py-0.5 min-w-[264px]"
+            className="@container/tb mt-0.5 flex items-center gap-2 pl-[38px] pr-3 py-0.5 min-w-[264px]"
           >
             <div
               data-toolbar-cluster="left"
@@ -2868,9 +2877,10 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                 <WorkspaceSelector textHidden={textHidden.ws} readOnly={readOnlySession} />
               </div>
               {/* ADR-076 §决策 4: per-session read visibility (owner only) —
-                  the last label to fold, since it is touched least often. */}
+                  a two-state toggle, so no menu; the last label to fold,
+                  since it is touched least often. */}
               {selectedAgentId && currentSessionId && (
-                <SessionVisibilityMenu
+                <SessionVisibilityButton
                   agentId={selectedAgentId}
                   sessionId={currentSessionId}
                   textHidden={textHidden.visibility}
@@ -3565,7 +3575,10 @@ export function ReasoningEffortMenu({
   ];
 
   const currentOpt = OPTIONS.find((o) => o.value === effort);
-  const effortLabel = currentOpt?.label ?? "Auto";
+  // An effort the current model does not declare (an older session, a model
+  // swapped under it) falls back to the "auto" label rather than a hard-coded
+  // English one that would then disagree with the menu.
+  const effortLabel = currentOpt?.label ?? OPTIONS[0].label;
   const currentColor = currentOpt?.color ?? "#22c55e";
 
   useEffect(() => {

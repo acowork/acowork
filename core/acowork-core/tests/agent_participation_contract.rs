@@ -30,20 +30,20 @@
 //! directory, the Runtime keys the registry on the frontmatter name).
 //!
 //! The packaging guard (plan §8 item 5) is not a test but a `git status`
-//! assertion on `agents/agent-packages/` — see the T5 card.
+//! assertion on `bots/bot-packages/` — see the T5 card.
 
 use std::path::{Path, PathBuf};
 
 use acowork_core::manifest::{AgentManifest, SkillDecl};
 
 /// The four participant packages, as repository directories under
-/// `agents/`. Excluded on purpose: `github.ponytail` (third-party) and
+/// `bots/`. Excluded on purpose: `github.ponytail` (third-party) and
 /// `com.acowork.document-manager` (prior plan, already shipped).
 const PARTICIPANTS: [&str; 4] = [
-    "product-manager-agent",
-    "quality-assurance-agent",
-    "senior-engineer-agent",
-    "software-architect-agent",
+    "product-manager-bot",
+    "quality-assurance-bot",
+    "senior-engineer-bot",
+    "software-architect-bot",
 ];
 
 /// **Plan §4.4, frozen as a CI constant** (plan §8 item 1): `file_write`
@@ -52,24 +52,24 @@ const PARTICIPANTS: [&str; 4] = [
 /// fourth pair requires a revision of plan §4.4 first; this list is not
 /// "approximately three".
 const FILE_WRITE_ALLOWED: [(&str, &str); 3] = [
-    ("senior-engineer-agent", "debugging"),
-    ("senior-engineer-agent", "refactoring"),
-    ("senior-engineer-agent", "testing"),
+    ("senior-engineer-bot", "debugging"),
+    ("senior-engineer-bot", "refactoring"),
+    ("senior-engineer-bot", "testing"),
 ];
 
-/// Repository `agents/` directory, resolved from the crate root (same
+/// Repository `bots/` directory, resolved from the crate root (same
 /// layout contract as `example_manifests.rs`).
-fn agents_dir() -> PathBuf {
+fn bots_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("agents")
+        .join("bots")
 }
 
 /// Every `SKILL.md` of one participant package, sorted for a stable
 /// failure order. A missing `skills/` directory is itself a batch error.
 fn skill_files(agent: &str) -> Vec<PathBuf> {
-    let skills_dir = agents_dir().join(agent).join("skills");
+    let skills_dir = bots_dir().join(agent).join("skills");
     let entries = std::fs::read_dir(&skills_dir)
         .unwrap_or_else(|e| panic!("{}: cannot read skills/: {e}", skills_dir.display()));
     let mut out: Vec<PathBuf> = entries
@@ -194,7 +194,7 @@ fn shipped_skills(agent: &str) -> Vec<SkillDecl> {
 }
 
 fn load_manifest(agent: &str) -> AgentManifest {
-    let path = agents_dir().join(agent).join("manifest.toml");
+    let path = bots_dir().join(agent).join("manifest.toml");
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     AgentManifest::from_toml(&raw)
@@ -237,7 +237,7 @@ fn file_write_is_closed_to_the_three_sse_skills() {
     // stale config. "Exactly three" has to mean exactly three — a removed
     // dependency and its allowlist line move in the same change.
     for (agent, skill) in FILE_WRITE_ALLOWED {
-        let path = agents_dir()
+        let path = bots_dir()
             .join(agent)
             .join("skills")
             .join(skill)
