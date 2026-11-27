@@ -266,9 +266,16 @@
   --color-nav-control: hsl(240 5% 87%);
   /* = #D8D9DC — input/button static bg (light) */
   --color-chat-input-bg: var(--color-chat-input-bg);
-  /* = #FFFFFF — chat input box background (light).
-     Standalone token, not yet wired to any component —
-     tweak here to recolor the chat input surface. */
+  /* = #F7F7F7 — the composer's BOTTOM strip: model / reasoning /
+     workspace sit on it. It reads as the box's frame, so it is the
+     quieter of the two composer surfaces. */
+  --color-chat-input-top: var(--color-chat-input-top);
+  /* = #FFFFFF — the composer's TOP layer: the text field and the
+     icon buttons that belong to the message being written. Always one
+     contrast step ABOVE `--color-chat-input-bg` (lighter in the light
+     scope, lighter in the dark scope too) so the write surface reads
+     as the raised card and the selector strip as its base. Declared by
+     every theme pack; `chatInputTheme.test.ts` pins the ordering. */
   --color-input-bg: var(--color-input-bg);
   /* Unified generic input box background (light) — covers
      StyledInput / search boxes / settings-panel inputs / wizard

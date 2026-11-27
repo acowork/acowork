@@ -1207,6 +1207,8 @@
     "public": "공개",
     "private": "비공개",
     "hintToggle": "클릭하여 전환",
+    "lock": "잠금",
+    "unlock": "잠금 해제",
     "toastNowPrivate": "세션이 비공개로 전환되었습니다",
     "toastNowPublic": "세션이 공개로 전환되었습니다",
     "toastFailed": "공개 범위를 변경하지 못했습니다: {{error}}"

@@ -77,6 +77,24 @@ export const toolbarButton =
 export const toolbarIconButton =
   `inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors text-text-tertiary ${interactiveHover} hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:disabled:hover:bg-transparent`;
 
+/**
+ * The two mirrored circular controls at the ends of a composer's input row:
+ * `+` (or the paperclip on the Chat surface) on the far left, Send on the far
+ * right. Same 32px circle, different fill — the frame grey for the secondary
+ * action, the solid button ink for the primary one. Two glyph buttons of
+ * different size at the two ends of one row read as a misalignment, not as a
+ * hierarchy, and the round pair is what keeps the row's ends symmetric while
+ * the field between them grows.
+ *
+ * The `+` fill is `--color-chat-input-bg` on purpose: the circle then matches
+ * the frame the card sits in, so the eye reads three layers (frame > card >
+ * circle) instead of one flat white row.
+ */
+export const composerPlusButton =
+  `h-[32px] w-[32px] rounded-full bg-chat-input-bg text-text-secondary hover:text-text`;
+export const composerSendButton =
+  `h-[32px] w-[32px] rounded-full bg-btn-solid text-white hover:bg-btn-solid-hover hover:text-white`;
+
 // Toolbar "open / active" chrome now lives in
 // `components/common/dropdownTheme.ts` (`DROPDOWN_TRIGGER_ACTIVE_CLASS`).
 // A second literal copy used to sit here as `toolbarButtonActive`; it had no

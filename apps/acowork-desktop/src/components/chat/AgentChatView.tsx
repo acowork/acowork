@@ -63,7 +63,7 @@ import {
 import { formatBubbleTime } from "../../lib/formatTime";
 import { BubbleMetaActions } from "./BubbleMetaActions";
 import { cn } from "../../lib/utils";
-import { composerChip, toolbarIconButton } from "../../lib/ui-styles";
+import { composerChip, composerPlusButton, composerSendButton, toolbarIconButton } from "../../lib/ui-styles";
 import { useStickToBottom } from "../../lib/stickToBottom";
 import { Tooltip } from "../common/Tooltip";
 import { UserAvatar } from "../common/UserAvatar";
@@ -77,6 +77,7 @@ import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { detectPaste } from "./pasteDetect";
 import { useChatComposerBridge } from "../../hooks/useChatComposerBridge";
+import { useAutoGrowTextarea } from "../../hooks/useAutoGrowTextarea";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { CollapsibleChatContent } from "./CollapsibleChatContent";
 import {
@@ -593,6 +594,8 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const pendingRefs = useChatSessionStore((s) => s.attachedContext[sessionId] ?? EMPTY_REFS);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // One line when empty, six at most, then the field scrolls.
+  useAutoGrowTextarea(textareaRef, input);
   const lastCompositionEndRef = useRef(0);
   // The scroll viewport, captured alongside `useStickToBottom`'s callback ref
   // so the locate effect can query `[data-seq]` rows within it.
@@ -1481,7 +1484,13 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
       {/* Composer — same chrome as the execution view (plan 5.4). `relative`
           so the address picker floats above the card like the group's `@`
           popup does. */}
-      <div className="relative mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg">
+      {/* Two-layer composer, same shape as the execution composer: the outer
+          box is the BOTTOM layer's colour and frames everything, the raised
+          card is the write surface (text field + the icon buttons that act on
+          the message), and model / reasoning / workspace drop to the strip
+          below it. */}
+      <div className="relative mx-6 mb-0.5">
+          <div className="min-h-[44px] rounded-[22px] border border-chat-input-border bg-chat-input-top px-[5px] py-[5px]">
         {/* The router's open question, docked over the composer's edge
             (ADR-106 revision 2026-11-11): always on screen, never covering
             the input. */}
@@ -1496,68 +1505,37 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           className="hidden"
           onChange={handleFilesChosen}
         />
-        {replyTarget && (
-          <div className="flex items-center gap-1 px-3 pt-2">
-            <span className={composerChip}>
-              {t("chatView.replyingTo")}{" "}
-              {replyTarget.quote.slice(0, 30)}
-              <button
-                type="button"
-                onClick={() => setReplyTarget(null)}
-                className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
-                aria-label={t("chatView.cancelReply")}
-              >
-                ×
-              </button>
-            </span>
-          </div>
-        )}
-        {/* The task this message is addressed to (ADR-106 D7). Shown because an
-            address the surface swallowed would be indistinguishable from one
-            never given — and it is the one fact no model may re-decide. */}
-        {address && !replyTarget && (
-          <div className="flex flex-wrap items-center gap-1 px-3 pt-2">
-            {address.forceNew && (
+          {replyTarget && (
+            <div className="flex items-center gap-1 px-3 pt-2">
               <span className={composerChip}>
-                {t("chatView.block.newTask")}
+                {t("chatView.replyingTo")}{" "}
+                {replyTarget.quote.slice(0, 30)}
                 <button
                   type="button"
-                  onClick={() =>
-                    setAddress((a) => {
-                      if (!a) return null;
-                      const next = { ...a, forceNew: false };
-                      return next.refs?.length ? next : null;
-                    })
-                  }
+                  onClick={() => setReplyTarget(null)}
                   className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
-                  aria-label={t("chatView.address.clear")}
+                  aria-label={t("chatView.cancelReply")}
                 >
                   ×
                 </button>
               </span>
-            )}
-            {/* ADR-106 revision 2026-11-04: each attached reference is its own
-                removable chip — swallowing one the human picked would make it
-                indistinguishable from never picked, and it is a fact no model
-                may re-decide. */}
-            {(address.refs ?? []).map((r) => {
-              const key = `${r.agentInstanceId}|${r.sessionId}`;
-              return (
-                <span key={key} className={composerChip}>
-                  <Quote className="h-3 w-3 shrink-0" />
-                  {address.labels?.[key] || r.sessionId}
+            </div>
+          )}
+          {/* The task this message is addressed to (ADR-106 D7). Shown because an
+              address the surface swallowed would be indistinguishable from one
+              never given — and it is the one fact no model may re-decide. */}
+          {address && !replyTarget && (
+            <div className="flex flex-wrap items-center gap-1 px-3 pt-2">
+              {address.forceNew && (
+                <span className={composerChip}>
+                  {t("chatView.block.newTask")}
                   <button
                     type="button"
                     onClick={() =>
                       setAddress((a) => {
                         if (!a) return null;
-                        const refs = (a.refs ?? []).filter(
-                          (x) => `${x.agentInstanceId}|${x.sessionId}` !== key,
-                        );
-                        const labels = { ...a.labels };
-                        delete labels[key];
-                        if (refs.length === 0 && !a.forceNew) return null;
-                        return { refs, labels, forceNew: a.forceNew };
+                        const next = { ...a, forceNew: false };
+                        return next.refs?.length ? next : null;
                       })
                     }
                     className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
@@ -1566,93 +1544,169 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                     ×
                   </button>
                 </span>
-              );
-            })}
-          </div>
-        )}
-        {/* Second level of the `@` — the agent's own routable tasks, opened by
-            typing `@` in the composer: it belongs above the text it was typed
-            into. No `mousedown` preventDefault on this shell: the picker holds a
-            search box, and cancelling a mousedown is precisely what cancels the
-            focus it would hand the input. Every pick path refocuses the
-            composer. */}
-        {addressStage === "typed" && (
-          <div className="absolute bottom-full left-3 z-20 mb-2">
-            {addressPicker}
-          </div>
-        )}
-        {/* Workspace references picked with "Add to Chat" in the right-hand
-            panel — paths the Agent reads live, not uploaded copies. The
-            uploaded bytes above are a separate list with a separate channel. */}
-        <AttachedContextChips surface="chat" />
-        {(uploadingFiles.length > 0 || pendingAttachments.length > 0) && (
-          <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
-            <UploadingFileChips files={uploadingFiles} onCancel={cancelUpload} />
-            {pendingAttachments.map((a) => (
-              <ChatAttachmentChip
-                key={a.id}
-                chatSessionId={sessionId}
-                attachment={a}
-                onRemove={() => removeAttachment(a.id)}
-                removeLabel={t("chatPanel.removeAttachment")}
-              />
-            ))}
-          </div>
-        )}
-        <div className={OVERLAY_SCROLL_HOST_CLASS}>
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={t("chatView.address.composerHint")}
-            disabled={composerLocked}
-            className={cn(
-              "w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]",
-              OVERLAY_SCROLL_VIEWPORT_CLASS,
-            )}
-            style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
-            onKeyDown={(e) => {
-              /** Typing `@` at the start of a word opens the task list (ADR-106
-               *  D7) — one gesture on both chats, and the only one: the toolbar
-               *  has no `@` button any more. The character is NOT inserted: here
-               *  the address rides the chip above the composer, not the message
-               *  text, so a leftover `@` would be noise the model has to read. A
-               *  mid-word `@` (an email) stays literal, the rule the group's
-               *  `detectMention` uses. */
-              if (
-                e.key === "@" &&
-                !e.ctrlKey &&
-                !e.metaKey &&
-                !e.altKey &&
-                !e.nativeEvent.isComposing
-              ) {
-                const caret = e.currentTarget.selectionStart ?? input.length;
-                const prev = input[caret - 1];
-                if (!prev || /\s/.test(prev)) {
+              )}
+              {/* ADR-106 revision 2026-11-04: each attached reference is its own
+                  removable chip — swallowing one the human picked would make it
+                  indistinguishable from never picked, and it is a fact no model
+                  may re-decide. */}
+              {(address.refs ?? []).map((r) => {
+                const key = `${r.agentInstanceId}|${r.sessionId}`;
+                return (
+                  <span key={key} className={composerChip}>
+                    <Quote className="h-3 w-3 shrink-0" />
+                    {address.labels?.[key] || r.sessionId}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAddress((a) => {
+                          if (!a) return null;
+                          const refs = (a.refs ?? []).filter(
+                            (x) => `${x.agentInstanceId}|${x.sessionId}` !== key,
+                          );
+                          const labels = { ...a.labels };
+                          delete labels[key];
+                          if (refs.length === 0 && !a.forceNew) return null;
+                          return { refs, labels, forceNew: a.forceNew };
+                        })
+                      }
+                      className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
+                      aria-label={t("chatView.address.clear")}
+                    >
+                      ×
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          )}
+          {/* Second level of the `@` — the agent's own routable tasks, opened by
+              typing `@` in the composer: it belongs above the text it was typed
+              into. No `mousedown` preventDefault on this shell: the picker holds a
+              search box, and cancelling a mousedown is precisely what cancels the
+              focus it would hand the input. Every pick path refocuses the
+              composer. */}
+          {addressStage === "typed" && (
+            <div className="absolute bottom-full left-3 z-20 mb-2">
+              {addressPicker}
+            </div>
+          )}
+          {/* Workspace references picked with "Add to Chat" in the right-hand
+              panel — paths the Agent reads live, not uploaded copies. The
+              uploaded bytes above are a separate list with a separate channel. */}
+          <AttachedContextChips surface="chat" />
+          {(uploadingFiles.length > 0 || pendingAttachments.length > 0) && (
+            <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+              <UploadingFileChips files={uploadingFiles} onCancel={cancelUpload} />
+              {pendingAttachments.map((a) => (
+                <ChatAttachmentChip
+                  key={a.id}
+                  chatSessionId={sessionId}
+                  attachment={a}
+                  onRemove={() => removeAttachment(a.id)}
+                  removeLabel={t("chatPanel.removeAttachment")}
+                />
+              ))}
+            </div>
+          )}
+          {/* Text row: attach on the left, ledger read + send on the right, the
+              field between them — one line tall until the draft wraps, then it
+              grows to six lines and scrolls (see `useAutoGrowTextarea`). There
+              is no `+` menu on this surface, so the paperclip IS the leftmost
+              compose action. */}
+          <div className="flex items-end gap-1.5 p-0">
+            <Tooltip content={t("chatPanel.attach")} variant="plain">
+              <button
+                className={cn(toolbarIconButton, composerPlusButton, uploading && "opacity-50")}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                aria-label={t("chatPanel.attach")}
+              >
+                <Paperclip size={16} />
+              </button>
+            </Tooltip>
+            <div className={cn(OVERLAY_SCROLL_HOST_CLASS, "min-w-0 flex-1")}>
+              <textarea
+                ref={textareaRef}
+                rows={1}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder={t("chatView.address.composerHint")}
+                disabled={composerLocked}
+                className={cn(
+                  "block w-full resize-none border-0 bg-transparent py-[5px] px-1.5 leading-[22px] outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 overflow-y-auto",
+                  OVERLAY_SCROLL_VIEWPORT_CLASS,
+                )}
+                style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+                onKeyDown={(e) => {
+                  /** Typing `@` at the start of a word opens the task list (ADR-106
+                   *  D7) — one gesture on both chats, and the only one: the toolbar
+                   *  has no `@` button any more. The character is NOT inserted: here
+                   *  the address rides the chip above the composer, not the message
+                   *  text, so a leftover `@` would be noise the model has to read. A
+                   *  mid-word `@` (an email) stays literal, the rule the group's
+                   *  `detectMention` uses. */
+                  if (
+                    e.key === "@" &&
+                    !e.ctrlKey &&
+                    !e.metaKey &&
+                    !e.altKey &&
+                    !e.nativeEvent.isComposing
+                  ) {
+                    const caret = e.currentTarget.selectionStart ?? input.length;
+                    const prev = input[caret - 1];
+                    if (!prev || /\s/.test(prev)) {
+                      e.preventDefault();
+                      setAddressStage("typed");
+                      return;
+                    }
+                  }
+                  if (e.key !== "Enter" || e.shiftKey) return;
+                  const elapsed = Date.now() - lastCompositionEndRef.current;
+                  if (elapsed < 300) return; // IME confirmation — do not send
                   e.preventDefault();
-                  setAddressStage("typed");
-                  return;
+                  handleSend();
+                }}
+                onCompositionEnd={() => {
+                  lastCompositionEndRef.current = Date.now();
+                }}
+                onPaste={handlePaste}
+              />
+              <OverlayScrollTarget targetRef={textareaRef} />
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              {/* Per-chat ledger read (plan §4.6 phase two): the pair's
+                  router spend lives on this one agent. */}
+              <ChatUsageIcon
+                agentIds={[agentId]}
+                chatSessionId={sessionId}
+                editableAgentId={agentId}
+              />
+              <Tooltip
+                content={
+                  turnLive
+                    ? t("chatView.notice.turnInflightTooltip")
+                    : t("chatPanel.sendMessage")
                 }
-              }
-              if (e.key !== "Enter" || e.shiftKey) return;
-              const elapsed = Date.now() - lastCompositionEndRef.current;
-              if (elapsed < 300) return; // IME confirmation — do not send
-              e.preventDefault();
-              handleSend();
-            }}
-            onCompositionEnd={() => {
-              lastCompositionEndRef.current = Date.now();
-            }}
-            onPaste={handlePaste}
-          />
-          <OverlayScrollTarget targetRef={textareaRef} />
+                variant="plain"
+              >
+                <button
+                  className={cn(toolbarIconButton, composerSendButton, composerLocked && "opacity-50")}
+                  onClick={handleSend}
+                  disabled={composerLocked}
+                  aria-label={t("chatPanel.sendMessage")}
+                >
+                  <Send size={16} />
+                </button>
+              </Tooltip>
+            </div>
+          </div>
         </div>
-        {/* Bottom toolbar — same layout as the execution composer. Model /
+        {/* Bottom strip — same layout as the execution composer. Model /
             reasoning / workspace are WRITABLE: a pick becomes a per-message
             draft that seeds the execution session on send (design 27 §4.5).
             Skills are intentionally absent — not session-seeded, no chat-message
             channel, so nothing to show here (hidden, not disabled). */}
-        <div ref={setToolbarRef} className="@container/tb flex items-center justify-between gap-2 px-3 pb-2 min-w-[264px]">
+        <div ref={setToolbarRef} className="@container/tb mt-0.5 flex items-center gap-2 px-3 py-0.5 min-w-[264px]">
           <div
             data-toolbar-cluster="left"
             className="flex items-center gap-1 min-w-0 overflow-visible"
@@ -1700,45 +1754,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 }
               />
             </div>
-          </div>
-          <div
-            data-toolbar-cluster="right"
-            className="flex shrink-0 items-center gap-1"
-          >
-            {/* Per-chat ledger read (plan §4.6 phase two): the pair's
-                router spend lives on this one agent. */}
-            <ChatUsageIcon
-              agentIds={[agentId]}
-              chatSessionId={sessionId}
-              editableAgentId={agentId}
-          />
-            <Tooltip content={t("chatPanel.attach")} variant="plain">
-              <button
-                className={cn(toolbarIconButton, uploading && "opacity-50")}
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploading}
-                aria-label={t("chatPanel.attach")}
-              >
-                <Paperclip size={16} />
-              </button>
-            </Tooltip>
-            <Tooltip
-              content={
-                turnLive
-                  ? t("chatView.notice.turnInflightTooltip")
-                  : t("chatPanel.sendMessage")
-              }
-              variant="plain"
-            >
-              <button
-                className={cn(toolbarIconButton, composerLocked && "opacity-50")}
-                onClick={handleSend}
-                disabled={composerLocked}
-                aria-label={t("chatPanel.sendMessage")}
-              >
-                <Send size={16} />
-              </button>
-            </Tooltip>
           </div>
         </div>
       </div>

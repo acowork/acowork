@@ -877,9 +877,11 @@ export interface PendingAttachedItem {
    *  once the server has answered. */
   filename?: string;
   sizeBytes?: number;
-  /** Source path on disk. Only the Rust upload path needs it: a cancel names
-   *  the file, because an `invoke` already in flight cannot be aborted. */
-  filePath?: string;
+  /** Names this upload for `cancel_upload`. Only the Rust upload path needs
+   *  it: an `invoke` already in flight cannot be aborted, so the cancel has to
+   *  name the transfer instead. Minted by the caller (not by the server) so it
+   *  exists before the request does. */
+  uploadToken?: string;
   /** Bytes the backend has accepted so far (ADR-122 chunked upload). Absent
    *  on a single-request upload until it lands. */
   sentBytes?: number;

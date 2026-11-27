@@ -54,7 +54,8 @@ import type { Components } from "react-markdown";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { BubbleMetaActions } from "./BubbleMetaActions";
 import { cn } from "../../lib/utils";
-import { composerChip, listRowSelected, toolbarIconButton } from "../../lib/ui-styles";
+import { useAutoGrowTextarea } from "../../hooks/useAutoGrowTextarea";
+import { composerChip, composerPlusButton, composerSendButton, listRowSelected, toolbarIconButton } from "../../lib/ui-styles";
 import { getGatewayUrl } from "../../lib/config";
 import { fetchDirectory } from "../../lib/auth-api";
 import type { DirectoryUser } from "../../lib/types";
@@ -870,6 +871,9 @@ export function GroupChatPanel() {
   const nameOf = useParticipantNamer(directory);
   const agentsMap = useAgentStore((s) => s.agents);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // One line tall until the draft wraps, six lines max — the same field the
+  // 1:1 composers use.
+  useAutoGrowTextarea(textareaRef, draft);
   // Right-click on an agent's avatar / name → the "@name" menu. One menu for
   // the whole panel: the payload carries the right-clicked participant.
   const mentionMenu = useContextMenu<{ id: string }>();
@@ -2011,13 +2015,13 @@ export function GroupChatPanel() {
             {t("groupChat.readOnly")}
           </div>
         ) : (
-          /* Unified input container — mirrors InboxPanel's composer card (the
-             user↔user inbox) so the group chat reads as the same primitive as
-             every other chat surface: rounded-xl surface wrapping a borderless
-             textarea, with the toolbar (Paperclip + send) collapsed to the
-             bottom row. The composer carries attachments like the 1:1 chat
-             surface, so the Paperclip sits just left of the send button. */
-          <div className="relative mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg shadow-[0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.4)]">
+          /* The 1:1 chat's raised capsule (fixed 20px radius, `chat-input-top`
+             fill, hairline border) with the message's own chips INSIDE it:
+             reply / address / attachments, then one text row. There is no strip
+             below — group chat has no model / reasoning / workspace / read
+             visibility to put there, since a turn executes on the participant's
+             own session config, so the capsule is the whole composer. */
+          <div className="relative mx-6 mb-3 min-h-[44px] rounded-[22px] border border-chat-input-border bg-chat-input-top px-[5px] py-[5px]">
             <input
               ref={fileInputRef}
               type="file"
@@ -2128,13 +2132,34 @@ export function GroupChatPanel() {
                 />
               </div>
             )}
-            <div className="flex items-end gap-2 px-3 pb-2 pt-1">
+            {/* Text row — the 1:1 chat composer's grammar: paperclip on the
+                left (this surface has no `+` menu, so it IS the leftmost
+                compose action), the field between, ledger read + send on the
+                right. One line tall until the draft wraps, then it grows to
+                six lines and scrolls (`useAutoGrowTextarea`).
+
+                Unlike the 1:1 composer there is no strip below the card: group
+                chat has no model / reasoning / workspace / visibility to put
+                there (the turn's execution config comes from the participant's
+                own session), so the card is the whole composer. */}
+            <div className="flex items-end gap-1.5 p-0">
+              <Tooltip content={t("chatPanel.attach")} variant="plain">
+                <button
+                  className={cn(toolbarIconButton, composerPlusButton, uploading && "opacity-50")}
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading || sending}
+                  aria-label={t("chatPanel.attach")}
+                >
+                  <Paperclip size={16} />
+                </button>
+              </Tooltip>
               {/* The textarea is a flex item here, so the overlay host takes
                   over its flex sizing (`min-w-0 flex-1`) — a bare `relative`
                   div would shrink the composer to its content width. */}
               <div className={cn(OVERLAY_SCROLL_HOST_CLASS, "min-w-0 flex-1")}>
                 <textarea
                   ref={textareaRef}
+                  rows={1}
                   value={draft}
                   onChange={(e) => {
                     const v = e.target.value;
@@ -2204,24 +2229,14 @@ export function GroupChatPanel() {
                   disabled={composerLocked}
                   onPaste={handlePaste}
                   className={cn(
-                    "w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]",
+                    "block w-full resize-none border-0 bg-transparent py-[5px] px-1.5 leading-[22px] outline-none placeholder:text-text-disabled disabled:cursor-not-allowed disabled:opacity-50 overflow-y-auto",
                     OVERLAY_SCROLL_VIEWPORT_CLASS,
                   )}
                   style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
                 />
                 <OverlayScrollTarget targetRef={textareaRef} />
               </div>
-            </div>
-            {/* Toolbar row — textarea on top, actions grouped at the bottom
-                right: Paperclip immediately left of Send, the same cluster
-                order the 1:1 chat composer uses (attachment never drifts to
-                the far side). */}
-            <div className="flex items-center justify-between gap-2 px-3 pb-2">
-              <div />
-              <div
-                data-toolbar-cluster="right"
-                className="flex shrink-0 items-center gap-1"
-              >
+              <div className="flex shrink-0 items-center gap-1">
                 {/* Per-chat ledger read (plan §4.6 phase two): one row per
                     agent participant, merged client-side. A human-only DM
                     has no agent roster and the button hides itself. */}
@@ -2230,34 +2245,28 @@ export function GroupChatPanel() {
                   chatSessionId={activeGroupId ?? ""}
                   resolveName={(id) => nameOf(id).name}
                 />
-                <Tooltip content={t("chatPanel.attach")} variant="plain">
-                  <button
-                    className={cn(toolbarIconButton, uploading && "opacity-50")}
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={uploading || sending}
-                    aria-label={t("chatPanel.attach")}
-                  >
-                    <Paperclip size={16} />
-                  </button>
-                </Tooltip>
-                <button
-                  type="button"
-                  onClick={() => void submit()}
-                  disabled={
-                    (!draft.trim() && pendingAttachments.length === 0) ||
-                    composerLocked ||
-                    uploading
-                  }
-                  aria-label={t("groupChat.send")}
-                  title={
+                <Tooltip
+                  content={
                     turnLive
                       ? t("chatView.notice.turnInflightTooltip")
                       : t("groupChat.send")
                   }
-                  className="rounded-md p-1.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15 hover:text-text-secondary"
+                  variant="plain"
                 >
-                  <Send size={16} />
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => void submit()}
+                    disabled={
+                      (!draft.trim() && pendingAttachments.length === 0) ||
+                      composerLocked ||
+                      uploading
+                    }
+                    aria-label={t("groupChat.send")}
+                    className={cn(toolbarIconButton, composerSendButton, uploading && "opacity-50")}
+                  >
+                    <Send size={16} />
+                  </button>
+                </Tooltip>
               </div>
             </div>
           </div>

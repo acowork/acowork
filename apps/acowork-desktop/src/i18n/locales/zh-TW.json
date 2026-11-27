@@ -1196,6 +1196,8 @@
     "public": "公開",
     "private": "私有",
     "hintToggle": "點擊切換",
+    "lock": "鎖定",
+    "unlock": "解鎖",
     "toastNowPrivate": "已設為私有",
     "toastNowPublic": "已設為公開",
     "toastFailed": "修改可見性失敗：{{error}}"

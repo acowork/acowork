@@ -28,6 +28,7 @@
   --color-chat-bubble: hsl(340 var(--theme-chroma) 98%);
   --color-chat-title: hsl(340 var(--theme-chroma) 87%);
   --color-chat-input-bg: hsl(339 var(--theme-chroma) 94%);
+  --color-chat-input-top: hsl(339 var(--theme-chroma) 100%);
   --color-chat-input-border: hsl(340 calc(var(--theme-chroma) * 0.55) 85%);
   --color-input-bg: hsl(339 var(--theme-chroma) 96%);
   --color-input-border: hsl(338 calc(var(--theme-chroma) * 0.85) 88%);
@@ -78,6 +79,7 @@
   --color-chat-bubble: hsl(335 var(--theme-chroma) 15.7% / 0.3);
   --color-chat-title: hsl(335 var(--theme-chroma) 13%);
   --color-chat-input-bg: hsl(335 var(--theme-chroma) 11.7%);
+  --color-chat-input-top: hsl(335 var(--theme-chroma) 16.7%);
   --color-chat-input-border: var(--color-border-outer);
   --color-input-bg: hsl(335 var(--theme-chroma) 16.7%);
   --color-input-border: hsl(334 calc(var(--theme-chroma) * 0.85) 18%);

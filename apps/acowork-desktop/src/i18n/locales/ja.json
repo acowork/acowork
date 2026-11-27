@@ -1206,6 +1206,8 @@
     "public": "公開",
     "private": "非公開",
     "hintToggle": "クリックで切り替え",
+    "lock": "ロック",
+    "unlock": "ロック解除",
     "toastNowPrivate": "セッションを非公開にしました",
     "toastNowPublic": "セッションを公開にしました",
     "toastFailed": "公開設定を変更できませんでした: {{error}}"

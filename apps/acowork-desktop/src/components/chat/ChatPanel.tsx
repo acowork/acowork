@@ -1,5 +1,6 @@
 import React, { useEffect, useInsertionEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Channel, invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { uploadPercent } from "./uploadProgress";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore, type ConnectionStatus, STUCK_FORCE_RECONNECT_MS } from "../../stores/chatStore";
@@ -17,8 +18,9 @@ import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { isFileDropClaimed } from "../../lib/fileDropClaim";
 import { blobToBase64, extensionForFile } from "./clipboardImageExt";
 import { useChatComposerBridge } from "../../hooks/useChatComposerBridge";
+import { useAutoGrowTextarea } from "../../hooks/useAutoGrowTextarea";
 import { detectPaste } from "./pasteDetect";
-import { composerChip, listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
+import { composerChip, composerPlusButton, composerSendButton, listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
@@ -27,7 +29,7 @@ import type { SpeakerKind } from "./speakerBubble";
 import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock, RefreshCw } from "lucide-react";
 import type { ChatMessage, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
-import { SessionVisibilityToggle } from "./SessionVisibilityToggle";
+import { SessionVisibilityMenu } from "./SessionVisibilityToggle";
 import { blockIndexOfRawMessage } from "./messageFolder";
 import { PlaceholderBar } from "./PlaceholderBar";
 import { useSessionScope } from "./useSessionScope";
@@ -784,6 +786,8 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   //     textarea — or a descendant — has focus; otherwise the drop is
   //     for a different surface, e.g. the workspace tree).
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // One line when empty, six at most, then the field scrolls.
+  useAutoGrowTextarea(textareaRef, session.inputValue);
 
   // Right-click context menu for the textarea — gives the user a working
   // "Paste / Upload File" menu since Tauri WebViews do NOT render the
@@ -1459,13 +1463,17 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     // documents; for images the renderer reads from the original file path
     // via the asset protocol while the upload is in flight.
     const localUrl = isImage ? convertFileSrc(filePath) : undefined;
+    // Names the transfer for `cancel_upload`. Minted here, not by the server:
+    // the chunk route's id only exists after the create call, and the user can
+    // hit X before that.
+    const uploadToken = crypto.randomUUID();
     session.setPendingAttachedItems(prev => [...prev, {
       tempId,
       status: "uploading",
       localUrl,
       filename,
       sizeBytes: fileSize,
-      filePath,
+      uploadToken,
     }]);
 
     try {
@@ -1502,6 +1510,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
         format,
         width,
         height,
+        uploadToken,
         onProgress: progress,
       });
 
@@ -1555,8 +1564,8 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   // goes away at once and the backend is told to drop it at the next chunk.
   const handleRemovePending = (tempId: string) => {
     const target = session.pendingAttachedItems.find((p) => p.tempId === tempId);
-    if (target?.status === "uploading" && target.filePath) {
-      void invoke("cancel_upload", { filePath: target.filePath });
+    if (target?.status === "uploading" && target.uploadToken) {
+      void invoke("cancel_upload", { uploadToken: target.uploadToken });
     }
     session.setPendingAttachedItems(prev => prev.filter((p) => p.tempId !== tempId));
   };
@@ -2542,182 +2551,239 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           </div>
         )}
 
-        {/* Unified input container with toolbar */}
-        <div className="mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg">
-          {/* Active skill badge */}
-          {activeSkill && (
-            <div className="flex items-center gap-1 px-3 pt-2">
-              <span className={composerChip}>
-                /{activeSkill.name}
-                <button
-                  type="button"
-                  onClick={clearActiveSkill}
-                  className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
-                  aria-label={t("chatPanel.ariaLabelClearActiveSkill")}
-                >
-                  <X size={12} />
-                </button>
-              </span>
-            </div>
-          )}
+        {/* Composer. The wrapper is transparent — the capsule (`bg-chat-input-top`,
+            hairline border, fixed 20px radius) is the only raised surface, and
+            everything that belongs to the message being written stays INSIDE it:
+            skill badge, attachment chips, banners, the field, `+` and the three
+            icon buttons. Model / reasoning / workspace sit BELOW the capsule on
+            the page background, where the responsive fold still owns them. */}
+        <div className="mx-6 mb-0.5">
+          <div className="min-h-[44px] rounded-[22px] border border-chat-input-border bg-chat-input-top px-[5px] py-[5px]">
+            {/* Active skill badge */}
+            {activeSkill && (
+              <div className="flex items-center gap-1 px-3 pt-2">
+                <span className={composerChip}>
+                  /{activeSkill.name}
+                  <button
+                    type="button"
+                    onClick={clearActiveSkill}
+                    className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
+                    aria-label={t("chatPanel.ariaLabelClearActiveSkill")}
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              </div>
+            )}
 
-          {/* Pending attachment chips (ADR-046: unified entry-point).
-              Documents use the existing `DocumentChip`; images get a thumbnail
-              variant. Both render from `pendingAttachedItems`. */}
-          {session.pendingAttachedItems.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
-              {session.pendingAttachedItems.map((p) => {
-                const item = p.item;
-                // Workspace reference: already-resolved `attached_*` items.
-                if (item && (item.type === "attached_file"
-                  || item.type === "attached_selection"
-                  || item.type === "attached_folder")) {
+            {/* Pending attachment chips (ADR-046: unified entry-point).
+                Documents use the existing `DocumentChip`; images get a thumbnail
+                variant. Both render from `pendingAttachedItems`. */}
+            {session.pendingAttachedItems.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+                {session.pendingAttachedItems.map((p) => {
+                  const item = p.item;
+                  // Workspace reference: already-resolved `attached_*` items.
+                  if (item && (item.type === "attached_file"
+                    || item.type === "attached_selection"
+                    || item.type === "attached_folder")) {
+                    return (
+                      <DocumentChip
+                        key={p.tempId}
+                        filename={item.name}
+                        format="workspace"
+                        status={p.status}
+                        errorMessage={p.errorMessage}
+                        onRemove={() => handleRemovePending(p.tempId)}
+                      />
+                    );
+                  }
+                  // Image upload (or pre-upload with only localUrl set).
+                  if (item && item.type === "image_upload") {
+                    return (
+                      <div
+                        key={p.tempId}
+                        className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-border-outer"
+                      >
+                        <img
+                          src={p.localUrl ?? `/api/agents/${selectedAgentId ?? ""}/files/${item.documentId}`}
+                          alt={item.filename}
+                          className="h-full w-full object-cover"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleRemovePending(p.tempId)}
+                          className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-danger-solid text-white opacity-0 transition-opacity group-hover:opacity-100"
+                          aria-label={`Remove ${item.filename}`}
+                        >
+                          <X size={10} />
+                        </button>
+                      </div>
+                    );
+                  }
+                  // Pre-upload preview for an image that has only a localUrl.
+                  if (!item && p.localUrl) {
+                    return (
+                      <div
+                        key={p.tempId}
+                        className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-border-outer"
+                      >
+                        <img
+                          src={p.localUrl}
+                          alt=""
+                          className="h-full w-full object-cover opacity-60"
+                        />
+                        {p.sentBytes != null && (
+                          <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-black/55 py-0.5 text-center text-xs leading-tight text-white">
+                            {p.sizeBytes
+                              ? uploadPercent(p.sentBytes, p.sizeBytes)
+                              : formatBytes(p.sentBytes)}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleRemovePending(p.tempId)}
+                          className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-danger-solid text-white opacity-0 transition-opacity group-hover:opacity-100"
+                          aria-label="Remove attachment"
+                        >
+                          <X size={10} />
+                        </button>
+                      </div>
+                    );
+                  }
+                  // Document upload (or upload-in-flight without resolved item).
+                  // `item` only exists after the server answers, so the in-flight
+                  // chip falls back to the name and size recorded at pick time.
+                  const isFileUpload = item?.type === "file_upload";
+                  const filename = isFileUpload ? item.filename : (p.filename ?? "");
+                  const format = isFileUpload ? item.format : "";
+                  const size = isFileUpload ? item.sizeBytes : p.sizeBytes;
                   return (
                     <DocumentChip
                       key={p.tempId}
-                      filename={item.name}
-                      format="workspace"
+                      filename={filename}
+                      format={format}
+                      size={size}
+                      sentBytes={p.status === "uploading" ? p.sentBytes : undefined}
                       status={p.status}
                       errorMessage={p.errorMessage}
                       onRemove={() => handleRemovePending(p.tempId)}
                     />
                   );
-                }
-                // Image upload (or pre-upload with only localUrl set).
-                if (item && item.type === "image_upload") {
-                  return (
-                    <div
-                      key={p.tempId}
-                      className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-border-outer"
-                    >
-                      <img
-                        src={p.localUrl ?? `/api/agents/${selectedAgentId ?? ""}/files/${item.documentId}`}
-                        alt={item.filename}
-                        className="h-full w-full object-cover"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => handleRemovePending(p.tempId)}
-                        className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-danger-solid text-white opacity-0 transition-opacity group-hover:opacity-100"
-                        aria-label={`Remove ${item.filename}`}
-                      >
-                        <X size={10} />
-                      </button>
-                    </div>
-                  );
-                }
-                // Pre-upload preview for an image that has only a localUrl.
-                if (!item && p.localUrl) {
-                  return (
-                    <div
-                      key={p.tempId}
-                      className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-border-outer"
-                    >
-                      <img
-                        src={p.localUrl}
-                        alt=""
-                        className="h-full w-full object-cover opacity-60"
-                      />
-                      {p.sentBytes != null && (
-                        <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-black/55 py-0.5 text-center text-xs leading-tight text-white">
-                          {p.sizeBytes
-                            ? `${Math.min(100, Math.round((p.sentBytes / p.sizeBytes) * 100))}%`
-                            : formatBytes(p.sentBytes)}
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => handleRemovePending(p.tempId)}
-                        className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-danger-solid text-white opacity-0 transition-opacity group-hover:opacity-100"
-                        aria-label="Remove attachment"
-                      >
-                        <X size={10} />
-                      </button>
-                    </div>
-                  );
-                }
-                // Document upload (or upload-in-flight without resolved item).
-                // `item` only exists after the server answers, so the in-flight
-                // chip falls back to the name and size recorded at pick time.
-                const isFileUpload = item?.type === "file_upload";
-                const filename = isFileUpload ? item.filename : (p.filename ?? "");
-                const format = isFileUpload ? item.format : "";
-                const size = isFileUpload ? item.sizeBytes : p.sizeBytes;
-                return (
-                  <DocumentChip
-                    key={p.tempId}
-                    filename={filename}
-                    format={format}
-                    size={size}
-                    sentBytes={p.status === "uploading" ? p.sentBytes : undefined}
-                    status={p.status}
-                    errorMessage={p.errorMessage}
-                    onRemove={() => handleRemovePending(p.tempId)}
-                  />
-                );
-              })}
-            </div>
-          )}
-          {/* Attached context chips (from right-click "Add to Chat") */}
-          <AttachedContextChips />
-          {/* P0-7: live connection-status banner with auto-reconnect countdown.
-              Renders nothing when the connection is healthy — only shows when
-              the watchdog is actively trying to recover (connecting / stale /
-              disconnected). The placeholder below is the fallback for the
-              rare case where the banner isn't mounted (e.g. while the
-              watchdog is still in its initial idle state). */}
-          <ConnectionStatusBanner
-            effectiveConnection={effectiveConnection}
-            staleSince={mqttStaleSince}
-          />
-          {/* Textarea area — borderless, transparent background.
-              A `<textarea>` scrolls its own content, so the wrapper form of
-              the overlay scrollbar cannot own it: the host div supplies the
-              positioning context and the `:hover` reveal, the viewport class
-              on the textarea hides the OS bar, and `OverlayScrollTarget`
-              paints the same floating thumb the rest of the app uses. */}
-          <div className={OVERLAY_SCROLL_HOST_CLASS}>
-            <textarea
-              ref={textareaRef}
-              value={session.inputValue}
-              onChange={(e) => session.setInputValue(e.target.value)}
-              placeholder={readOnlySession
-                ? t("chatPanel.readOnlySessionPlaceholder")
-                : t(
-                    `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill, sending)}`,
-                  )}
-              disabled={inputDisabled || readOnlySession}
-              className={cn(
-                "w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]",
-                OVERLAY_SCROLL_VIEWPORT_CLASS,
-              )}
-              style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
-              onKeyDown={(e) => {
-                if (e.key !== "Enter" || e.shiftKey) return;
-                // On macOS, compositionEnd fires before keydown(Enter) when the user
-                // presses Enter to confirm an IME selection. isComposing is already
-                // false by then, so we check a time window instead.
-                const elapsed = Date.now() - lastCompositionEndRef.current;
-                if (elapsed < 300) return; // IME confirmation — do not send
-                e.preventDefault();
-                // Enter is ALWAYS a send action — never a stop.
-                // To stop, the user MUST click the Stop button (handleStop).
-                // Rationale: spurious Enter events (macOS keyboard repeat, WKWebView
-                // focus/keyboard quirks during window resize, accidental keypresses)
-                // previously triggered urgent_stop and silently killed the stream.
-                //
-                // While a turn runs this is the same "send and interrupt" action
-                // as the composer button (it used to park the draft in a local
-                // queue that only a second stop click could release).
-                handleSend();
-              }}
-              onCompositionEnd={() => {
-                lastCompositionEndRef.current = Date.now();
-              }}
-              onPaste={handlePaste}
-              onContextMenu={handleTextareaContextMenu}
+                })}
+              </div>
+            )}
+            {/* Attached context chips (from right-click "Add to Chat") */}
+            <AttachedContextChips />
+            {/* P0-7: live connection-status banner with auto-reconnect countdown.
+                Renders nothing when the connection is healthy — only shows when
+                the watchdog is actively trying to recover (connecting / stale /
+                disconnected). The placeholder below is the fallback for the
+                rare case where the banner isn't mounted (e.g. while the
+                watchdog is still in its initial idle state). */}
+            <ConnectionStatusBanner
+              effectiveConnection={effectiveConnection}
+              staleSince={mqttStaleSince}
             />
-            <OverlayScrollTarget targetRef={textareaRef} />
+            {/* Text field row: `+` on the left, the three icon buttons on the
+                right, the text between them — one line tall until the draft
+                wraps, then the field grows to six lines (see
+                `useAutoGrowTextarea`) and scrolls past that.
+                A `<textarea>` scrolls its own content, so the wrapper form of
+                the overlay scrollbar cannot own it: the host div supplies the
+                positioning context and the `:hover` reveal, the viewport class
+                on the textarea hides the OS bar, and `OverlayScrollTarget`
+                paints the same floating thumb the rest of the app uses. */}
+          <div className="flex items-end gap-1.5 p-0">
+              {/* `+` menu — one trigger for everything the message can carry:
+                  skills, MCP server / tool switches, builtin tool switches and
+                  attachments (ADR-076: every entry is a session write, so a
+                  shared read-only session disables the whole trigger rather
+                  than half of it). */}
+              <ComposerPlusMenu
+                readOnly={readOnlySession}
+                disabled={!selectedAgentId || !currentSessionId}
+                onPickAttachments={() => void handleFileUpload()}
+                buttonClassName={cn(toolbarIconButton, composerPlusButton)}
+              />
+              <div className={cn(OVERLAY_SCROLL_HOST_CLASS, "min-w-0 flex-1")}>
+                <textarea
+                  ref={textareaRef}
+                  rows={1}
+                  value={session.inputValue}
+                  onChange={(e) => session.setInputValue(e.target.value)}
+                  placeholder={readOnlySession
+                    ? t("chatPanel.readOnlySessionPlaceholder")
+                    : t(
+                        `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill, sending)}`,
+                      )}
+                  disabled={inputDisabled || readOnlySession}
+                  className={cn(
+                    "block w-full resize-none border-0 bg-transparent py-[5px] px-1.5 leading-[22px] outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 overflow-y-auto",
+                    OVERLAY_SCROLL_VIEWPORT_CLASS,
+                  )}
+                  style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" || e.shiftKey) return;
+                    // On macOS, compositionEnd fires before keydown(Enter) when the user
+                    // presses Enter to confirm an IME selection. isComposing is already
+                    // false by then, so we check a time window instead.
+                    const elapsed = Date.now() - lastCompositionEndRef.current;
+                    if (elapsed < 300) return; // IME confirmation — do not send
+                    e.preventDefault();
+                    // Enter is ALWAYS a send action — never a stop.
+                    // To stop, the user MUST click the Stop button (handleStop).
+                    // Rationale: spurious Enter events (macOS keyboard repeat, WKWebView
+                    // focus/keyboard quirks during window resize, accidental keypresses)
+                    // previously triggered urgent_stop and silently killed the stream.
+                    //
+                    // While a turn runs this is the same "send and interrupt" action
+                    // as the composer button (it used to park the draft in a local
+                    // queue that only a second stop click could release).
+                    handleSend();
+                  }}
+                  onCompositionEnd={() => {
+                    lastCompositionEndRef.current = Date.now();
+                  }}
+                  onPaste={handlePaste}
+                  onContextMenu={handleTextareaContextMenu}
+                />
+                <OverlayScrollTarget targetRef={textareaRef} />
+              </div>
+              {/* Icon cluster — context usage, send/stop. Fixed-width and
+                  icon-only, so it sits on the input row: the fold engine only
+                  ever folds LABELS, and there are none here. Read visibility
+                  is NOT here — it is a labelled menu in the strip below. */}
+              <div className="flex shrink-0 items-center gap-1">
+                {/* Context usage icon — shown when session is active */}
+                {selectedAgentId && currentSessionId && <ContextUsageIcon agentId={selectedAgentId} sessionId={currentSessionId} />}
+
+                {/* Send/Stop button with tooltip above.
+                    One control, and the icon says what the click does
+                    (`composerButtonState`, derived once above):
+                      - a draft is present      → Send   (while running: sends
+                                                          AND interrupts the turn)
+                      - running, empty composer → Square (stop)
+                      - idle, empty composer    → Send   (silent no-op, as before)
+                    The old three-way behaviour (queue / send-queue-and-stop /
+                    stop) is gone: parking the draft first was a click that only
+                    delayed delivery. */}
+                <Tooltip content={t(`chatPanel.${composer.labelKey}`)}>
+                  <button
+                    // The `sending` branch needs its own `disabled:` styles too:
+                    // a viewer watching the owner's stream lands here with the
+                    // button disabled, and an unstyled disabled button reads as
+                    // a live stop control.
+                    className={cn(toolbarIconButton, composerSendButton, sending && "opacity-70")}
+                    onClick={composer.mode === "stop" ? handleStop : handleSend}
+                    disabled={composer.disabled}
+                    aria-label={t(`chatPanel.${composer.labelKey}`)}
+                  >
+                    {composer.mode === "stop" ? <Square size={16} fill="currentColor" /> : <Send size={16} />}
+                  </button>
+                </Tooltip>
+              </div>
+            </div>
           </div>
           {/* Custom right-click menu — Tauri WebViews don't render the
               browser's native textarea menu, so we mount our own. */}
@@ -2730,28 +2796,23 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
             onClose={textareaMenu.close}
           />
 
-          {/* Bottom toolbar — @container for responsive button text collapse */}
+          {/* Bottom strip — model / reasoning / workspace / read visibility,
+              transparent on the page background just below the capsule.
+              `@container/tb` + `setToolbarRef` stay here: the fold engine
+              measures THIS row and folds the labelled buttons to icons as the
+              panel narrows, left to right (`data-toolbar-cluster="left"`,
+              per-button `data-toolbar-btn`, and the `textHidden` props below
+              are the whole contract). The icon-only cluster sits on the input
+              row instead, so the engine measures no right cluster and hands the
+              labels the full width. */}
           <div
             ref={setToolbarRef}
-            className="@container/tb flex items-center justify-between gap-2 px-3 pb-2 min-w-[264px]"
+            className="@container/tb mt-0.5 flex items-center gap-2 px-3 py-0.5 min-w-[264px]"
           >
-            {/* Left: feature buttons */}
             <div
               data-toolbar-cluster="left"
               className="flex items-center gap-1 min-w-0 overflow-visible"
             >
-              {/* `+` menu — one trigger for everything the message can carry:
-                  skills, MCP server / tool switches, builtin tool switches and
-                  attachments. Replaces the former standalone skills dropdown
-                  (left cluster) and paperclip button (right cluster) to keep
-                  the composer strip compact. ADR-076: every entry is a
-                  session write, so a shared read-only session disables the
-                  whole trigger rather than half of it. */}
-              <ComposerPlusMenu
-                readOnly={readOnlySession}
-                disabled={!selectedAgentId || !currentSessionId}
-                onPickAttachments={() => void handleFileUpload()}
-            />
              {/* Model switcher — shown for any configured model(s); the
                   button doubles as the current-model indicator (ADR:
                   single-model setups still need to SEE which model is in
@@ -2787,55 +2848,16 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
               <div ref={wsBtnRef} className="min-w-0">
                 <WorkspaceSelector textHidden={textHidden.ws} readOnly={readOnlySession} />
               </div>
-            </div>
-
-            {/* Right: session visibility + usage + send.
-                `data-toolbar-cluster="right"` marks the cluster so the
-                collapse algorithm can MEASURE its offsetWidth (instead
-                of counting buttons × 28 + gaps × 4 by hand). Adding a
-                new icon-only button to this cluster changes the
-                measured width on the next frame; the fold math picks
-                it up with no code change. The left cluster keeps the
-                per-button fold because its text-vs-icon delta is what
-                progressive collapse is for. */}
-            <div data-toolbar-cluster="right" className="flex shrink-0 items-center gap-1">
-              {/* Context usage icon — shown when session is active */}
-              {selectedAgentId && currentSessionId && <ContextUsageIcon agentId={selectedAgentId} sessionId={currentSessionId} />}
-
-              {/* ADR-076 §决策 4: per-session read visibility (owner only).
-                  Icon-only, so it rides with the other icon-only right-cluster
-                  controls and stays out of the collapsible text row. */}
+              {/* ADR-076 §决策 4: per-session read visibility (owner only) —
+                  the last label to fold, since it is touched least often. */}
               {selectedAgentId && currentSessionId && (
-                <SessionVisibilityToggle agentId={selectedAgentId} sessionId={currentSessionId} />
+                <SessionVisibilityMenu
+                  agentId={selectedAgentId}
+                  sessionId={currentSessionId}
+                  textHidden={textHidden.visibility}
+                  btnId="visibility"
+                />
               )}
-
-              {/* Send/Stop button with tooltip above.
-                  One control, and the icon says what the click does
-                  (`composerButtonState`, derived once above):
-                    - a draft is present      → Send   (while running: sends
-                                                        AND interrupts the turn)
-                    - running, empty composer → Square (stop)
-                    - idle, empty composer    → Send   (silent no-op, as before)
-                  The old three-way behaviour (queue / send-queue-and-stop /
-                  stop) is gone: parking the draft first was a click that only
-                  delayed delivery. */}
-              <Tooltip content={t(`chatPanel.${composer.labelKey}`)}>
-                <button
-                  // The `sending` branch needs its own `disabled:` styles too:
-                  // a viewer watching the owner's stream lands here with the
-                  // button disabled, and an unstyled disabled button reads as
-                  // a live stop control.
-                  className={cn(
-                    toolbarIconButton,
-                    sending && "text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10",
-                  )}
-                  onClick={composer.mode === "stop" ? handleStop : handleSend}
-                  disabled={composer.disabled}
-                  aria-label={t(`chatPanel.${composer.labelKey}`)}
-                >
-                  {composer.mode === "stop" ? <Square size={16} fill="currentColor" /> : <Send size={16} />}
-                </button>
-              </Tooltip>
             </div>
           </div>
         </div>
