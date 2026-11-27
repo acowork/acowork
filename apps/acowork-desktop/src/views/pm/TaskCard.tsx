@@ -38,6 +38,7 @@ import { TaskTypeIcon } from "./TaskTypeIcon";
 import { RejectDialog } from "./RejectDialog";
 import { SURFACE_CONTENT_CN, SURFACE_HEAD_CN } from "../../components/common/capsule";
 import { cn } from "../../lib/utils";
+import { needsHumanReview } from "../../lib/pm-types";
 import type { PmTaskResponse } from "../../lib/pm-types";
 import { useActorLabel } from "./pmMembers";
 
@@ -80,9 +81,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
   const creatorName = useActorLabel(task.created_by);
 
   /** 待人类审核：Agent 交活待验收（submitted），或 Agent 新建待批准开工（pending + review_status=pending） */
-  const needsReview =
-    task.status === "submitted" ||
-    (task.status === "pending" && task.review_status === "pending");
+  const needsReview = needsHumanReview(task);
 
   // 截止日期格式化：MM-DD（跨年带年份），逾期红色
   const dueLabel = task.due_at ? formatDue(task.due_at) : null;

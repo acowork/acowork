@@ -284,6 +284,22 @@ export interface SubmitInput {
 
 // ── 看板分组辅助 ───────────────────────────────────────────────────────
 
+/**
+ * 待人类审核 —— 服务端两段式审批的客户端镜像，三处（看板卡片 / 列表行 /
+ * 任务弹框）必须同一个判断，否则同一个任务在列表上有裁决按钮、在弹框里没有：
+ *  - `submitted`：Agent 交活等验收 → 批准 = done
+ *  - `pending` + `review_status=pending`：Agent 新建等批准开工 → 批准只翻
+ *    review_status，状态留给 Agent 自己 claim
+ */
+export function needsHumanReview(
+  task: Pick<PmTaskResponse, "status" | "review_status">,
+): boolean {
+  return (
+    task.status === "submitted" ||
+    (task.status === "pending" && task.review_status === "pending")
+  );
+}
+
 /** 看板列定义（对齐服务端 board_column + 审核语义） */
 export const BOARD_COLUMNS: {
   status: TaskStatus;

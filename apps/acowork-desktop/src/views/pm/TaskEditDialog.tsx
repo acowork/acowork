@@ -47,6 +47,12 @@
  * not every view lets the user drag a card, and dragging is a precise act that
  * not every user can perform. It writes the server immediately — it does not
  * pass through 保存 — which is why it is not wired into `useTaskForm`.
+ *
+ * 批准 / 拒绝 (审核) also write the server row directly, and they live in the
+ * 基本信息 tab's audit strip — the one place that already prints who created the
+ * task and when, i.e. the facts the decision rests on. Every row that
+ * `needsHumanReview` reports carries them; 拒绝 goes through `RejectDialog` so
+ * the reason reaches the server as `_comment`, exactly as on a task card.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Trash2, Play } from "lucide-react";
@@ -67,8 +73,10 @@ import { attachmentUrl, deleteTask, retryTaskDispatch } from "../../lib/pm-api";
 import { canViewExecSession, openTaskExecSession } from "../../lib/pmTaskExecSession";
 import { useActorLabel } from "./pmMembers";
 import { TaskActivitySection } from "./TaskActivity";
+import { RejectDialog } from "./RejectDialog";
 import { formatBytes, formatDateTime } from "./taskFormatters";
 import { useTaskForm, type TaskForm } from "./useTaskForm";
+import { needsHumanReview } from "../../lib/pm-types";
 import {
   resolveTaskTab,
   TASK_EDIT_TAB_I18N,
@@ -186,6 +194,27 @@ function TaskDialogPane({
   const [tab, setTab] = useState<TaskEditTab>("basic");
 
   const creatorName = useActorLabel(detail?.created_by ?? null);
+
+  // 审核条带（批准 / 拒绝）。写的是服务端那一行，和 `TaskStatusMove` 同一个
+  // 入口（`boardStore.reviewTask`）—— 不走表单的保存路径，所以有未保存草稿时
+  // 点批准也不会把草稿一起提交。成功后重读这一行：状态是服务端派生的，条带
+  // 跟着 `needsHumanReview` 自己消失。
+  const reviewTask = usePmBoardStore((s) => s.reviewTask);
+  const [rejecting, setRejecting] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
+  const handleReview = useCallback(
+    async (approved: boolean, reason?: string) => {
+      if (!detail || reviewing) return;
+      setReviewing(true);
+      try {
+        if (await reviewTask(detail.id, approved, reason)) await refresh();
+      } finally {
+        setReviewing(false);
+        setRejecting(false);
+      }
+    },
+    [detail, reviewing, reviewTask, refresh],
+  );
 
   // A different row — or a different mode — is a different surface. Land on
   // 基本信息 and take focus, instead of leaving the reader on 提交记录 of a task
@@ -497,6 +526,9 @@ function TaskDialogPane({
                   row={row}
                   creatorName={creatorName}
                   onMoved={() => void refresh()}
+                  reviewing={reviewing}
+                  onApprove={() => void handleReview(true)}
+                  onReject={() => setRejecting(true)}
                 />
               )}
 
@@ -603,6 +635,17 @@ function TaskDialogPane({
         />
       )}
 
+      {/* 拒绝的理由（`_comment`）只在这条路径上收得到 —— 卡片上那颗「拒绝」
+          一直有，弹框里以前没有，于是从弹框拒绝就写不进理由。 */}
+      {isTop && hasRow && detail && (
+        <RejectDialog
+          open={rejecting}
+          taskTitle={detail.title}
+          onConfirm={(reason) => void handleReview(false, reason)}
+          onCancel={() => setRejecting(false)}
+        />
+      )}
+
       {isTop && (
         <ConfirmDialog
           open={!!confirmDeleteAtt}
@@ -659,12 +702,20 @@ function BasicInfoTab({
   row,
   creatorName,
   onMoved,
+  reviewing,
+  onApprove,
+  onReject,
 }: {
   form: TaskForm;
   row: PmTaskResponse | null;
   creatorName: string | null;
   /** 状态流转写的是服务端那一行，不走表单的保存路径。 */
   onMoved: () => void;
+  /** 审核请求在路上（防连点）。 */
+  reviewing: boolean;
+  onApprove: () => void;
+  /** 打开拒绝理由弹层（`RejectDialog` 在弹框那一层渲染）。 */
+  onReject: () => void;
 }) {
   const { t } = useTranslation();
   const [retrying, setRetrying] = useState(false);
@@ -712,6 +763,33 @@ function BasicInfoTab({
             <span>
               {t("pm.task.updated")} {formatDateTime(row.updated_at)}
             </span>
+            {/* 裁决就在这一行的右端：这条任务现在等的是一个决定，而决定它需要
+                的信息（谁建的、什么时候建/改的、下面九个字段）全在这个页上。
+                以前弹框里没有这两颗按钮，唯一的门是「状态」下拉里的伪选项，而且
+                只对 pending + review_status=pending 出现 —— submitted 的行看起来
+                完全无从下手。语义照抄看板卡片：批准 accent-strong，拒绝
+                danger-solid 并走 RejectDialog 收理由（`_comment`）。 */}
+            {needsHumanReview(row) && (
+              <>
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  disabled={reviewing}
+                  onClick={onApprove}
+                  className="rounded bg-accent-strong px-2 py-0.5 text-11 font-medium text-white transition-[filter] hover:brightness-90 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  ✓ {t("pm.review.approve")}
+                </button>
+                <button
+                  type="button"
+                  disabled={reviewing}
+                  onClick={onReject}
+                  className="rounded bg-danger-solid px-2 py-0.5 text-11 font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  ✗ {t("pm.review.reject")}
+                </button>
+              </>
+            )}
           </div>
           {/* A dispatch failure is a durable task fact — surfacing it here is
               the only place a stuck row explains itself. */}

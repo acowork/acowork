@@ -36,6 +36,7 @@ import {
 import { cn } from "../../lib/utils";
 import type { ResolvedMember } from "./pmMembers";
 import type { PmListColumn, PmListRow } from "../../lib/pm-list-columns";
+import { needsHumanReview } from "../../lib/pm-types";
 import type { PmTaskResponse, TaskStatus } from "../../lib/pm-types";
 
 interface TaskListRowProps {
@@ -172,9 +173,7 @@ function TitleCell({
   onToggleCollapse: (taskId: string) => void;
 }) {
   const { t } = useTranslation();
-  const needsReview =
-    task.status === "submitted" ||
-    (task.status === "pending" && task.review_status === "pending");
+  const needsReview = needsHumanReview(task);
   return (
     <div
       className="flex min-w-0 items-center gap-1"
