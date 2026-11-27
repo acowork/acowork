@@ -90,19 +90,17 @@ pub fn parse_compact_output(raw: &str) -> CompactOutput {
     CompactOutput { summary }
 }
 
-/// Quality/format gate error for LLM summary output (distillation & compaction).
+/// Why one distillation/compaction tier produced no usable summary.
 ///
 /// Per the "LLM summaries must guarantee quality" principle, summary output
-/// that fails this gate is **discarded** — it never lands in episodic memory
-/// and never becomes the in-memory compaction marker:
-///
-/// - [`SummaryError::Empty`] / [`SummaryError::MissingBlock`] are
-///   **retryable**: the model didn't follow the `<summary>` format, so a
-///   different distillation target tier may do better.
-/// - [`SummaryError::LowQuality`] is **not retryable**: the model produced a
-///   structurally valid but unusable summary, and stepping down the fallback
-///   chain only gets cheaper/weaker — the output is dropped
-///   (quality-over-nothing).
+/// that fails the gate is **discarded** — it never lands in episodic memory
+/// and never becomes the in-memory compaction marker. Every variant means the
+/// same thing to the caller: drop this tier's output and step down to the next
+/// distillation target (`SummaryError::Timeout` is raised by the tier chain
+/// itself when the call overruns its share of the ADR-083 deadline; the other
+/// three come from [`validate_summary_output`]). Another *model* may well
+/// produce usable output, and ADR-056 §7 requires the chain to keep trying
+/// instead of aborting — so the retry policy lives in the caller, not here.
 #[derive(Debug, Clone)]
 pub enum SummaryError {
     /// Model returned an empty response (or only thinking blocks).
@@ -111,6 +109,9 @@ pub enum SummaryError {
     MissingBlock,
     /// Summary block exists but failed the heuristic quality gate.
     LowQuality(String),
+    /// The LLM call did not finish within its share of the compaction
+    /// deadline (ADR-083). The next tier may still be fast enough.
+    Timeout,
 }
 
 impl std::fmt::Display for SummaryError {
@@ -128,21 +129,12 @@ impl std::fmt::Display for SummaryError {
                     "compact model summary failed the quality gate: {preview:?}"
                 )
             }
+            SummaryError::Timeout => write!(f, "compact model did not answer within its deadline"),
         }
     }
 }
 
 impl std::error::Error for SummaryError {}
-
-impl SummaryError {
-    /// Whether retrying with the next distillation target tier may help.
-    ///
-    /// `LowQuality` is a model-capability problem — the fallback chain only
-    /// gets cheaper/weaker, so the output is discarded instead of retried.
-    pub fn is_retryable(&self) -> bool {
-        !matches!(self, SummaryError::LowQuality(_))
-    }
-}
 
 /// Minimum character count for an LLM summary to be considered substantive.
 ///
@@ -623,8 +615,8 @@ pub(crate) async fn compact_with_llm(
     // Quality gate: the output MUST carry a non-trivial <summary> block.
     // A missing block or low-quality content is an error — never fall back
     // to the raw text (that fallback is how reasoning dumps polluted
-    // episodic memory). Retryable errors let the caller step down the
-    // distillation target chain; LowQuality discards the output.
+    // episodic memory). The caller owns the retry policy: it drops this
+    // output and steps down to the next distillation target either way.
     validate_summary_output(&summary).map_err(RuntimeError::Summary)?;
     Ok((summary, usage))
 }
@@ -1068,14 +1060,12 @@ mod tests {
         let raw = "确认 disable 路径已清理 pending 槽位。\n开始实施。改两处：\n1. 删除 resolve_distill_model 调用\n2. 验证 fallback 链";
         let err = validate_summary_output(raw).unwrap_err();
         assert!(matches!(err, SummaryError::MissingBlock));
-        assert!(err.is_retryable());
     }
 
     #[test]
     fn validate_summary_output_rejects_empty_block() {
         let err = validate_summary_output("<summary>  </summary>").unwrap_err();
         assert!(matches!(err, SummaryError::Empty(_)));
-        assert!(err.is_retryable());
     }
 
     #[test]
@@ -1083,7 +1073,6 @@ mod tests {
         // Format is right but the content is a placeholder — not a summary.
         let err = validate_summary_output("<summary>ok</summary>").unwrap_err();
         assert!(matches!(err, SummaryError::LowQuality(_)));
-        assert!(!err.is_retryable(), "low quality must not be retried");
     }
 
     #[test]
@@ -1141,13 +1130,6 @@ mod tests {
     fn parse_compact_output_strict_rejects_missing_block() {
         let err = parse_compact_output_strict("plain prose without tags").unwrap_err();
         assert!(matches!(err, SummaryError::MissingBlock));
-    }
-
-    #[test]
-    fn summary_error_retryability() {
-        assert!(SummaryError::MissingBlock.is_retryable());
-        assert!(SummaryError::Empty("hint".to_string()).is_retryable());
-        assert!(!SummaryError::LowQuality("x".to_string()).is_retryable());
     }
 
     #[test]
