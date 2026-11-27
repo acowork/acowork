@@ -2454,9 +2454,13 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
         </div>
 
         {/* Todo list box — above the message queue, same collapsible style.
-          Shows current task list from todo_write tool calls. */}
+          Shows current task list from todo_write tool calls.
+          `mx-[62px]` lines the box's two edges up with the composer's two round
+          controls: 24 (the composer wrapper's own `mx-6`) + 1 (capsule border)
+          + 5 (capsule `px-[5px]`) + 32 (the circle) = 62. The same arithmetic
+          the bottom strip uses as `pl-[38px]`, plus the `mx-6` outside it. */}
         {todos.length > 0 && (
-          <div className="mx-12 mb-0 rounded-t-md border border-b-0 border-border-outer bg-surface-subtle/80 overflow-hidden">
+          <div className="mx-[62px] mb-0 rounded-t-md border border-b-0 border-border-outer bg-surface-subtle/80 overflow-hidden">
             <button
               className={cn(
                 "flex items-center w-full px-2.5 py-1.5 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-colors",
@@ -2541,7 +2545,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           from the local draft queue below (which is frontend-only). */}
         {pendingIntents.length > 0 && (
           <div className={cn(
-            "mx-12 mb-0 border border-b-0 border-border-outer bg-surface-subtle/80 overflow-hidden",
+            "mx-[62px] mb-0 border border-b-0 border-border-outer bg-surface-subtle/80 overflow-hidden",
             todos.length > 0 ? "" : "rounded-t-md"
           )}>
             <div className="flex items-center px-2.5 py-1.5 border-b border-border-divider">
