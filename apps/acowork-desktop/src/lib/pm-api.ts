@@ -162,6 +162,16 @@ export function listProjectTasks(pid: string) {
   return request<PmTaskResponse[]>(`/projects/${encodeURIComponent(pid)}/tasks`);
 }
 
+/**
+ * 跨项目、按负责人取任务（`GET /tasks?assignee=`）。
+ *
+ * 单聊右侧的任务面板用：一个 bot 接的活散落在多个项目里，不属于任何单个
+ * 项目看板，服务端按 assignee 索引字段过滤（不逐个读盘）。
+ */
+export function listAssignedTasks(assignee: string) {
+  return request<PmTaskResponse[]>(`/tasks?assignee=${encodeURIComponent(assignee)}`);
+}
+
 export function createTask(pid: string, input: CreateTaskInput) {
   return request<PmTask>(`/projects/${encodeURIComponent(pid)}/tasks`, {
     method: "POST",

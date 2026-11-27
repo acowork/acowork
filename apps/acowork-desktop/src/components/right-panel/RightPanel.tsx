@@ -23,6 +23,7 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { AgentSetupTab } from "./AgentSetupTab";
+import { AgentTasksPanel } from "../../views/pm/AgentTasksPanel";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { MemoryPanel } from "../memory/MemoryPanel";
 import { WorkspaceExplorer } from "../workspace/WorkspaceExplorer";
@@ -36,14 +37,15 @@ import { ModelTokenDonut } from "./ModelTokenDonut";
 import { fetchAgentTokenStats, computeAgentTotals, formatTokenStatCost } from "../../lib/tokenStats";
 import { fetchChatUsage, type ChatUsageSummary } from "../../lib/chatUsage";
 import { useChatSessionStore } from "../../stores/chatSessionStore";
+import type { PanelTab } from "../../stores/layoutStore";
 import type { TokenStatsResponse } from "../../lib/types";
 
 interface RightPanelProps {
   onCollapse: () => void;
   isDebugMode?: boolean;
   onResizeStart?: (e: React.MouseEvent) => void;
-  activeTab: "debug" | "status" | "setup" | "memory" | "workspace";
-  onTabChange: (tab: "debug" | "status" | "setup" | "memory" | "workspace") => void;
+  activeTab: PanelTab;
+  onTabChange: (tab: PanelTab) => void;
   /**
    * Rendered inside the hover drawer instead of the pinned layout slot. The
    * drawer owns the geometry (position, width, the slide), so the panel must
@@ -1225,6 +1227,13 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <AgentSetupTab />
         </div>
+      )}
+
+      {/* ── Tasks tab content ─────────────────────────────────────── */}
+      {/* 同一个 bot 的任务面板：界面与项目群聊右侧的那份同一组件
+          (`TasksColumnFlow`)，数据换成"指派给这个 bot 的任务"。 */}
+      {activeTab === "tasks" && selectedAgentId && (
+        <AgentTasksPanel agentId={selectedAgentId} />
       )}
 
       {/* ── Workspace tab content ─────────────────────────────────── */}

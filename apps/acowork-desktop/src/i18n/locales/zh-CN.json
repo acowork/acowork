@@ -1205,6 +1205,7 @@
     "headers": "请求头"
   },
   "rightPanel": {
+    "tasks": "任务",
     "debug": "调试",
     "status": "状态",
     "memory": "记忆",

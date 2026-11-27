@@ -4,10 +4,10 @@ import { OutlineDatabaseIcon, FilledDatabaseIcon } from "../common/DatabaseIcon"
 import { OutlineFolderOpenIcon, FilledFolderOpenIcon } from "../common/FolderOpenIcon";
 import { OutlineGaugeIcon, FilledGaugeIcon } from "../common/GaugeIcon";
 import { OutlineBugIcon, FilledBugIcon } from "../common/BugIcon";
+import { ListChecks } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { memoryTabAvailable } from "./rightPanelGate";
-
-type PanelTab = "debug" | "status" | "setup" | "memory" | "workspace";
+import type { PanelTab } from "../../stores/layoutStore";
 
 interface RightNavBarProps {
   activeTab: PanelTab;
@@ -85,6 +85,10 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed, m
     // agentRunning preserves the ADR's intent while removing an empty
     // `noAgentDebug` placeholder when nothing is running.
     { tab: "debug", i18nKey: "rightPanel.debug", show: agentRunning },
+    // tasks = 指派给这个 bot 的任务（PM 服务侧的数据，不经 Runtime），
+    // 所以不像其余 agent 落地面那样随 agent 停而消失。放在齿轮上一格，
+    // 与项目群聊的右侧 rail（齿轮 + 清单）同样的相对位置。
+    { tab: "tasks", i18nKey: "rightPanel.tasks", show: true },
     // setup uses the shared FilledSettingsIcon/OutlineSettingsIcon so the
     // center hole is preserved on selection; `icon` is intentionally omitted.
     // Placed last so the settings gear sits at the bottom of the nav rail,
@@ -167,6 +171,9 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed, m
                 ) : (
                   <OutlineGaugeIcon className="h-5 w-5" />
                 )
+              ) : tab === "tasks" ? (
+                // 清单：与项目群聊 rail 的任务 tile 同一个 lucide 字形。
+                <ListChecks className="h-5 w-5" />
               ) : tab === "debug" ? (
                 // Bug: use the shared icon so the filled state preserves
                 // the central spine line via SVG mask. Lucide's Bug spine

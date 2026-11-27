@@ -1583,6 +1583,7 @@
     "headers": "Headers"
   },
   "rightPanel": {
+    "tasks": "Tasks",
     "debug": "Debug",
     "status": "Status",
     "memory": "Memory",
