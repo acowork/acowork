@@ -452,7 +452,7 @@ impl ConversationWriter {
     /// Returns the line's ADR-050 **data index** (its position among `Data`
     /// lines), or `None` when the line is blank / a legacy header — the coordinate
     /// ADR-106 D4 records in the round side table.
-    fn commit_appended_line(&self, offset: u64, len: u64) -> Option<u64> {
+    fn commit_appended_line(&self, offset: u64, len: u64, is_explore: bool) -> Option<u64> {
         let mut idx = match self.log.lock() {
             Ok(g) => g,
             Err(_) => return None,
@@ -468,6 +468,14 @@ impl ConversationWriter {
                 kind: LogLineKind::Data,
                 data_index: Some(data_index),
             });
+            // The record map is appended in the SAME breath as the span and the
+            // coordinate — the three are one row's three views. A fast path that
+            // advances `total_data` without it desyncs the map from the
+            // coordinates, and `snap_to_record_boundaries` then reads past its
+            // end (the record page returns 500 and the chat surface renders
+            // empty). `explore_rows.len()` is therefore an invariant of the
+            // index, not a hint.
+            idx.explore_rows.push(is_explore);
             idx.end = offset + len;
             Some(data_index)
         } else {
@@ -592,7 +600,8 @@ impl ConversationWriter {
                             // guarantees read_messages_since never sees a line count
                             // ahead of the actual file contents, and the index always
                             // backs a count a reader resolves against it.
-                            let data_index = self.commit_appended_line(start, len);
+                            let data_index = self
+                                .commit_appended_line(start, len, is_explore_entry(&entry));
                             self.committed_lines.fetch_add(1, Ordering::Relaxed);
                             // ADR-106 D4: record the round coordinate of the line we
                             // just committed while its position is exactly known.
@@ -629,7 +638,7 @@ impl ConversationWriter {
                             // A compaction marker is never part of a round (D4: the
                             // projection reads user / assistant rows only), so the
                             // returned coordinate is deliberately not folded.
-                            let _ = self.commit_appended_line(start, len);
+                            let _ = self.commit_appended_line(start, len, is_explore_entry(&entry));
                             self.committed_lines.fetch_add(1, Ordering::Relaxed);
                             if let Some(abs) = abs_offset {
                                 if let Ok(mut guard) = self.last_compaction_offset.lock() {
@@ -4294,16 +4303,22 @@ fn window_for(total: u64, offset: u64, limit: u32, from_tail: bool) -> (u64, u64
 /// collapses the page to that one record, which is small on the wire (one stub)
 /// and therefore self-limiting.
 fn snap_to_record_boundaries(explore: &[bool], start: u64, end: u64) -> (u64, u64) {
+    // `explore` is an index over a file another process can rewrite, so a
+    // disagreement about the row count is treated as "no such row" — the page
+    // then keeps its requested edges instead of failing the whole read. The
+    // length is still an invariant of a freshly reconciled index (see
+    // `LogIndex::explore_rows`), which is where a desync must be fixed.
+    let is_explore = |i: u64| explore.get(i as usize).copied().unwrap_or(false);
     let total = explore.len() as u64;
     let mut s = start.min(total);
     let mut e = end.min(total);
     if s >= e {
         return (s, e);
     }
-    while s > 0 && explore[s as usize] && explore[(s - 1) as usize] {
+    while s > 0 && is_explore(s) && is_explore(s - 1) {
         s -= 1;
     }
-    while e < total && explore[(e - 1) as usize] && explore[e as usize] {
+    while e < total && is_explore(e - 1) && is_explore(e) {
         e += 1;
     }
     (s, e)
@@ -4391,6 +4406,17 @@ pub fn read_messages_paginated_indexed(
     let (start_idx, end_idx, effective_offset) = match unit {
         PageUnit::Rows => (start_idx, end_idx, requested_offset),
         PageUnit::Records => {
+            if idx.explore_rows.len() as u64 != total {
+                // Should be impossible: every site that assigns a coordinate
+                // appends the row's classification in the same breath. Say so
+                // loudly, because the consequence (a page that cuts runs) is
+                // otherwise indistinguishable from a normal one.
+                tracing::warn!(
+                    total,
+                    explore_rows = idx.explore_rows.len(),
+                    "log index: record map out of sync with coordinates; page not snapped"
+                );
+            }
             let (s, e) = snap_to_record_boundaries(&idx.explore_rows, start_idx, end_idx);
             (s, e, s)
         }
@@ -5077,6 +5103,77 @@ mod tests {
             parts[1].chars().all(|c| c.is_ascii_digit()),
             "Time should be digits"
         );
+    }
+
+    #[test]
+    fn writer_fast_path_keeps_the_record_map_in_sync() {
+        // Regression: the writer's append fast path advanced the coordinate
+        // count without appending the row's classification, so the record map
+        // fell behind the coordinates and the next `groups=stub` page read went
+        // out of bounds — the request 500'd and the chat surface rendered with
+        // no rows at all (reported: "switching sessions shows nothing").
+        let temp_dir = TempDir::new().unwrap();
+        let work_dir = temp_dir.path();
+        let session_id = generate_session_id();
+        let (session, _cfg, _state) = ConversationSession::new(
+            work_dir,
+            &session_id,
+            SessionConfig {
+                agent_id: "com.test.agent".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        session.append_message("user", "go", None);
+        session.append_message("thought", "looking around", None);
+        session.append_message(
+            "tool_call",
+            "{}",
+            Some(serde_json::json!({"tool_name": "bash", "tool_call_id": "c1"})),
+        );
+        session.append_message(
+            "tool_result",
+            "ok",
+            Some(serde_json::json!({"tool_call_id": "c1"})),
+        );
+        session.append_message("assistant", "done", None);
+
+        let file_path = work_dir
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
+        // The writer is a thread; wait until every row is on disk AND indexed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let Ok(page) = read_messages_paginated_indexed(
+                &file_path,
+                0,
+                50,
+                false,
+                PageUnit::Records,
+            ) else {
+                continue;
+            };
+            if page.total == 5 {
+                assert_eq!(page.offset, 0);
+                assert_eq!(page.limit, 5);
+                let reaches_tail = page.reaches_log_tail();
+                let records = collapse_explore_runs(page.messages, reaches_tail);
+                assert_eq!(records.len(), 3, "user + one stub + assistant");
+                let meta = records[1].metadata.as_ref().expect("stub metadata");
+                assert_eq!(meta["start"], 1);
+                assert_eq!(meta["end"], 4);
+                assert_eq!(meta["steps"], 2, "thought + tool_call, result folds in");
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async { session.close().await.unwrap() });
+                return;
+            }
+        }
+        panic!("writer never published 5 rows of index");
     }
 
     #[test]
