@@ -174,6 +174,17 @@ export function ChatDeliverablesRow({ message, agentId }: ChatDeliverablesRowPro
  * Hidden until the pointer arrives, so it never takes a click meant for the
  * card, and held open through the copy confirmation (`CopyButton`'s
  * `onCopiedChange`): a checkmark that fades on mouse-out reports nothing.
+ *
+ * The reveal is an **opaque overlay**, not a reserved gutter: hovering a card
+ * washes it to `surface-hover`, and spending permanent padding on every chip
+ * for a control that only exists while the pointer is there wasted width for
+ * nothing. The slot therefore carries the opaque `bg-surface` itself — that is
+ * load-bearing. The button's only background is its own hover tint
+ * (`hover:bg-accent/10`, translucent, and a hover variant beats a
+ * same-specificity `bg-surface` whatever the class order), so passing
+ * `bg-surface` to `CopyButton` painted nothing and the chip's name and size
+ * showed straight through the icon. What it covers while open is the trailing
+ * size / version text, which is exactly what the tooltip repeats.
  */
 function DeliverableLinkCopy({ text, children }: { text: string; children: React.ReactNode }) {
   const { t } = useTranslation();
@@ -183,7 +194,7 @@ function DeliverableLinkCopy({ text, children }: { text: string; children: React
       {children}
       <span
         className={cn(
-          "absolute bottom-0.5 right-0.5 rounded transition-opacity",
+          "absolute bottom-0.5 right-0.5 rounded bg-surface transition-opacity",
           copied
             ? "opacity-100"
             : "pointer-events-none opacity-0 group-hover/link:pointer-events-auto group-hover/link:opacity-100",
@@ -196,7 +207,6 @@ function DeliverableLinkCopy({ text, children }: { text: string; children: React
           ariaLabel={t("deliverables.copyLink")}
           onCopiedChange={setCopied}
           testId="deliverable-copy-link"
-          className="bg-surface"
         />
       </span>
     </div>
