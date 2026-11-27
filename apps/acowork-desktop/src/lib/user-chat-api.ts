@@ -98,24 +98,6 @@ export async function sendChatMessage(
 }
 
 /**
- * Upload one file and get back the id the message will reference.
- *
- * `FormData` sets its own multipart boundary, so no `Content-Type` header
- * here — setting one by hand is what breaks uploads.
- */
-export async function uploadChatAttachment(
-  userId: string,
-  chatId: string,
-  file: File,
-): Promise<ChatAttachment> {
-  const form = new FormData();
-  form.append("file", file, file.name);
-  return decode<ChatAttachment>(
-    await fetch(`${base(userId, chatId)}/files`, { method: "POST", body: form }),
-  );
-}
-
-/**
  * Blob URLs for attachments, keyed by id.
  *
  * Downloads need the bearer token, so `<img src="/api/...">` cannot work —
