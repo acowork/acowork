@@ -1173,27 +1173,6 @@ async fn dispatch_inbound(
     }
 }
 
-/// Design 27 §3.2/§6.1: resolve the execution session that owns an inbound
-/// Intent on THIS agent and deliver it as a turn trigger.
-///
-/// - `request`: the designated session id is the *sender's* — meaningless
-///   here. Route via the receiver-private registry keyed on the intent
-///   context (chat session > conversation > one-shot message id), creating
-///   a fresh session when the context is new or its session has closed.
-/// - `response`: the designated session id is the initiator's own session
-///   (the Gateway read it back from the mailbox). Use it when it is still
-///   open; otherwise fall back to the registry keyed on the conversation.
-///
-/// Delivery is always `SessionMessage::Intent` — unlike a bare
-/// `InboundMessage`, it starts a turn even when the session task is idle
-/// (a mid-turn injection would otherwise sit unread in the loop channel).
-///
-/// ADR-099: a human `user_message` from a Chat session is a router turn, and a
-/// router turn is never executed here — this function only queues it (see
-/// [`spawn_chat_router_drain`]). Everything else, and every Chat message while
-/// the router is switched off, goes straight through
-/// [`route_intent_legacy`] on this task.
-#[allow(clippy::too_many_arguments)]
 /// Pull an intent's transfer attachments into the workspace and append them to
 /// the turn's reference list (ADR-122 §4.3 D13).
 ///
@@ -1256,6 +1235,27 @@ async fn pull_transfer_attachments(
     }
 }
 
+/// Design 27 §3.2/§6.1: resolve the execution session that owns an inbound
+/// Intent on THIS agent and deliver it as a turn trigger.
+///
+/// - `request`: the designated session id is the *sender's* — meaningless
+///   here. Route via the receiver-private registry keyed on the intent
+///   context (chat session > conversation > one-shot message id), creating
+///   a fresh session when the context is new or its session has closed.
+/// - `response`: the designated session id is the initiator's own session
+///   (the Gateway read it back from the mailbox). Use it when it is still
+///   open; otherwise fall back to the registry keyed on the conversation.
+///
+/// Delivery is always `SessionMessage::Intent` — unlike a bare
+/// `InboundMessage`, it starts a turn even when the session task is idle
+/// (a mid-turn injection would otherwise sit unread in the loop channel).
+///
+/// ADR-099: a human `user_message` from a Chat session is a router turn, and a
+/// router turn is never executed here — this function only queues it (see
+/// [`spawn_chat_router_drain`]). Everything else, and every Chat message while
+/// the router is switched off, goes straight through
+/// [`route_intent_legacy`] on this task.
+#[allow(clippy::too_many_arguments)]
 async fn route_intent_inbound(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     chat_sessions: &Arc<crate::agent::chat_router::ChatSessionManager>,
@@ -1278,6 +1278,12 @@ async fn route_intent_inbound(
     // the reference list the model already reads (`params.attached_items`).
     // Appended, never assigned: a turn may carry the human's own references
     // from the Chat composer as well as the peer's files.
+    //
+    // ponytail: the pull is inline with inbound dispatch, so one very large
+    // attachment delays this agent's other inbound messages until it lands
+    // (bounded by the per-transfer 300 s timeout). Upgrade path: run it on the
+    // turn's own task and hand the files to the loop through the same params
+    // key, once a second copy of this list is worth the plumbing.
     pull_transfer_attachments(&mut env, session_manager, work_dir, node_token).await;
 
     // ADR-106 D6 rev. 2026-11-12: a click on a live `exec_session_route_confirm`
