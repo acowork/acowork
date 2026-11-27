@@ -29,7 +29,7 @@ import type { SpeakerKind } from "./speakerBubble";
 import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock, RefreshCw } from "lucide-react";
 import type { ChatMessage, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
-import { SessionVisibilityMenu } from "./SessionVisibilityToggle";
+import { SessionVisibilityButton } from "./SessionVisibilityToggle";
 import { blockIndexOfRawMessage } from "./messageFolder";
 import { PlaceholderBar } from "./PlaceholderBar";
 import { useSessionScope } from "./useSessionScope";
@@ -2853,9 +2853,10 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                 <WorkspaceSelector textHidden={textHidden.ws} readOnly={readOnlySession} />
               </div>
               {/* ADR-076 §决策 4: per-session read visibility (owner only) —
-                  the last label to fold, since it is touched least often. */}
+                  a two-state toggle, so no menu; the last label to fold,
+                  since it is touched least often. */}
               {selectedAgentId && currentSessionId && (
-                <SessionVisibilityMenu
+                <SessionVisibilityButton
                   agentId={selectedAgentId}
                   sessionId={currentSessionId}
                   textHidden={textHidden.visibility}

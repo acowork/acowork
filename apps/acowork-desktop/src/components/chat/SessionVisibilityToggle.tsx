@@ -1,12 +1,11 @@
-import { useEffect, useRef, useState } from "react";
-import { Check, Eye, EyeOff, Lock, LockOpen } from "lucide-react";
+import { useEffect, useRef } from "react";
+import { Eye, EyeOff, Lock, LockOpen } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useAgentStore } from "../../stores/agentStore";
 import { useToast } from "../common/ToastProvider";
 import { Tooltip } from "../common/Tooltip";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
-import { cn } from "../../lib/utils";
-import { menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
+import { toolbarIconButton } from "../../lib/ui-styles";
 
 type Visibility = "public" | "private";
 
@@ -24,9 +23,9 @@ type Visibility = "public" | "private";
  * change is reversible, low-stakes, and the backend re-reports the truth
  * on the next `fetchSessions`.
  *
- * Two affordances, one state: `SessionVisibilityMenu` for the composer strip
+ * Two affordances, one state: `SessionVisibilityButton` for the composer strip
  * and `SessionVisibilityToggle` for the Chat block's 24px action row, which
- * has no room for a menu.
+ * has no room for a label.
  */
 function useSessionVisibility(agentId: string, sessionId: string) {
   const { t } = useTranslation();
@@ -86,13 +85,16 @@ function useSessionVisibility(agentId: string, sessionId: string) {
 }
 
 /**
- * Composer-strip affordance: the strip is the label row, so visibility is a
- * dropdown like model / reasoning / workspace — `Lock` / `Unlock` spelled
- * out, the active one checked. Naming the two states is what makes this
- * usable: a bare lock glyph pair does NOT read at icon size (see the toggle
- * below), and here the text carries the meaning instead.
+ * Composer-strip affordance: `Lock` / `Unlock` + the state's name, a plain
+ * toggle.
+ *
+ * There is nothing to choose — two states, one write, no third thing to read —
+ * so a dropdown was a click tax: open, look, click the other row. Naming the
+ * states in the label is still what makes this usable: a bare lock glyph pair
+ * does NOT read at icon size (see the toggle below), and here the text carries
+ * the meaning instead of the shape.
  */
-export function SessionVisibilityMenu({
+export function SessionVisibilityButton({
   agentId,
   sessionId,
   textHidden,
@@ -107,70 +109,26 @@ export function SessionVisibilityMenu({
 }) {
   const { t } = useTranslation();
   const { isPrivate, canWrite, label, setVisibility } = useSessionVisibility(agentId, sessionId);
-  const [open, setOpen] = useState(false);
-  const wrapperRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
 
   // `lock` = private (owner + admins), `unlock` = readable by everyone. The
-  // trigger shows the current state, the menu offers both.
-  const options: { value: Visibility; label: string }[] = [
-    { value: "private", label: t("sessionVisibility.lock") },
-    { value: "public", label: t("sessionVisibility.unlock") },
-  ];
-
+  // button shows the current state; a click flips it.
   return (
     <ToolbarDropdownTrigger
       icon={isPrivate ? <Lock size={14} /> : <LockOpen size={14} />}
       label={isPrivate ? t("sessionVisibility.lock") : t("sessionVisibility.unlock")}
-      tooltip={canWrite ? label : t("chatPanel.readOnlySession")}
-      open={open}
-      onToggle={() => setOpen(!open)}
+      tooltip={
+        canWrite
+          ? `${label} — ${t("sessionVisibility.hintToggle")}`
+          : t("chatPanel.readOnlySession")
+      }
+      open={false}
+      onToggle={() => void setVisibility(isPrivate ? "public" : "private")}
       disabled={!canWrite}
-      wrapperRef={wrapperRef}
+      showChevron={false}
+      ariaPressed={isPrivate}
       textHidden={textHidden}
       btnId={btnId}
-    >
-      {open && (
-        <div
-          className="absolute bottom-full left-0 z-50 mb-1 w-[140px] overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-lg"
-          role="menu"
-          aria-label={label}
-        >
-          {options.map((opt) => {
-            const isActive = (opt.value === "private") === isPrivate;
-            return (
-              <button
-                key={opt.value}
-                type="button"
-                role="menuitemradio"
-                aria-checked={isActive}
-                onClick={() => {
-                  if (!isActive) void setVisibility(opt.value);
-                  setOpen(false);
-                }}
-                className={cn(
-                  "flex w-full items-center gap-2 px-3 py-1.5 text-xs font-medium transition-colors",
-                  isActive ? menuItemSelected : menuItemHover,
-                )}
-              >
-                <span>{opt.label}</span>
-                {isActive && <Check size={12} className="ml-auto text-[var(--color-accent)]" />}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </ToolbarDropdownTrigger>
+    />
   );
 }
 
