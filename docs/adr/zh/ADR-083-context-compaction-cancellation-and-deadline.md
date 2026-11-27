@@ -30,7 +30,7 @@
 
 为上下文压缩引入**可取消**与**总时限**两项一等能力，并让前端从"被动等待"升级为"主动可控"。
 
-1. **总时限守卫（硬性）**：`episode_distill::compact_with_llm` 外层包裹 `tokio::time::timeout`，默认 **5 分钟**。超时即 fail-fast 返回可区分的 `SummaryError::Timeout`，不再无限等待。整个 `compact_history_if_needed` 的 tier fallback 循环共享同一份剩余预算——**一次手动/自动压缩端到端不超过 5 分钟**。
+1. **总时限守卫（硬性）**：整个 `compact_history_if_needed` 的 tier fallback 循环共享同一份剩余预算，默认 **5 分钟**；每一档的 `provider.chat` 在 `tokio::time::timeout` 下 fail-fast，超时产出可区分的 `SummaryError::Timeout`，不再无限等待——**一次手动/自动压缩端到端不超过 5 分钟**。（时限由持有共享预算的 tier 循环实施，而不是 `compact_with_llm` 自己：单档内的 timeout 无法表达"这份预算是几档共用的"。）
 2. **可取消（硬性）**：压缩调用接入 `CancelHandle`（ADR-044 既有机制）。蒸馏的 `provider.chat()` await 用 `tokio::select!` 同时等待 LLM 结果与 `cancel_handle.cancelled()`；用户取消后 ≤ 500ms 内中断，**history 保持原样不被破坏**，session 回到 Idle，用户可换模型重新压缩。
 3. **前端按钮双态切换（仿发送→停止按钮）**：压缩进行中，压缩按钮变为**可点击的"取消压缩"**（红色/强调色 + `Square` 图标 + "取消压缩" 文案），点击立即触发取消；非压缩态回到原"压缩摘要"按钮。**与 `ChatPanel.tsx` 现有 `sending ? handleStop : handleSend` 完全同构**。
 4. **结束语义细分**：新增 `ChunkEvent::CompactionCancelled { reason }`，reason ∈ `{UserCancelled, Timeout, Failed}`，成功仍走 `CompactingEnded`。前端据此区分 toast 文案，并正确复位按钮状态。
@@ -150,6 +150,12 @@ graph TD
 
 **关键约束**：三档 fallback **共享同一个 deadline**，而非每档重新计时。这是与现状（每档各自 600s×3）最本质的区别——保证"用户最多等 5 分钟"。
 
+**补丁（2026-11-27）**：共享 deadline 的原始实现是"每档用全部剩余预算"，于是**一个卡死的档会吃掉整份预算**，后面的档连一次调用机会都没有（实测：tier 3 的 provider 挂 4 分钟，tier 4 的 chat 模型从未被调用）；此外 `LowQuality` 曾直接 `break` 整条链。两者都违背 [ADR-056 §7](./ADR-056-global-default-compact-model.md)"绝不报错中断蒸馏"的核心原则。现行语义因此改为：
+
+- 每一档的 `timeout = 剩余预算 / 剩余档数`（均分），一档卡死最多损失自己那一份，**总时长仍 ≤ `compaction_deadline_ms`**。
+- 一档超时 = 一个可重试的档错误（`SummaryError::Timeout`），**继续走下一档**，不再终止整条链；只有剩余预算真正耗尽时才发 `CompactionCancelled(Timeout)`。
+- 任何档错误（含 `LowQuality`）都只丢弃该档**输出**、继续降级；只有全部档失败才 `CompactionFailed`。**结束语义按"为什么会停"而非"谁先发现"判定**：链跑完仍无摘要且共享 deadline 已过期 → `CompactionCancelled(Timeout)`（无论这个耗尽是被循环顶部的剩余预算检查发现，还是被最后一档的份额到期发现）；某档快速报错后预算尚有余量却无档可试 → `CompactionFailed(最后一档错误)`。否则同一个预算状态会因为"谁先发现"而在 UI 上呈现成两种不同的结果。已知上限：均分对"单档合法但慢于此份额"的场景偏严（本仓实测 normal 调用 26–28s vs 4 档时每档 75s，余量充足），每 provider 独立 `timeout_ms` 是后续升级路径。
+
 ---
 
 ## 4. 数据模型
@@ -219,7 +225,7 @@ TOML 字段名 `compaction_deadline_ms`，纳入 ADR-023 的统一配置与 `val
 | 文件 | 改动 |
 |---|---|
 | `src/agent/loop_context.rs` | ① `compact_history_if_needed` 建立 `deadline`；② tier 循环每轮用剩余预算；③ `provider.chat` 调用改为 `tokio::select!`（LLM vs `cancel_handle.cancelled()`）；④ 失败路径按原因发 `CompactionCancelled` / `CompactingEnded` |
-| `src/episode_distill.rs` | `compact_with_llm` 外层包 `tokio::time::timeout(remaining_budget, provider.chat(...))`；新增 `SummaryError::Timeout(u64)` 变体（**非 retryable**） |
+| `src/episode_distill.rs` | 新增 `SummaryError::Timeout` 变体（**retryable**：由 tier 循环在预算份额耗尽时构造，下一档可能更快）——该模块只定义"这一档为什么没产出可用摘要"，重试策略留给调用方 |
 | `src/agent/session_core.rs` | 暴露/复用 `compaction_cancel_handle`（复用既有 `current_cancel_handle` 机制，其 `CancelHandle` 生成新实例以避免与 session Stop 语义混淆 —— 见 §8 边界） |
 | `src/agent/session/session_task.rs` | `CompressAction` 分支新增 `CompressionAction::CompactionCancel` → 立即触发 `compaction_cancel_handle.cancel()`（immediate dispatch，**不**走 deferred queue，范式对齐 `loop_inbound.rs:123` 的 `CancelTool`） |
 | `src/startup/gateway_loop.rs` | `compress_type=3` → `CompressionAction::CompactionCancel`；错误文案更新（当前仅接受 1） |
@@ -347,8 +353,8 @@ sequenceDiagram
 
 | 模块 | 用例 |
 |---|---|
-| `episode_distill.rs::compact_with_llm` | ① mock provider 永不返回 → 命中 timeout，返回 `SummaryError::Timeout`；② mock provider 抛网络错 → 原错误透传；③ 正常返回 → 不变 |
-| `loop_context.rs::compact_history_if_needed` | ① tier1 超时 → 终止不进 tier2（验证共享 budget）；② cancel 预置 → 不 emit Started；③ 三 tier 合计超预算 → 总耗时 ≤ deadline + ε；④ 成功 → emit CompactingEnded；⑤ 取消 → emit CompactionCancelled(UserCancelled)；⑥ 超时 → emit CompactionCancelled(Timeout) |
+| `episode_distill.rs::compact_with_llm` | ① mock provider 抛网络错 → 原错误透传；② 正常返回 → 不变；③ 质量门三类拒绝 → 对应 `SummaryError` 变体（超时由 tier 链用例覆盖，见下一行） |
+| `loop_context.rs::compact_history_if_needed` | ① 每档均分剩余预算（`compaction_deadline_gives_every_tier_a_shot_and_stays_bounded`：一档永不返回时，后续每档仍各被调用一次，总耗时 ≤ deadline + ε，最终 `CompactionFailed(Timeout)`）；② cancel 预置 → 不 emit Started；③ 各档合计不超 deadline；④ 成功 → emit CompactingEnded；⑤ 取消 → emit CompactionCancelled(UserCancelled)；⑥ 剩余预算真正耗尽 → emit CompactionCancelled(Timeout)；⑦ `LowQuality` 降档而非终止（`call_phase_fallback_steps_down_on_low_quality`） |
 | `session_task.rs` | `CompactionCancel` 走 immediate dispatch（在 tier await 中点 cancel，≤500ms 观察到中断） |
 | `timeout_config.rs` | `compaction_deadline_ms` 默认值 / 反序列化 / `validate()` 边界 |
 | `chatStore.ts` | `cancelCompressAction` 发出 `compress_type: 3`；订阅 `compaction_cancelled` 后 `isCompacting=false` |

@@ -827,13 +827,15 @@ impl AgentLoop {
 
             // ADR-056 follow-up — call-phase fallback: try the resolved
             // target first; on LLM call failure (network, 4xx, 5xx, parse
-            // error), step down to the next tier in `resolve_distill_targets()`
-            // order. The previous behaviour was a single attempt + unconditional
-            // `trim_fifo` + `emergency_trim` on error — which silently destroys
-            // early history when the global-default provider is down. The
-            // three-tier fallback chain mirrors the chain the *selection* phase
-            // already uses (ADR-056 §3.2), so the user only loses history when
-            // **all three** distillation targets fail.
+            // error, quality gate), step down to the next tier in
+            // `resolve_distill_targets()` order. The previous behaviour was a
+            // single attempt + unconditional `trim_fifo` + `emergency_trim` on
+            // error — which silently destroys early history when the
+            // global-default provider is down. The fallback chain mirrors the
+            // chain the *selection* phase already uses (ADR-056 §3.2), so the
+            // user only loses history when **every** distillation target
+            // fails. ADR-056 §7: "每一级降级都做最小损失尝试，绝不报错中断蒸馏"
+            // — so no tier error short-circuits the rest of the chain.
             //
             // (post-2026-09-10: the resolved memory_provider is no longer
             // consumed here — compact summaries are not auto-written to
@@ -869,7 +871,7 @@ impl AgentLoop {
                 TimedOut,
             }
 
-            for target in &targets {
+            for (idx, target) in targets.iter().enumerate() {
                 // Cancelled between tiers (e.g. while the previous tier was
                 // tearing down) — stop before spending another tier's budget.
                 if compaction_cancel.is_cancelled() {
@@ -882,6 +884,17 @@ impl AgentLoop {
                     cancel_reason = Some(CompactionCancelReason::Timeout);
                     break;
                 }
+                // ADR-083: the deadline is ONE budget for the whole chain, so a
+                // single hanging tier used to eat all of it and starve every
+                // tier behind it (2026-11-27: tier 3 hung 4 min, the chat-model
+                // tier never got a call). Hand each remaining tier an equal
+                // share: a hang now costs at most its slice, the sum is still
+                // the deadline.
+                // ponytail: equal split, not a per-model timeout — a tier that
+                // legitimately needs more than its share is cut short when
+                // several tiers remain; upgrade path is a per-provider
+                // timeout_ms in the provider list.
+                let tier_budget = remaining / (targets.len() - idx) as u32;
 
                 let (compact_provider, compact_model, _tier) = self.distill_provider(target);
                 let call = self.session.history.compact_via_llm(
@@ -890,13 +903,13 @@ impl AgentLoop {
                     system_prompt,
                     self.session.identity_context(),
                 );
-                // ADR-083: race the LLM against the user's cancel and the
-                // remaining shared budget. `biased` gives the cancel branch
+                // ADR-083: race the LLM against the user's cancel and this
+                // tier's share of the budget. `biased` gives the cancel branch
                 // priority on a dead heat — an explicit user request wins.
                 let outcome = tokio::select! {
                     biased;
                     _ = compaction_cancel.cancelled() => TierOutcome::Cancelled,
-                    r = tokio::time::timeout(remaining, call) => match r {
+                    r = tokio::time::timeout(tier_budget, call) => match r {
                         Ok(Ok(v)) => TierOutcome::Done(v),
                         Ok(Err(e)) => TierOutcome::Errored(e),
                         Err(_) => TierOutcome::TimedOut,
@@ -923,17 +936,13 @@ impl AgentLoop {
                             error = %e,
                             "Compaction LLM call failed, trying next tier"
                         );
-                        // LowQuality is a model-capability problem — stepping
-                        // down the chain only gets cheaper/weaker, so discard
-                        // instead of retrying (quality-over-nothing).
-                        let non_retryable = matches!(
-                            &e,
-                            crate::error::RuntimeError::Summary(se) if !se.is_retryable()
-                        );
+                        // Every error steps down the chain — including
+                        // `LowQuality`: a *different* model may well produce a
+                        // usable summary, and aborting here is exactly how the
+                        // remaining targets never got a call (ADR-056 §7).
+                        // Nothing is written unless some tier succeeds, so
+                        // quality-over-nothing still holds.
                         last_err = Some(e);
-                        if non_retryable {
-                            break;
-                        }
                     }
                     TierOutcome::Cancelled => {
                         tracing::warn!(
@@ -947,13 +956,30 @@ impl AgentLoop {
                     TierOutcome::TimedOut => {
                         tracing::warn!(
                             target_provider = %target.provider_id,
+                            target_model = %target.model_id,
                             tier = ?target.tier,
-                            "ADR-083: compaction deadline expired — history untouched"
+                            tier_budget_ms = tier_budget.as_millis() as u64,
+                            "ADR-083: tier used up its share of the deadline — trying next tier"
                         );
-                        cancel_reason = Some(CompactionCancelReason::Timeout);
-                        break;
+                        last_err = Some(crate::episode_distill::SummaryError::Timeout.into());
                     }
                 }
+            }
+
+            // ADR-083: how the chain ended decides the vocabulary the user
+            // sees. A chain that produced no summary because the shared
+            // deadline ran out is a *timeout cancellation* (retry with another
+            // model), not a compaction failure — and it must classify the same
+            // way whether the exhaustion was noticed by the `remaining.is_zero()`
+            // guard above or by the last tier's slice expiring. Without this,
+            // "all tiers timed out" would surface as `CompactionFailed` while
+            // the identical budget state one tier earlier surfaced as
+            // `CompactionCancelled(Timeout)`.
+            if succeeded.is_none()
+                && cancel_reason.is_none()
+                && tokio::time::Instant::now() >= deadline
+            {
+                cancel_reason = Some(CompactionCancelReason::Timeout);
             }
 
             // Whether every distill tier failed (no summary produced).
@@ -3403,14 +3429,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_phase_fallback_stops_on_low_quality_without_stepping_down() {
-        // LowQuality means the top tier's model cannot produce a usable
-        // summary — stepping down the chain only gets cheaper/weaker, so
-        // the chain must STOP (quality-over-nothing, P1), not retry with a
-        // weaker model. Script: call 1 returns a placeholder summary
-        // (< 20 chars → LowQuality), call 2 would return a valid summary.
-        // If the chain wrongly stepped down, call 2 would succeed and
-        // history would be compacted — the test asserts neither happens.
+    async fn call_phase_fallback_steps_down_on_low_quality() {
+        // 2026-11-27 incident: a LowQuality summary used `break` to abort the
+        // whole chain, so the other configured compact models were never even
+        // called — the "三个模型怎么会都失败" report. A discarded summary must
+        // step down like any other tier error: the *output* is thrown away
+        // (quality-over-nothing), not the remaining targets. Script: call 1
+        // returns a placeholder summary (< 20 chars → LowQuality), call 2
+        // returns a valid summary and must win.
         let mut loop_ = build_loop();
         seed_providers(&loop_);
         set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
@@ -3448,16 +3474,15 @@ mod tests {
             .compact_history_if_needed("deepseek-v4-pro", true)
             .await;
 
-        // Only ONE LLM call: LowQuality breaks the chain instead of
-        // stepping down to a weaker model.
+        // Two calls: the LowQuality tier was dropped, the next tier ran.
         let log = call_log.lock().unwrap();
         assert_eq!(
             log.len(),
-            1,
-            "LowQuality must not step down the chain; call log: {log:?}"
+            2,
+            "LowQuality must step down to the next tier; call log: {log:?}"
         );
 
-        // History untouched: no compaction marker, no raw replacement.
+        // The lower tier's usable summary compacted the history.
         let has_marker = loop_
             .session
             .history
@@ -3465,8 +3490,8 @@ mod tests {
             .iter()
             .any(|m| m.name.as_deref() == Some(crate::agent::history::COMPACTION_SUMMARY_NAME));
         assert!(
-            !has_marker,
-            "low-quality compaction must leave history untouched"
+            has_marker,
+            "a lower tier's valid summary must still compact the history"
         );
     }
 
@@ -3474,7 +3499,7 @@ mod tests {
 
     /// Provider whose `chat()` never returns — models the incident where the
     /// distill provider is unreachable/too slow. Counts calls so tests can
-    /// assert the shared budget stops the tier chain.
+    /// assert every tier still gets its own slice of the budget.
     struct HangingProvider {
         calls: std::sync::Arc<std::sync::Mutex<usize>>,
     }
@@ -3551,14 +3576,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compaction_times_out_on_deadline_and_does_not_try_more_tiers() {
+    async fn compaction_deadline_gives_every_tier_a_shot_and_stays_bounded() {
         let (mut loop_, calls) = hanging_loop(300);
         // Guard the premise: the chain must actually offer more than one
-        // tier, otherwise "stopped the chain" would be vacuous.
-        assert!(
-            loop_.resolve_distill_targets().len() >= 2,
-            "test needs a multi-tier distill chain"
-        );
+        // tier, otherwise "every tier ran" would be vacuous.
+        let tiers = loop_.resolve_distill_targets().len();
+        assert!(tiers >= 2, "test needs a multi-tier distill chain");
         let start = std::time::Instant::now();
         let result = loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
         let elapsed = start.elapsed();
@@ -3568,7 +3591,17 @@ mod tests {
             elapsed < std::time::Duration::from_secs(3),
             "compaction must be bounded by the deadline, took {elapsed:?}"
         );
-        // Typed as a cancellation with the Timeout reason.
+        // ADR-083 §3.2 + ADR-056 §7: a hanging tier only burns its own share
+        // of the budget, so every remaining tier still gets a call.
+        assert_eq!(
+            *calls.lock().unwrap(),
+            tiers,
+            "a hanging tier must not starve the tiers behind it"
+        );
+        // Nothing produced a summary → the session must stop rather than grow
+        // an un-compactable context. Typed as a timeout cancellation (ADR-083:
+        // history untouched, the user retries with another model) — not a
+        // generic failure.
         match result {
             Err(crate::error::RuntimeError::CompactionCancelled(msg)) => assert!(
                 msg.contains("Timeout"),
@@ -3576,8 +3609,6 @@ mod tests {
             ),
             other => panic!("expected CompactionCancelled(Timeout), got {other:?}"),
         }
-        // Shared budget: the first tier consumed it, so no further tier ran.
-        assert_eq!(*calls.lock().unwrap(), 1, "deadline must stop the tier chain");
         // History untouched — no compaction marker.
         assert!(
             !loop_

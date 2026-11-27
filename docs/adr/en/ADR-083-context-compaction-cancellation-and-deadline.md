@@ -52,10 +52,12 @@ Code-verified root causes:
 Add **cancellation** and a **total deadline** as first-class capabilities for context compaction, and
 upgrade the frontend from passive waiting to active control.
 
-1. **Deadline guard (mandatory).** Wrap `episode_distill::compact_with_llm` in
-   `tokio::time::timeout`, default **5 minutes**. On expiry, fail fast with a distinguishable
-   `SummaryError::Timeout`. All tiers in `compact_history_if_needed` share one remaining budget — a
-   single manual or automatic compaction takes **at most 5 minutes end to end**.
+1. **Deadline guard (mandatory).** All tiers in `compact_history_if_needed` share one remaining
+   budget, default **5 minutes**, and each tier's `provider.chat` runs under `tokio::time::timeout`
+   so it fails fast with a distinguishable `SummaryError::Timeout` — a single manual or automatic
+   compaction takes **at most 5 minutes end to end**. The guard lives in the tier loop that owns the
+   shared budget, not inside `compact_with_llm` (a per-call timeout cannot express "this budget is
+   shared by N tiers").
 2. **Cancellable (mandatory).** Wire compaction into the existing `CancelHandle` (ADR-044). The
    distillation `provider.chat()` await runs under a `tokio::select!` that also awaits
    `cancel_handle.cancelled()`. A user cancel interrupts within ≤ 500 ms, **leaves history intact**,
@@ -127,6 +129,27 @@ Deadline `= now + compaction_deadline_ms` (default 300 s) is established once, t
 (global default → provider compact_model → current chat model) **share the remaining budget**. This
 is the essential difference from today (each tier gets a fresh 600 s × 3).
 
+**Patch (2026-11-27).** The original implementation gave each tier *all* the remaining budget, so a
+single hung tier ate the whole deadline and the tiers behind it never got a call (observed: tier 3's
+provider hung for 4 minutes, the chat-model tier was never invoked); on top of that `LowQuality` used
+to `break` out of the whole chain. Both contradict [ADR-056 §7](./ADR-056-global-default-compact-model.md)
+("never abort distillation with an error; every downgrade is a minimal-loss attempt"). The semantics are
+therefore:
+
+- Per-tier `timeout = remaining budget / remaining tiers` (equal split). A hang costs at most its own
+  slice, and the end-to-end total stays ≤ `compaction_deadline_ms`.
+- A tier timeout is a retryable tier error (`SummaryError::Timeout`) and **steps down to the next
+  tier**; only a genuinely exhausted budget emits `CompactionCancelled(Timeout)`.
+- Every tier error (including `LowQuality`) discards that tier's *output* only and keeps descending;
+  `CompactionFailed` requires **all** tiers to fail. **The end state is decided by *why* the chain
+  stopped, not by *which check noticed it***: no summary left and the shared deadline has passed →
+  `CompactionCancelled(Timeout)` (whether the exhaustion was caught by the loop-head remaining-budget
+  guard or by the last tier's slice expiring); a fast error while budget remains but no tier is left →
+  `CompactionFailed(last tier error)`. Otherwise the same budget state would surface as two different
+  outcomes in the UI depending on which check happened to fire. Known ceiling: the equal split is strict for a
+  tier that is legitimately slower than its share (measured normal calls are 26–28 s against 75 s per
+  tier at 4 tiers, so there is ample headroom); a per-provider `timeout_ms` is the upgrade path.
+
 ## Data Model
 
 proto (`core/acowork-core/proto/mqtt_payload.proto`):
@@ -163,7 +186,7 @@ pub struct Timeouts {
 | Crate | File | Change |
 |---|---|---|
 | runtime | `src/agent/loop_context.rs` | Establish `deadline`; per-tier remaining budget; `tokio::select!` (LLM vs `cancel_handle.cancelled()`); emit `CompactionCancelled` / `CompactingEnded` by reason |
-| runtime | `src/episode_distill.rs` | `compact_with_llm` wraps `provider.chat` in `tokio::time::timeout`; add `SummaryError::Timeout(u64)` (non-retryable) |
+| runtime | `src/episode_distill.rs` | Add `SummaryError::Timeout` (**retryable** — raised by the tier loop when a tier's share of the deadline runs out, the next tier may be faster); the module only says *why one tier produced no usable summary*, the retry policy stays with the caller |
 | runtime | `src/agent/session_core.rs` | Expose a dedicated `compaction_cancel_handle` (separate `CancelHandle` instance from session Stop) |
 | runtime | `src/agent/session/session_task.rs` | `CompressionAction::CompactionCancel` → immediate `cancel()` (skip deferred queue, matching `loop_inbound.rs:123`) |
 | runtime | `src/startup/gateway_loop.rs` | `compress_type=3` → `CompactionCancel` |
@@ -230,10 +253,15 @@ session Idle, immediate retry possible.
 ## Test Plan
 
 Unit:
-- `compact_with_llm`: never-returning mock → `Timeout`; network error → passthrough; normal → unchanged.
-- `compact_history_if_needed`: tier1 timeout terminates before tier2 (shared budget); pre-cancelled →
-  no Started; 3-tier total ≤ deadline + ε; success → `CompactingEnded`; cancel →
-  `CompactionCancelled(UserCancelled)`; timeout → `CompactionCancelled(Timeout)`.
+- `compact_with_llm`: network error → passthrough; normal → unchanged; each quality-gate rejection → its
+  own `SummaryError` variant (the never-returning mock is covered by the tier-chain case below).
+- `compact_history_if_needed`: each tier gets an equal share of the remaining budget
+  (`compaction_deadline_gives_every_tier_a_shot_and_stays_bounded`: with a never-returning provider
+  every tier is still called once, the total stays ≤ deadline + ε, and the result is
+  `CompactionFailed(Timeout)`); pre-cancelled → no Started; total ≤ deadline + ε; success →
+  `CompactingEnded`; cancel → `CompactionCancelled(UserCancelled)`; budget genuinely exhausted →
+  `CompactionCancelled(Timeout)`; `LowQuality` steps down instead of aborting
+  (`call_phase_fallback_steps_down_on_low_quality`).
 - `session_task`: `CompactionCancel` immediate dispatch (≤ 500 ms interrupt).
 - `timeout_config`: default / deserialize / `validate()` bounds.
 - `chatStore`: `cancelCompressAction` sends `compress_type: 3`; `compaction_cancelled` resets `isCompacting`.
