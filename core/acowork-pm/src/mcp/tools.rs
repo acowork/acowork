@@ -986,26 +986,29 @@ async fn pm_list_tasks(state: &McpState, actor: Option<&str>, args: Value) -> Re
     // to know its own instance id (which it cannot read from anywhere else).
     let assignee = resolve_assignee_me(a.assignee.as_deref(), actor, "pm_list_tasks")?;
 
-    let narrowed = a.status.is_some()
-        || assignee.is_some()
-        || a.review_status.is_some()
-        || a.task_type.is_some()
-        || a.query.is_some()
-        || a.parent_task_id.is_some()
-        || a.only_roots
-        || a.only_blocked
-        // G6: the delta filter narrows on its own — "everything updated
-        // since X across all projects" is exactly the cross-project
-        // question it exists to answer.
-        || a.updated_since.is_some();
+    let mut filter = TaskFilter {
+        project_id: a.project_id,
+        status: a.status,
+        assignee,
+        only_blocked: a.only_blocked,
+        sort: None,
+        review_status: a.review_status,
+        task_type: a.task_type,
+        query: a.query,
+        parent_task_id: a.parent_task_id,
+        only_roots: a.only_roots,
+        updated_since: a.updated_since,
+    };
     // Without a project scope this walks the whole index; the filter is what
-    // keeps it from becoming a disk sweep of every task on the machine.
-    if a.project_id.is_none() && !narrowed {
+    // keeps it from becoming a disk sweep of every task on the machine. The
+    // rule lives on `TaskFilter` because REST's `GET /api/pm/tasks` asks the
+    // same store question and must answer it the same way.
+    if filter.project_id.is_none() && !filter.is_narrowed() {
         return Err(PmError::BadRequest(
-            "cross-project pm_list_tasks needs at least one narrowing filter (status / assignee / review_status / type / query / parent_task_id / only_roots / only_blocked / updated_since), or a project_id".to_string(),
+            TaskFilter::CROSS_PROJECT_NEEDS_NARROWING.to_string(),
         ));
     }
-    if a.parent_task_id.is_some() && a.only_roots {
+    if filter.parent_task_id.is_some() && filter.only_roots {
         return Err(PmError::BadRequest(
             "parent_task_id and only_roots contradict each other: pick one".to_string(),
         ));
@@ -1028,19 +1031,7 @@ async fn pm_list_tasks(state: &McpState, actor: Option<&str>, args: Value) -> Re
         }
     };
 
-    let filter = TaskFilter {
-        project_id: a.project_id,
-        status: a.status,
-        assignee,
-        only_blocked: a.only_blocked,
-        sort,
-        review_status: a.review_status,
-        task_type: a.task_type,
-        query: a.query,
-        parent_task_id: a.parent_task_id,
-        only_roots: a.only_roots,
-        updated_since: a.updated_since,
-    };
+    filter.sort = sort;
     let tasks = state.store.find_tasks(&filter).await?;
     let total = tasks.len();
     let page: Vec<_> = tasks.into_iter().skip(offset).take(limit).collect();

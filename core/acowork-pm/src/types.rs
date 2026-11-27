@@ -860,6 +860,30 @@ pub enum TaskSort {
     Priority,
 }
 
+impl TaskFilter {
+    /// 拒绝"跨项目且不收窄"的那一句话。两个入口（MCP `pm_list_tasks` 与
+    /// REST `GET /api/pm/tasks`）共用它 —— 同一个 store 查询，同一套契约，
+    /// 不允许一个口子拦住、另一个口子放行。
+    pub const CROSS_PROJECT_NEEDS_NARROWING: &'static str = "cross-project task list needs at least one narrowing filter (project_id / status / assignee / review_status / type / query / parent_task_id / only_roots / only_blocked / updated_since)";
+
+    /// 是否至少有一个"收窄"条件（`project_id` 不算：它本身就是作用域、
+    /// 不是收窄）。没有收窄条件的跨项目查询 = 把整库任务扫一遍再全量返回，
+    /// 对 agent 是上下文炸弹，对 Desktop 是一个几十 MB 的响应。
+    pub fn is_narrowed(&self) -> bool {
+        self.status.is_some()
+            || self.assignee.is_some()
+            || self.review_status.is_some()
+            || self.task_type.is_some()
+            || self.query.is_some()
+            || self.parent_task_id.is_some()
+            || self.only_roots
+            || self.only_blocked
+            // G6：增量窗口自己就是一个收窄条件 —— "X 之后改动的所有任务"
+            // 正是跨项目问的那个问题。
+            || self.updated_since.is_some()
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // API 响应包装（响应层补充派生字段）
 // ────────────────────────────────────────────────────────────────────────────

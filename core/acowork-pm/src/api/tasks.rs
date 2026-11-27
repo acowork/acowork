@@ -12,19 +12,15 @@ use crate::types::{
 use super::ApiState;
 
 // ────────────────────────────────────────────────────────────────────────────
-// GET /projects/:pid/tasks
+// GET /projects/:pid/tasks   ·   GET /tasks
 // ────────────────────────────────────────────────────────────────────────────
 
-#[tracing::instrument(skip(state))]
-pub async fn list(
-    State(state): State<ApiState>,
-    Path(pid): Path<String>,
-    query: axum::extract::Query<TaskFilter>,
+/// `Task` → `TaskResponse`：派生字段（is_blocked / blocked_by / depth /
+/// parent_id）由 store 补齐。两个列表口子共用这一份，别再抄第二遍。
+async fn respond(
+    state: &ApiState,
+    tasks: Vec<Task>,
 ) -> Result<Json<Vec<crate::types::TaskResponse>>, crate::error::PmError> {
-    let pid = pid.parse::<ProjectId>()?;
-    let mut filter = query.0;
-    filter.project_id = Some(pid);
-    let tasks = state.store.find_tasks(&filter).await?;
     let mut out = Vec::with_capacity(tasks.len());
     for task in tasks {
         let tid = task.id.clone();
@@ -40,6 +36,43 @@ pub async fn list(
         });
     }
     Ok(Json(out))
+}
+
+#[tracing::instrument(skip(state))]
+pub async fn list(
+    State(state): State<ApiState>,
+    Path(pid): Path<String>,
+    query: axum::extract::Query<TaskFilter>,
+) -> Result<Json<Vec<crate::types::TaskResponse>>, crate::error::PmError> {
+    let pid = pid.parse::<ProjectId>()?;
+    let mut filter = query.0;
+    filter.project_id = Some(pid);
+    let tasks = state.store.find_tasks(&filter).await?;
+    respond(&state, tasks).await
+}
+
+/// 跨项目任务列表。`?assignee=<instance_id>` 是主用法（单聊右侧的
+/// "这个 bot 的任务"面板）；其余 `TaskFilter` 字段原样生效。
+///
+/// 不带 `project_id` 时必须带一个收窄条件（`TaskFilter::is_narrowed`），与
+/// MCP 的 `pm_list_tasks` 同一条规则 —— 否则整库任务的响应体就是一次
+/// 几十 MB 的上下文炸弹 + 每个任务一次 `compute_blocked_by` 扫描。
+///
+/// 不带 `project_id` 时 `find_tasks` 走一遍内存索引（与 `/projects/counts`
+/// 同一代价），不会逐个去盘上捞。
+#[tracing::instrument(skip(state))]
+pub async fn list_all(
+    State(state): State<ApiState>,
+    query: axum::extract::Query<TaskFilter>,
+) -> Result<Json<Vec<crate::types::TaskResponse>>, crate::error::PmError> {
+    let filter = query.0;
+    if filter.project_id.is_none() && !filter.is_narrowed() {
+        return Err(crate::error::PmError::BadRequest(
+            TaskFilter::CROSS_PROJECT_NEEDS_NARROWING.to_string(),
+        ));
+    }
+    let tasks = state.store.find_tasks(&filter).await?;
+    respond(&state, tasks).await
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -413,5 +446,115 @@ async fn close_task_context_if_terminal(
         TaskStatus::Done | TaskStatus::Rejected | TaskStatus::Cancelled
     ) {
         close_task_contexts(gateway, [(after.project_id.clone(), after.clone())]).await;
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PmConfig;
+    use crate::mcp::NoopAgentDirectory;
+    use crate::store::contract::PmStore;
+    use crate::store::sqlite::SqlitePmStore;
+    use crate::types::{CreateProject, Priority, TaskType};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    fn test_config() -> PmConfig {
+        let dir = tempdir().unwrap();
+        PmConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        }
+    }
+
+    /// 两个项目、各一条任务，分别指派给两个 agent —— 跨项目查询只有
+    /// `assignee` 能把它们分开。
+    async fn seed(store: &SqlitePmStore) {
+        for (pid_title, assignee) in [("P-a", "agent-1"), ("P-b", "agent-2")] {
+            let p = store
+                .create_project(
+                    CreateProject {
+                        title: pid_title.into(),
+                        description: String::new(),
+                        metadata: Default::default(),
+                    },
+                    "human",
+                )
+                .await
+                .unwrap();
+            // assignee 必须是项目成员（store 的 `assignee_not_project_member` 规则）。
+            store
+                .add_project_member(&p.id, assignee, MemberKind::Agent)
+                .await
+                .unwrap();
+            store
+                .create_task(
+                    &p.id,
+                    CreateTask {
+                        title: format!("task for {assignee}"),
+                        description: String::new(),
+                        task_type: TaskType::Task,
+                        priority: Priority::Normal,
+                        parent_task_id: None,
+                        depends_on: vec![],
+                        attachment_ids: vec![],
+                        assignee: Some(assignee.into()),
+                        due_at: None,
+                        start_at: None,
+                    },
+                    "human",
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    fn state_with(store: SqlitePmStore) -> ApiState {
+        ApiState {
+            store: Arc::new(store),
+            config: test_config(),
+            agent_dir: Arc::new(NoopAgentDirectory),
+            gateway: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_project_list_refuses_an_unfiltered_dump() {
+        let store = SqlitePmStore::open(test_config()).unwrap();
+        seed(&store).await;
+
+        // 没有收窄条件 → 400，而不是把整库任务吐出来（与 MCP 同一条规则）。
+        let err = list_all(State(state_with(store)), axum::extract::Query(TaskFilter::default()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::PmError::BadRequest(ref m)
+                if m.contains("narrowing filter")),
+            "unfiltered cross-project list must be refused: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assignee_filter_spans_projects() {
+        let store = SqlitePmStore::open(test_config()).unwrap();
+        seed(&store).await;
+
+        let Json(tasks) = list_all(
+            State(state_with(store)),
+            axum::extract::Query(TaskFilter {
+                assignee: Some("agent-1".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+        // 一个 agent 的任务散落在多个项目里，跨项目一次取回。
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task.assignee.as_deref(), Some("agent-1"));
+        assert_eq!(tasks[0].task.title, "task for agent-1");
     }
 }
