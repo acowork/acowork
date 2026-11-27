@@ -4459,7 +4459,7 @@ fn is_explore_log_row(body: &[u8]) -> bool {
         .and_then(|m| m.get(META_KEY_INTERNAL))
         .and_then(|v| v.as_bool())
         == Some(true);
-    !internal && matches!(probe.role.as_str(), "thought" | "tool_call" | "tool_result")
+    is_explore_role(&probe.role, internal)
 }
 
 /// Whether an entry belongs to an explore run (the rows the frontend folds
@@ -4471,10 +4471,19 @@ fn is_explore_log_row(body: &[u8]) -> bool {
 /// (attachments / context_ref) — *breaks* a run, which is what the frontend
 /// does too. If either side changes, both must change together.
 pub fn is_explore_entry(entry: &ConversationEntry) -> bool {
-    if entry.is_internal() {
-        return false;
-    }
-    matches!(entry.role.as_str(), "thought" | "tool_call" | "tool_result")
+    is_explore_role(&entry.role, entry.is_internal())
+}
+
+/// The ONE definition of "this row belongs to an explore run": the role set plus
+/// the internal-row exclusion.
+///
+/// Both the byte-level probe the index scan uses ([`is_explore_log_row`]) and
+/// the entry-level predicate the projection uses ([`is_explore_entry`]) go
+/// through here. Two copies would let the record boundary and the collapse
+/// disagree about what a run is — the page would then be widened for a run the
+/// collapse does not fold, or fold half of one the boundary drew too short.
+fn is_explore_role(role: &str, internal: bool) -> bool {
+    !internal && matches!(role, "thought" | "tool_call" | "tool_result")
 }
 
 /// Collapse contiguous explore runs in a page into lightweight stub rows
@@ -10094,6 +10103,69 @@ mod tests {
         assert_eq!(snap_to_record_boundaries(&explore, 0, 8), (0, 8));
         // Empty window is not widened.
         assert_eq!(snap_to_record_boundaries(&explore, 4, 4), (4, 4));
+    }
+
+    #[test]
+    fn paging_through_the_log_never_splits_a_run() {
+        // The property the whole record-page design exists for: walk the log one
+        // page at a time and every run must arrive as exactly ONE stub whose span
+        // is one of the real runs. A partial run — the shape that painted one run
+        // as two chips — cannot appear, and the offsets chain without a gap or an
+        // overlap.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let row = |id: &str, i: usize, role: &str| {
+            format!(
+                r#"{{"id":"{id}","ts":"2026-01-01T12:00:{i:02}.000Z","role":"{role}","content":"x"}}"#
+            )
+        };
+        let lines = vec![
+            row("r0", 0, "user"),
+            row("r1", 1, "thought"),     // run A = [1,4)
+            row("r2", 2, "tool_call"),
+            row("r3", 3, "tool_result"),
+            row("r4", 4, "assistant"),
+            row("r5", 5, "thought"),     // run B = [5,8)
+            row("r6", 6, "tool_call"),
+            row("r7", 7, "tool_result"),
+            row("r8", 8, "assistant"),
+        ];
+        std::fs::write(&path, lines.join("
+") + "
+").unwrap();
+
+        let mut offset = 0u64;
+        let mut seen: Vec<(u64, u64)> = Vec::new();
+        let mut stubs: Vec<(u64, u64)> = Vec::new();
+        while offset < 9 {
+            let page = read_messages_paginated_indexed(&path, offset, 2, false, PageUnit::Records)
+                .unwrap();
+            assert!(page.limit > 0, "paging must make progress at offset {offset}");
+            assert_eq!(page.offset, offset, "pages chain without a gap");
+            let span = page.limit as u64;
+            seen.push((page.offset, page.offset + span));
+            // The projection the reader gets (see `get_messages`'s Stub branch).
+            let reaches_tail = page.reaches_log_tail();
+            let records = collapse_explore_runs(page.messages, reaches_tail);
+            for e in &records {
+                if e.kind.as_deref() != Some(ENTRY_KIND_EXPLORE_STUB) {
+                    continue;
+                }
+                let meta = e.metadata.as_ref().unwrap();
+                stubs.push((
+                    meta["start"].as_u64().unwrap(),
+                    meta["end"].as_u64().unwrap(),
+                ));
+            }
+            offset = page.offset + span;
+        }
+        assert_eq!(offset, 9, "the walk covers the whole log");
+        assert_eq!(seen, vec![(0, 4), (4, 8), (8, 9)], "no gap, no overlap");
+        assert_eq!(
+            stubs,
+            vec![(1, 4), (5, 8)],
+            "each run arrives once, as a whole"
+        );
     }
 
     #[test]

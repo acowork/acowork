@@ -24,6 +24,7 @@ import { showToast } from "../components/common/ToastProvider";
 import { log } from "../lib/logger";
 import { blockRefOf } from "../lib/chatBlocks";
 import { isExploreRunRow, isTurnPartMeta } from "../components/chat/messageParts";
+import { rowCoordinates } from "../components/chat/messageFolder";
 import { noteRoundState } from "./chatBlockStore";
 import type { LlmAvailability } from "../lib/llmAvailability";
 import { llmAvailabilityFromWire } from "../lib/llmAvailability";
@@ -187,13 +188,17 @@ export function mergeMessageWindow(
     if (spans.length > 0) {
       const coveredIds = new Set<string>();
       const serverIds = new Set(server.map((m) => m.id));
+      // Coordinates, not array indices: the cache can already hold stub rows,
+      // each standing for a whole run, so `cacheBaseOffset + i` would address
+      // the wrong coordinates for every row after the first stub.
+      const coords = rowCoordinates(cache, cacheBaseOffset);
       cache.forEach((m, i) => {
         if (m.type === "explore_stub" || !isExploreRunRow(m.type)) return;
         // A cache row the server also carries is already resolved by id — the
         // server's stub IS that row's representation, so dropping it here would
         // delete the stub and leave the run with no block at all.
         if (serverIds.has(m.id)) return;
-        const coord = cacheBaseOffset + i;
+        const coord = coords[i];
         if (spans.some((s) => coord >= s.start && coord < s.end)) coveredIds.add(m.id);
       });
       if (coveredIds.size > 0) merged = messages.filter((m) => !coveredIds.has(m.id));
@@ -3524,13 +3529,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }),
         );
       try {
-        // A stub describes ONE PAGE's part of a run, so one part always fits
-        // the Runtime's span ceiling — but the block a reader expands may be
-        // several fused parts (consecutive pages, each clipping its own piece),
-        // so the read walks the span in ceiling-sized slices. Sequential, not
-        // parallel: the slices are adjacent byte ranges of one file and the
-        // first slice already tells us whether the rest is worth reading (a
-        // 404/500 aborts the walk with the error state set).
+        // A stub describes one WHOLE run, and the Runtime pages by record, so a
+        // page can legitimately be one long run — wider than the detail
+        // endpoint's per-request ceiling (`MESSAGE_DETAIL_MAX_SPAN`, a hard 400,
+        // never a silent truncation). The read therefore walks the span in
+        // ceiling-sized slices. Sequential, not parallel: the slices are
+        // adjacent byte ranges of one file, and the first slice already tells us
+        // whether the rest is worth reading (a 404/500 aborts the walk with the
+        // error state set).
         const rows: ChatMessage[] = [];
         for (let start = meta.start; start < meta.end; start += EXPLORE_DETAIL_SLICE) {
           const end = Math.min(meta.end, start + EXPLORE_DETAIL_SLICE);
