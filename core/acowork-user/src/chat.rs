@@ -40,6 +40,7 @@
 //! mounted; `data_dir/users/` is created on first use in every deployment.
 
 use std::fs;
+use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -69,14 +70,16 @@ pub fn max_attachment_bytes() -> u64 {
 /// reaches a path — but it does reach a response header.
 const MAX_FILENAME_CHARS: usize = 200;
 
-/// Largest image we decode to build a thumbnail (24 MiB).
+/// Memory budget for decoding one image to build a thumbnail (128 MiB).
 ///
-/// A decode holds the whole picture in memory, so past this a large image
-/// simply uploads without an inline preview — the chat row falls back to the
-/// file chip it already renders for any other type. This is a rendering
-/// budget, deliberately not an upload ceiling: the two were the same number
-/// only while uploads were single-request.
-const MAX_THUMB_SOURCE_BYTES: u64 = 24 * 1024 * 1024;
+/// The bound is on **decoded pixels**, not on the file: a 2 MiB JPEG can
+/// decode to 300 MB and a 60 MB photograph can decode to 12 MB, so a
+/// file-size gate guesses wrong in both directions. `image`'s decoder refuses
+/// an image whose allocations would exceed this, which is the cost a decode
+/// actually incurs — past it the upload still succeeds and the chat row falls
+/// back to the plain file chip. Still a rendering budget, not an upload
+/// ceiling: the two were one number only while uploads were single-request.
+const MAX_THUMB_DECODE_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Longest edge of a stored image thumbnail, in pixels. 320 px renders
 /// sharp in the 160 px chat tile at 2× and keeps a 25 MB screenshot under
@@ -177,35 +180,64 @@ fn read_head(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
 fn generate_thumb(
     dir: &Path,
     id: &str,
-    bytes: &[u8],
+    source: ThumbSource<'_>,
     mime: &str,
     filename: &str,
 ) -> Option<String> {
     if mime.starts_with("image/") {
-        if bytes.len() as u64 > MAX_THUMB_SOURCE_BYTES {
-            return None; // decode budget, not an upload ceiling
-        }
-        let out = thumb_image(bytes)?;
+        // An image arm needs the pixels, and a decode cannot be streamed, so
+        // the *decoder* is where the refusal belongs (a whole-file size gate
+        // was both too strict for photographs and too loose for a small
+        // decompression bomb — see [`MAX_THUMB_DECODE_BYTES`]).
+        let out = match source {
+            ThumbSource::Bytes(bytes) => thumb_image(Cursor::new(bytes), MAX_THUMB_DECODE_BYTES)?,
+            ThumbSource::Path(path) => thumb_image(
+                BufReader::new(fs::File::open(path).ok()?),
+                MAX_THUMB_DECODE_BYTES,
+            )?,
+        };
         fs::write(attachment_thumb_path(dir, id, "jpg"), out).ok()?;
         return Some("jpg".to_string());
     }
     if is_text_previewable(filename) {
-        let out = thumb_text(bytes)?;
+        // A preview only ever needs the head; the caller hands over exactly
+        // that (see [`read_head`]), never the whole file.
+        let ThumbSource::Bytes(head) = source else {
+            return None;
+        };
+        let out = thumb_text(head)?;
         fs::write(attachment_thumb_path(dir, id, "txt"), out).ok()?;
         return Some("txt".to_string());
     }
     None
 }
 
+/// Where a preview's source bytes come from: already in hand (a single-request
+/// upload) or still on disk (a chunked upload, whose bytes were `rename`d into
+/// place and would otherwise be read back in full just to look at the header).
+#[derive(Clone, Copy)]
+enum ThumbSource<'a> {
+    Bytes(&'a [u8]),
+    Path(&'a Path),
+}
+
 /// Downscale to JPEG bytes.
 ///
 /// Same `thumbnail` → JPEG shape as [acowork-pm](../../acowork-pm)'s
 /// `generate_thumb`, so both services' thumbnails look the same.
-fn thumb_image(bytes: &[u8]) -> Option<Vec<u8>> {
+fn thumb_image<R: std::io::BufRead + std::io::Seek>(
+    reader: R,
+    max_alloc: u64,
+) -> Option<Vec<u8>> {
     use image::GenericImageView;
-    use std::io::Cursor;
 
-    let img = image::load_from_memory(bytes).ok()?;
+    let mut reader = image::ImageReader::new(reader).with_guessed_format().ok()?;
+    // Set before `decode`: the decoder checks the budget as it allocates, so
+    // an oversized image is refused instead of being materialized first.
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(max_alloc);
+    reader.limits(limits);
+    let img = reader.decode().ok()?;
     let (w, h) = img.dimensions();
     let thumb = if w.max(h) > THUMB_MAX_EDGE {
         img.thumbnail(THUMB_MAX_EDGE, THUMB_MAX_EDGE)
@@ -515,7 +547,13 @@ pub(crate) fn store_attachment_at(
     // Thumbnail third, from the bytes already in hand so nothing is read
     // back off disk. A failure here is not fatal — the sidecar is simply
     // absent and `thumb` stays `None`, which the client already handles.
-    let thumb = generate_thumb(dir, &attachment.id, bytes, &attachment.mime, &attachment.filename);
+    let thumb = generate_thumb(
+        dir,
+        &attachment.id,
+        ThumbSource::Bytes(bytes),
+        &attachment.mime,
+        &attachment.filename,
+    );
     let attachment = Attachment { thumb, ..attachment };
 
     let meta = attachment_meta_path(dir, &attachment.id);
@@ -581,21 +619,29 @@ pub(crate) fn store_attachment_from_path(
     // reads exactly what it needs: an image decode needs the pixels (skipped
     // past the decode budget), a text preview needs its head — reading a 1 GiB
     // log back off disk to preview eight lines is the failure mode this avoids.
+    // Each kind reads exactly what it needs: an image decode streams from the
+    // blob through the decoder's own alloc budget, a text preview reads its
+    // head. Reading a 1 GiB log back to preview eight lines — or a 1 GiB image
+    // back to look at its header — is the failure mode this avoids.
     let thumb = if attachment.mime.starts_with("image/") {
-        if size <= MAX_THUMB_SOURCE_BYTES {
-            fs::read(&blob)
-                .ok()
-                .and_then(|bytes| {
-                    generate_thumb(dir, &attachment.id, &bytes, &attachment.mime, &attachment.filename)
-                })
-        } else {
-            None
-        }
+        generate_thumb(
+            dir,
+            &attachment.id,
+            ThumbSource::Path(&blob),
+            &attachment.mime,
+            &attachment.filename,
+        )
     } else if is_text_previewable(&attachment.filename) {
         read_head(&blob, THUMB_TEXT_BYTES)
             .ok()
             .and_then(|head| {
-                generate_thumb(dir, &attachment.id, &head, &attachment.mime, &attachment.filename)
+                generate_thumb(
+                    dir,
+                    &attachment.id,
+                    ThumbSource::Bytes(&head),
+                    &attachment.mime,
+                    &attachment.filename,
+                )
             })
     } else {
         None
@@ -745,6 +791,27 @@ mod tests {
         assert_eq!(normalize_mime(""), "application/octet-stream");
         assert_eq!(normalize_mime("image/svg+xml"), "image/svg+xml");
         assert_eq!(normalize_mime("IMAGE/PNG"), "image/png");
+    }
+
+    /// The thumbnail guard bounds *decoded memory*, not the uploaded file: a
+    /// small file can decode huge and a large one can decode small, so the
+    /// budget is handed to the decoder and enforced as it allocates.
+    #[test]
+    fn thumbnail_decode_budget_is_enforced_by_the_decoder() {
+        use std::io::Cursor;
+
+        let png = image::RgbaImage::from_pixel(64, 64, image::Rgba([10, 20, 30, 255]));
+        let mut bytes = Vec::new();
+        png.write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+
+        // Inside the production budget: a real thumbnail comes back.
+        let ok = thumb_image(Cursor::new(&bytes), MAX_THUMB_DECODE_BYTES).expect("decodes");
+        assert_eq!(&ok[..2], &[0xFF, 0xD8], "thumbnail is JPEG");
+
+        // Far under the pixels this image needs: refused, and refused *by the
+        // budget* — nothing here is a file-size check any more.
+        assert!(thumb_image(Cursor::new(&bytes), 64).is_none());
     }
 
     #[test]

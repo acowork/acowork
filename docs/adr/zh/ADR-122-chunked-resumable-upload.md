@@ -75,7 +75,7 @@
 **v1.1 契约细则**（评审定案，MUST 级）：
 
 - **上限语义**：`MAX_UPLOAD_BYTES`（50 MiB）由 per-store 可配置单文件上限取代（默认 1 GiB，D6），执行点在 complete 按声明总长与实收字节双重校验；旧常量废弃，不得与新上限并存。
-  - **实施修订（2026-12-02）**：这条同时作废 ADR-076 §决策 9 的「图片 25 MB / 文档 100 MB」按 mime 分档——那对数字是「单请求要装下整份文件」时代的产物（100 MB 文档曾逼得上传路由把 body 上限抬到 101 MiB，越过 64 MiB 跳级 cap），分块后留着就是同一个文件两个上限、取决于走哪条路由。现收敛为 `chat::max_attachment_bytes()`（= `upload::max_file_bytes()`）一个数字。因此体积相关的三件事被拆开：**上传策略**（可配置单文件上限）、**传输**（单请求一跳，更大必须走 `/uploads`）、**渲染预算**（缩略图解码 ≤24 MiB，超了不生成预览，但文件照收）。
+  - **实施修订（2026-12-02）**：这条同时作废 ADR-076 §决策 9 的「图片 25 MB / 文档 100 MB」按 mime 分档——那对数字是「单请求要装下整份文件」时代的产物（100 MB 文档曾逼得上传路由把 body 上限抬到 101 MiB，越过 64 MiB 跳级 cap），分块后留着就是同一个文件两个上限、取决于走哪条路由。现收敛为 `chat::max_attachment_bytes()`（= `upload::max_file_bytes()`）一个数字。因此体积相关的三件事被拆开：**上传策略**（可配置单文件上限）、**传输**（单请求一跳，更大必须走 `/uploads`）、**渲染预算**（缩略图解码 ≤128 MiB 解码内存，超了不生成预览，但文件照收）。
   - **实施修订（2026-12-02，上限归属）**：那个「可配置」的旋钮落在 **Gateway 配置**（`gateway.toml` 的 `max_upload_bytes`，默认 = `upload::max_file_bytes()`），由 `GET/PUT /api/config` 读写，Desktop 的 General Settings「存储」区就是它的唯一编辑面。Gateway 是所有者，但不是执行者：它把值以 `ACOWORK_MAX_UPLOAD_BYTES` 注入自己拉起的 user 服务与本地 node 进程（Runtime 继承 node 的 env），执行点仍只有共享内核的 `upload::max_file_bytes()` 一处读取——因此不再存在「前端常量 / 后端常量 / 部署 env」三份镜像。**已知天花板**：注入发生在进程启动时，`PUT /api/config` 的改动对新起的上传进程生效（user 服务与 Runtime 需重启），远端（BYO）节点的 Runtime 由自己的 node 持有 env，不受本 Gateway 管辖。
 - **输入校验**：`uploadId` MUST 服务端生成（客户端不可自选，防路径穿越进 `.uploads/`）；`{offset}` MUST 为非负整数且为块大小（2 MiB）整数倍，否则 400。
 - **单写者与竞态**：一个 `uploadId` 同一时刻只接受一个写者——跨会话续传（D8）下第二个写者的 PUT MUST 409；complete 进行中到达的 PUT MUST 拒绝；complete 成功后重复调用 MUST 幂等返回同一元数据。
