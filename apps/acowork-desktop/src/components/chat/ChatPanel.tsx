@@ -2797,7 +2797,11 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           />
 
           {/* Bottom strip — model / reasoning / workspace / read visibility,
-              transparent on the page background just below the capsule.
+              transparent on the page background just below the capsule, its
+              first button starting where the `+` circle ends: `pl-[38px]` is
+              the capsule's left border (1) + inner padding (5) + the 32px
+              circle, so the strip hangs off that circle's right edge instead
+              of starting under it.
               `@container/tb` + `setToolbarRef` stay here: the fold engine
               measures THIS row and folds the labelled buttons to icons as the
               panel narrows, left to right (`data-toolbar-cluster="left"`,
@@ -2807,7 +2811,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
               labels the full width. */}
           <div
             ref={setToolbarRef}
-            className="@container/tb mt-0.5 flex items-center gap-2 px-3 py-0.5 min-w-[264px]"
+            className="@container/tb mt-0.5 flex items-center gap-2 pl-[38px] pr-3 py-0.5 min-w-[264px]"
           >
             <div
               data-toolbar-cluster="left"
