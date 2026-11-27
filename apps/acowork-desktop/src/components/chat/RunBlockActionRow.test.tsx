@@ -403,6 +403,7 @@ describe("RunBlockActionRow", () => {
           "c1",
           expect.any(File),
           expect.any(Function),
+          expect.any(AbortSignal),
         ),
       );
       expect(document.querySelector('[data-run-attachment="att-spec.pdf"]')).not.toBeNull();

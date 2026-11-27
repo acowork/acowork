@@ -673,6 +673,42 @@ describe("chat attachment upload (ADR-122)", () => {
     expect(urls.some((u) => u.endsWith("/files"))).toBe(false);
   });
 
+  it("stops mid-way on cancel and releases the chunks that landed", async () => {
+    const chunk = 2 * 1024 * 1024;
+    const file = new File([new Uint8Array(chunk * 2)], "big.mp4", { type: "video/mp4" });
+    const controller = new AbortController();
+    let puts = 0;
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith("/uploads")) return { ok: true, json: async () => ({ uploadId: "u-9" }) };
+      if (init?.method === "PUT") {
+        puts += 1;
+        // The user cancels while the second chunk is on the wire; the abort
+        // rejects that fetch the way the browser does.
+        if (puts === 2) {
+          controller.abort();
+          throw Object.assign(new Error("aborted"), { name: "AbortError" });
+        }
+        return { ok: true, json: async () => ({ received: chunk }) };
+      }
+      return { ok: false, status: 503, json: async () => ({}), text: async () => "" };
+    });
+
+    await expect(
+      useChatSessionStore.getState().upload("cs-1", file, undefined, controller.signal),
+    ).rejects.toThrow();
+
+    const deletes = fetchMock.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === "DELETE",
+    );
+    // Chunks already on the server are dropped now, not left for the 24 h
+    // sweep: one DELETE, naming the upload that was cancelled.
+    expect(deletes).toHaveLength(1);
+    expect(String(deletes[0]![0])).toContain("/api/chat-sessions/cs-1/uploads/u-9");
+    // And the half-written upload is never landed.
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/complete"))).toBe(false);
+  });
+
   it("keeps the single-request route under one chunk (D9)", async () => {
     const file = new File([new Uint8Array(1024)], "small.pdf", { type: "application/pdf" });
     fetchMock.mockImplementation(async (url: string) => {

@@ -45,6 +45,21 @@ pub async fn upload_file(
         .map_err(|e| e.to_string())
 }
 
+/// Stop an upload in progress.
+///
+/// Records the intent and returns: an `invoke` already in flight cannot be
+/// aborted, so `upload_file`'s chunk loop notices at its next chunk boundary
+/// (≤ 2 MiB away), releases the chunks that landed, and fails with "upload
+/// cancelled". The caller removes the chip itself — waiting for the loop to
+/// come back would leave a frozen 40% on screen for a whole chunk.
+#[tauri::command]
+pub async fn cancel_upload(state: State<'_, AppState>, file_path: String) -> Result<(), String> {
+    // Deliberately not `state.gateway.read()`: the upload that is being
+    // cancelled holds that read lock for its whole duration.
+    state.upload_cancels.request(&file_path);
+    Ok(())
+}
+
 /// Return the size of a file on disk in bytes.
 ///
 /// Used by the chat panel as a pre-flight check before `upload_file`:

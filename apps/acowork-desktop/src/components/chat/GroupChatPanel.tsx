@@ -882,7 +882,8 @@ export function GroupChatPanel() {
   const [uploading, setUploading] = useState(false);
   // In-flight uploads for the tray below. This panel owns both group chats and
   // one-to-one DMs, so a large attachment to another human lands here.
-  const { uploadingFiles, begin: beginUpload } = useUploadingFiles();
+  const { uploadingFiles, begin: beginUpload, cancel: cancelUpload } =
+    useUploadingFiles();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // @-mention autocomplete: the active token under the caret + which popup
@@ -1439,7 +1440,7 @@ export function GroupChatPanel() {
           try {
             const meta = await useChatSessionStore
               .getState()
-              .upload(activeGroupId, f, tracker.onProgress);
+              .upload(activeGroupId, f, tracker.onProgress, tracker.signal);
             setPendingAttachments((prev) => [...prev, meta]);
           } finally {
             tracker.done();
@@ -2089,7 +2090,10 @@ export function GroupChatPanel() {
                 same grammar as the 1:1 chat composer. */}
             {(uploadingFiles.length > 0 || pendingAttachments.length > 0) && (
               <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
-                <UploadingFileChips files={uploadingFiles} />
+                <UploadingFileChips
+                  files={uploadingFiles}
+                  onCancel={cancelUpload}
+                />
                 {pendingAttachments.map((a) => (
                   <ChatAttachmentChip
                     key={a.id}

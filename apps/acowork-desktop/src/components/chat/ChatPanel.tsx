@@ -1465,6 +1465,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
       localUrl,
       filename,
       sizeBytes: fileSize,
+      filePath,
     }]);
 
     try {
@@ -1549,8 +1550,14 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     }
   };
 
-  // Remove a pending attachment chip
+  // Remove a pending attachment chip. While its upload is still running the X
+  // means "stop", not "hide": the invoke is already on the wire, so the chip
+  // goes away at once and the backend is told to drop it at the next chunk.
   const handleRemovePending = (tempId: string) => {
+    const target = session.pendingAttachedItems.find((p) => p.tempId === tempId);
+    if (target?.status === "uploading" && target.filePath) {
+      void invoke("cancel_upload", { filePath: target.filePath });
+    }
     session.setPendingAttachedItems(prev => prev.filter((p) => p.tempId !== tempId));
   };
 

@@ -131,6 +131,11 @@ pub struct AppState {
     /// Exposed here so the Tauri command layer can mirror the webview's
     /// token without reaching into the HTTP client.
     pub gateway_auth: Arc<GatewayAuth>,
+    /// Files whose chunked upload the user asked to stop (ADR-122 §3). Shared
+    /// with the [`GatewayClient`] held above, and held here as well so the
+    /// cancel command does not have to queue behind the upload's own read
+    /// lock — a cancel that waits for the upload it cancels is no cancel.
+    pub upload_cancels: Arc<crate::gateway_client::UploadCancels>,
     /// Active deployment mode. Set by `set_gateway_config` (called from frontend).
     pub gateway_mode: Arc<tokio::sync::RwLock<GatewayMode>>,
     /// Handle to the locally spawned Gateway process (None in remote mode,
@@ -208,9 +213,11 @@ impl AppState {
         // the `GatewayClient` inside `gateway`.
         let client = GatewayClient::new();
         let gateway_auth = client.auth_handle();
+        let upload_cancels = client.cancel_handle();
         Self {
             gateway: Arc::new(tokio::sync::RwLock::new(client)),
             gateway_auth,
+            upload_cancels,
             gateway_mode: Arc::new(tokio::sync::RwLock::new(GatewayMode::Local)),
             gateway_process: Arc::new(Mutex::new(None)),
             gateway_keep_running_on_exit: Arc::new(AtomicBool::new(false)),

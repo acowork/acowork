@@ -638,6 +638,10 @@ async function uploadChatAttachment(
    *  document chip renders it as `sent / total`, so a slow link is visible
    *  instead of an indefinite spinner. */
   onProgress?: (sent: number) => void,
+  /** Cancels the upload between chunks. The chunk route is cancel-safe: an
+   *  abandoned upload is exactly what the 24 h TTL sweep exists for, and this
+   *  releases its chunks immediately instead of waiting. */
+  signal?: AbortSignal,
 ): Promise<ChatAttachmentMeta> {
   if (file.size <= UPLOAD_CHUNK_BYTES) {
     const form = new FormData();
@@ -654,6 +658,7 @@ async function uploadChatAttachment(
     return resp.json();
   }
 
+  signal?.throwIfAborted();
   // The digest covers the whole file, so the bytes are in memory once — the
   // same footprint the multipart path above had, and the reason it is the
   // digest pass, not the transfer, that bounds this producer's peak.
@@ -672,23 +677,35 @@ async function uploadChatAttachment(
     method: "POST",
     headers: { ...headers, "Content-Type": "application/json" },
     body: JSON.stringify({ name: file.name, size: file.size, sha256, mime: file.type }),
+    signal,
   });
   if (!created.ok) throw new Error(`upload create → ${created.status}`);
   const { uploadId } = (await created.json()) as { uploadId: string };
 
-  for (let offset = 0; offset < file.size; offset += UPLOAD_CHUNK_BYTES) {
-    const end = Math.min(offset + UPLOAD_CHUNK_BYTES, file.size);
-    // A `subarray` view, not a copy: the chunk is written straight out of the
-    // buffer the digest already read.
-    const resp = await fetch(`${base}/${uploadId}/${offset}`, {
-      method: "PUT",
-      headers,
-      body: bytes.subarray(offset, end),
-    });
-    if (!resp.ok) throw new Error(`upload chunk at ${offset} → ${resp.status}`);
-    // After the server accepted the chunk, never before: a reported offset is
-    // one a resume could start from.
-    onProgress?.(end);
+  try {
+    for (let offset = 0; offset < file.size; offset += UPLOAD_CHUNK_BYTES) {
+      const end = Math.min(offset + UPLOAD_CHUNK_BYTES, file.size);
+      // A `subarray` view, not a copy: the chunk is written straight out of the
+      // buffer the digest already read.
+      const resp = await fetch(`${base}/${uploadId}/${offset}`, {
+        method: "PUT",
+        headers,
+        body: bytes.subarray(offset, end),
+        signal,
+      });
+      if (!resp.ok) throw new Error(`upload chunk at ${offset} → ${resp.status}`);
+      // After the server accepted the chunk, never before: a reported offset is
+      // one a resume could start from.
+      onProgress?.(end);
+    }
+  } catch (err) {
+    if (signal?.aborted) {
+      // Release the chunks that did land rather than leaving a cancelled
+      // upload's bytes on the server until the sweep. Best effort: a failure
+      // here only means the sweep does it later.
+      void fetch(`${base}/${uploadId}`, { method: "DELETE", headers }).catch(() => {});
+    }
+    throw err;
   }
 
   const done = await fetch(
@@ -992,6 +1009,7 @@ interface ChatSessionStore {
     chatSessionId: string,
     file: File,
     onProgress?: (sent: number) => void,
+    signal?: AbortSignal,
   ): Promise<ChatAttachmentMeta>;
   /** The doorbell reaction: re-read every session that could be on screen. */
   wake(): Promise<void>;
@@ -1415,8 +1433,8 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     return ok;
   },
 
-  upload: (chatSessionId, file, onProgress) =>
-    uploadChatAttachment(chatSessionId, file, onProgress),
+  upload: (chatSessionId, file, onProgress, signal) =>
+    uploadChatAttachment(chatSessionId, file, onProgress, signal),
 
   wake: () => wakeCoalesced(get),
 }));

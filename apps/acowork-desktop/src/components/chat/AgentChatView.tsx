@@ -582,7 +582,8 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   >([]);
   // In-flight uploads: the finished chip needs the server's meta, so the
   // bytes on the wire are only visible through this tray.
-  const { uploadingFiles, begin: beginUpload } = useUploadingFiles();
+  const { uploadingFiles, begin: beginUpload, cancel: cancelUpload } =
+    useUploadingFiles();
   const [uploading, setUploading] = useState(false);
   // Workspace references added with "Add to Chat" (rendered by
   // `AttachedContextChips`). They are content: a human who points at a file and
@@ -1026,7 +1027,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
       for (const f of files) {
         const tracker = beginUpload(f);
         try {
-          const meta = await upload(sessionId, f, tracker.onProgress);
+          const meta = await upload(
+            sessionId,
+            f,
+            tracker.onProgress,
+            tracker.signal,
+          );
           setPendingAttachments((prev) => [...prev, meta]);
         } finally {
           tracker.done();
@@ -1581,7 +1587,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         <AttachedContextChips surface="chat" />
         {(uploadingFiles.length > 0 || pendingAttachments.length > 0) && (
           <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
-            <UploadingFileChips files={uploadingFiles} />
+            <UploadingFileChips files={uploadingFiles} onCancel={cancelUpload} />
             {pendingAttachments.map((a) => (
               <ChatAttachmentChip
                 key={a.id}

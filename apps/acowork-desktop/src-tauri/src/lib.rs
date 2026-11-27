@@ -27,7 +27,7 @@
 
 pub mod browser;
 mod commands;
-mod gateway_client;
+pub mod gateway_client;
 mod hub_client;
 mod mqtt_client;
 mod navigation_guard;
@@ -657,6 +657,7 @@ pub fn run() {
             commands::agent::upload_agent_file,
             commands::agent::upload_user_avatar_file,
             commands::chat::upload_file,
+            commands::chat::cancel_upload,
             commands::vault::list_keys,
             commands::vault::add_key,
             commands::vault::remove_key,

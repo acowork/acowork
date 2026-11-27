@@ -194,7 +194,8 @@ export function RunBlockActionRow({
   const [uploading, setUploading] = useState(false);
   // Same in-flight tray as the two chat composers: this drawer uploads through
   // the same `upload()`, so it would otherwise show a dead spinner.
-  const { uploadingFiles, begin: beginUpload } = useUploadingFiles();
+  const { uploadingFiles, begin: beginUpload, cancel: cancelUpload } =
+    useUploadingFiles();
 
   const handleFilesChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
@@ -207,7 +208,7 @@ export function RunBlockActionRow({
         try {
           const meta = await useChatSessionStore
             .getState()
-            .upload(chatSessionId, f, tracker.onProgress);
+            .upload(chatSessionId, f, tracker.onProgress, tracker.signal);
           setPendingAttachments((prev) => [...prev, meta]);
         } finally {
           tracker.done();
@@ -435,6 +436,14 @@ export function RunBlockActionRow({
                   ? `${Math.min(100, Math.round(((u.sentBytes ?? 0) / u.sizeBytes) * 100))}%`
                   : "…"}
               </span>
+              <button
+                type="button"
+                onClick={() => cancelUpload(u.key)}
+                aria-label={t("chatPanel.removeAttachment")}
+                className="shrink-0 text-text-tertiary hover:text-text"
+              >
+                <X className="h-3 w-3" strokeWidth={1.75} />
+              </button>
             </span>
           ))}
           {pendingAttachments.length > 0 && (

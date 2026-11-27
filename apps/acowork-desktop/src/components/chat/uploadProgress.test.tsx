@@ -29,6 +29,28 @@ describe("useUploadingFiles", () => {
     expect(result.current.uploadingFiles).toEqual([]);
   });
 
+  it("aborts exactly the file the X was pressed on", () => {
+    const { result } = renderHook(() => useUploadingFiles());
+
+    let a!: ReturnType<typeof result.current.begin>;
+    let b!: ReturnType<typeof result.current.begin>;
+    act(() => {
+      a = result.current.begin(fileOf("a.mp4", 10));
+      b = result.current.begin(fileOf("a.mp4", 20));
+    });
+    const [firstKey, secondKey] = [result.current.uploadingFiles[0].key, result.current.uploadingFiles[1].key];
+
+    act(() => result.current.cancel(firstKey));
+
+    expect(a.signal.aborted).toBe(true);
+    expect(b.signal.aborted).toBe(false);
+
+    // The surface drops the chip in its own `finally`; nothing here hides it,
+    // so a transfer that is somehow unkillable stays visible.
+    act(() => a.done());
+    expect(result.current.uploadingFiles.map((u) => u.key)).toEqual([secondKey]);
+  });
+
   it("reports only the file that moved, not its namesake", () => {
     const { result } = renderHook(() => useUploadingFiles());
 
