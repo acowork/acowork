@@ -70,16 +70,23 @@ pub fn max_attachment_bytes() -> u64 {
 /// reaches a path — but it does reach a response header.
 const MAX_FILENAME_CHARS: usize = 200;
 
-/// Memory budget for decoding one image to build a thumbnail (128 MiB).
+/// Memory budget for decoding one image to build a thumbnail (48 MiB).
+///
+/// This is a *transient* ceiling on one decode, not a reservation and never a
+/// disk cost: the stored thumbnail is [`THUMB_MAX_EDGE`] px regardless, the
+/// bytes below are only what the decoder must hold while shrinking the source.
+/// "Decode then shrink" is all `image` offers, so the peak is the source's
+/// pixels, `w * h * 3` — 48 MiB covers a 16 MP photograph (a 12 MP phone photo
+/// peaks at 36 MB), which is every screenshot and essentially every chat
+/// attachment, and refuses the rest instead of materializing them.
 ///
 /// The bound is on **decoded pixels**, not on the file: a 2 MiB JPEG can
 /// decode to 300 MB and a 60 MB photograph can decode to 12 MB, so a
-/// file-size gate guesses wrong in both directions. `image`'s decoder refuses
-/// an image whose allocations would exceed this, which is the cost a decode
-/// actually incurs — past it the upload still succeeds and the chat row falls
-/// back to the plain file chip. Still a rendering budget, not an upload
-/// ceiling: the two were one number only while uploads were single-request.
-const MAX_THUMB_DECODE_BYTES: u64 = 128 * 1024 * 1024;
+/// file-size gate guesses wrong in both directions. Past the budget the upload
+/// still succeeds and the chat row falls back to the plain file chip. Still a
+/// rendering budget, not an upload ceiling: the two were one number only while
+/// uploads were single-request.
+const MAX_THUMB_DECODE_BYTES: u64 = 48 * 1024 * 1024;
 
 /// Longest edge of a stored image thumbnail, in pixels. 320 px renders
 /// sharp in the 160 px chat tile at 2× and keeps a 25 MB screenshot under
