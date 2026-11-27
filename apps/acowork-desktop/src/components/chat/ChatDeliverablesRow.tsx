@@ -20,8 +20,9 @@
  * A workspace deliverable is `(workspace_id, rel_path)` — the same coordinates
  * the workspace panel uses. Clicking one goes through the **same chat-side
  * rule every other clickable reference in chat uses**
- * (`pickOpenActionForPath`: a format with an in-app viewer — image, PDF,
- * Office, craft document — opens there, source and data files open in Monaco),
+ * (`pickOpenActionForPath`: a format with an in-app viewer — image, Markdown,
+ * HTML, PDF, Office, craft document — opens there, source and data files open
+ * in Monaco),
  * so it lands in the *existing* editor tab and there is no second viewer to
  * maintain. Binary formats in particular must not take the text path: the read
  * interface returns them base64-encoded, which is what used to render as a wall

@@ -179,10 +179,10 @@ describe("ChatDeliverablesRow", () => {
     );
     expect(openFile).not.toHaveBeenCalled();
 
-    // A document keeps the chat-side rule: source in Monaco, not a rendered
-    // preview (the same decision `openWorkspaceRef` makes for a ref chip).
+    // A Markdown document previews too — the same answer the workspace tree
+    // gives it, so one file does not open differently per surface.
     fireEvent.click(screen.getByText("report.md"));
-    expect(openFile).toHaveBeenLastCalledWith("a1", "ws-1", "docs/report.md");
+    expect(openPreview).toHaveBeenLastCalledWith("a1", "ws-1", "docs/report.md");
   });
 
   it("falls back to a chip when the bytes cannot be fetched", async () => {
@@ -224,6 +224,8 @@ describe("ChatDeliverablesRow", () => {
     fireEvent.click(screen.getByTestId("deliverable-copy-link"));
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(report.rel_path));
+    // The copy is a sibling of the card: it must not also open the file.
     expect(openFile).not.toHaveBeenCalled();
+    expect(openPreview).not.toHaveBeenCalled();
   });
 });

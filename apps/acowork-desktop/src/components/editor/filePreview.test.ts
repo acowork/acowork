@@ -48,15 +48,16 @@ describe("pickOpenActionForPath", () => {
     });
 
     /**
-     * The one place the chat rule departs from the workspace-panel rule, and
-     * the reason the two are not simply the same function: a Markdown link in
-     * a chat message is already rendered prose, so clicking it must open the
-     * editor, not another render.
+     * Markdown is NOT a chat-side exception any more: the same file opened from
+     * the workspace tree previews, so a message link that opened the source
+     * gave one file two answers depending on where it was clicked.
      */
-    it("prefers the source editor for Markdown, unlike the workspace tree", () => {
-        for (const p of ["notes.md", "docs/adr/ADR-119.md"]) {
+    it("previews Markdown, exactly like the workspace tree", () => {
+        for (const p of ["notes.md", "docs/adr/ADR-119.md", "README.MD"]) {
             expect(isWorkspacePreviewable(p)).toBe(true);
-            expect(pickOpenActionForPath(p)).toBe("openFile");
+            expect(pickOpenActionForPath(p)).toBe("openPreview");
         }
+        // `.mdx` has no renderer in the panel either, so it stays on source.
+        expect(pickOpenActionForPath("post.mdx")).toBe("openFile");
     });
 });

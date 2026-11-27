@@ -28,12 +28,12 @@
 //     built-in viewer, so a craft app is their only in-app renderer.
 //   - Everything else (JSON, source code, configs) → Monaco source editor.
 //
-// NB: two rules live here, and they are intentionally different. The table
-// below is the **workspace-panel** rule; `pickOpenActionForPath` at the foot of
-// this file is the **chat-side** rule (images only), because a chat click on a
-// `.md` file expects source, not a re-render. Don't unify them — and don't move
-// either one into a consumer: deciding how a file opens must not require the
-// markdown renderer, the toast system or any store.
+// NB: the table below is the **workspace-panel** rule; `pickOpenActionForPath`
+// at the foot of this file answers the same question for a chat-side click, and
+// gives the same answer, so a file opened from the tree and from a message
+// lands in the same mode. Neither rule may move into a consumer: deciding how a
+// file opens must not require the markdown renderer, the toast system or any
+// store.
 
 /** Native craft documents: the app iframe renders them, no built-in viewer. */
 export const NATIVE_CRAFT_EXTS: readonly string[] = [
@@ -157,22 +157,23 @@ export function isWorkspacePreviewable(name: string): boolean {
 }
 
 /**
- * Chat-side companion rule: a file opens in the preview viewer when the
- * workspace panel would preview it — images, PDF/Office documents, and the
- * craft-app files — **except** for the text formats where a chat click means
- * "show me the source".
+ * Which editor action opens a chat-side file reference.
  *
- * `*.md` / `*.mdx` are the exception on purpose: a Markdown link inside a
- * message sits in already-rendered prose, so re-rendering it is a dead end and
- * editing it is the useful action. The workspace tree has the opposite
- * default because its whole job is browsing documents.
+ * Same answer as the workspace panel: a format with an in-app viewer opens in
+ * it — images, Markdown, HTML, CSV, PDF/Office and craft-app files. Everything
+ * else (JSON, source code, configs) goes to Monaco, which streams the multi-MB
+ * files that froze the page when routed through `MarkdownPreviewView`.
  *
- * Everything else — JSON, HTML, CSV, source code — goes to Monaco on both
- * surfaces: it streams multi-MB files, whereas routing them through
- * `MarkdownPreviewView` used to freeze the page. Binary formats are NOT in
- * that set: reading one through the text path returns base64 (the read
- * interface has no binary channel), which is exactly why a click must never
- * fall back to `openFile` for them.
+ * Markdown is NOT special-cased. It used to be, on the theory that a `.md`
+ * link inside rendered prose is "already rendered" and the useful action is
+ * editing — but the same file opened from the workspace tree defaulted to
+ * preview, so one file had two answers depending on where it was clicked.
+ * Preview first, source one toggle away, on both surfaces.
+ *
+ * Binary formats must never fall through to `openFile`: the read interface has
+ * no binary channel and returns base64, which renders as a wall of characters
+ * (which is why the previewable set is a table, not a "preview unless source"
+ * deny-list).
  *
  * This is the single rule for "the user clicked a file reference in chat",
  * shared by:
@@ -189,11 +190,6 @@ export function isWorkspacePreviewable(name: string): boolean {
  * Case-insensitive; matched at the end so a bare name, a workspace-relative
  * path and an absolute path all answer the same way.
  */
-const CHAT_SOURCE_PREFERRED_EXT = /\.(?:md|mdx)$/i;
-
-/** Which editor action opens a chat-side file reference. */
 export function pickOpenActionForPath(path: string): "openFile" | "openPreview" {
-    return isWorkspacePreviewable(path) && !CHAT_SOURCE_PREFERRED_EXT.test(path)
-        ? "openPreview"
-        : "openFile";
+    return isWorkspacePreviewable(path) ? "openPreview" : "openFile";
 }
