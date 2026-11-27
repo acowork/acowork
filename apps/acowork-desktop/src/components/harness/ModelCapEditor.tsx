@@ -154,14 +154,14 @@ export function ModelCapEditor({
                 value={caps.default_reasoning_effort ?? "auto"}
                 onChange={(v) => update("default_reasoning_effort", v)}
                 options={[
-                  { value: "auto", label: "Auto" },
-                  { value: "off", label: "Off" },
-                  { value: "minimal", label: "Minimal" },
-                  { value: "low", label: "Low" },
-                  { value: "medium", label: "Medium" },
-                  { value: "high", label: "High" },
-                  { value: "xhigh", label: "XHigh" },
-                  { value: "max", label: "Max" },
+                  { value: "auto", label: "auto" },
+                  { value: "off", label: "off" },
+                  { value: "minimal", label: "minimal" },
+                  { value: "low", label: "low" },
+                  { value: "medium", label: "medium" },
+                  { value: "high", label: "high" },
+                  { value: "xhigh", label: "xhigh" },
+                  { value: "max", label: "max" },
                 ]}
               />
             </div>

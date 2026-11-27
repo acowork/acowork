@@ -3550,7 +3550,10 @@ export function ReasoningEffortMenu({
   ];
 
   const currentOpt = OPTIONS.find((o) => o.value === effort);
-  const effortLabel = currentOpt?.label ?? "Auto";
+  // An effort the current model does not declare (an older session, a model
+  // swapped under it) falls back to the "auto" label rather than a hard-coded
+  // English one that would then disagree with the menu.
+  const effortLabel = currentOpt?.label ?? OPTIONS[0].label;
   const currentColor = currentOpt?.color ?? "#22c55e";
 
   useEffect(() => {
