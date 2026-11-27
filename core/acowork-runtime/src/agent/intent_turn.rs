@@ -1129,8 +1129,24 @@ pub async fn post_intent_response(
 /// A message that arrives without its file is still the message; refusing the
 /// whole turn because a blob expired would lose news the sender already
 /// committed to sending.
-pub async fn pull_intent_attachments(
+/// The transfer attachments this delivery declares, parsed off the turn's
+/// params (ADR-122 §4.3 D11).
+///
+/// Parsed where the delivery is *addressed* and pulled where the turn *runs*:
+/// the dispatch loop must never wait on a transfer, so it carries only the
+/// metadata and the session task does the download. Empty means "this intent
+/// carried no attachment" — the same degrade an older sender gets.
+pub fn transfer_attachments_from_params(
     params: &Value,
+) -> Vec<acowork_core::protocol::IntentAttachmentMeta> {
+    params
+        .get(acowork_core::protocol::INTENT_ATTACHMENTS_PARAM)
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+pub async fn pull_intent_attachments(
+    metas: &[acowork_core::protocol::IntentAttachmentMeta],
     work_dir: &std::path::Path,
     // `http://host:port` of the Gateway — composed by the caller, so the pull
     // needs no global port lookup and a test can point it at a stand-in.
@@ -1138,13 +1154,9 @@ pub async fn pull_intent_attachments(
     node_token: &str,
     instance_id: &str,
 ) -> Vec<acowork_core::protocol::AttachedItem> {
-    use acowork_core::protocol::{AttachedItem, IntentAttachmentMeta};
+    use acowork_core::protocol::AttachedItem;
     use tokio::io::AsyncWriteExt as _;
 
-    let metas: Vec<IntentAttachmentMeta> = params
-        .get(acowork_core::protocol::INTENT_ATTACHMENTS_PARAM)
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
     if metas.is_empty() {
         return Vec::new();
     }
@@ -1167,7 +1179,7 @@ pub async fn pull_intent_attachments(
     };
 
     let mut items = Vec::with_capacity(metas.len());
-    for meta in metas {
+    for meta in metas.iter() {
         // The name arrives from another agent: keep only its last component
         // and drop anything a filesystem would reinterpret, so a crafted name
         // cannot walk out of the inbox.

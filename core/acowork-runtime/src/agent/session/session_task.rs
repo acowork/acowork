@@ -273,6 +273,18 @@ pub enum SessionMessage {
         kind: String,
         /// Chat attachment ids from a human Chat message. Runtime pulls from Gateway HTTP.
         chat_attachment_ids: Vec<String>,
+        /// ADR-122 §4.3 (D13): files a peer sent with this intent, as transfer
+        /// references. Metadata only — same shape of work as
+        /// `chat_attachment_ids` above, and pulled in the same place: this
+        /// session's own task, before the turn is built.
+        ///
+        /// Deliberately NOT pulled on the inbound dispatch loop. That loop
+        /// feeds every session of this agent one message at a time, so a
+        /// download there would stall unrelated turns — a 1 GiB attachment,
+        /// or a transfer that never answers, would freeze the agent for the
+        /// whole transfer timeout. Landing the files is this round's
+        /// prerequisite, not a routing decision.
+        transfer_attachments: Vec<acowork_core::protocol::IntentAttachmentMeta>,
         /// ADR-100: the ADR-046 attachment union the sender carried — for a
         /// human Chat turn, the workspace references ("Add to Chat") picked on
         /// the surface. Unlike `chat_attachment_ids` these need no pull: the
@@ -1517,6 +1529,7 @@ impl SessionTask {
                     repo: _,
                     kind,
                     chat_attachment_ids,
+                    transfer_attachments,
                     attached_items,
                     in_reply_to,
                     chat_row_id,
@@ -1796,13 +1809,59 @@ impl SessionTask {
                             Some(items)
                         }
                     };
+                    // ADR-122 §4.3 D13: a peer's files land here — on this
+                    // session's own task, right before the turn that needs
+                    // them. The inbound dispatch loop carried only the
+                    // references, so a slow transfer costs this round's start
+                    // and nothing else on the agent.
+                    let pulled_transfers = if transfer_attachments.is_empty() {
+                        Vec::new()
+                    } else {
+                        let gateway_host = agent_loop
+                            .core
+                            .config
+                            .gateway_host
+                            .clone()
+                            .unwrap_or_else(|| "127.0.0.1".to_string());
+                        let gateway_base = format!(
+                            "http://{gateway_host}:{}",
+                            acowork_core::defaults::gateway_http_port()
+                        );
+                        let node_token = agent_loop
+                            .core
+                            .config
+                            .mqtt_password
+                            .clone()
+                            .unwrap_or_default();
+                        let instance = agent_loop.core.config.agent_instance_id.clone();
+                        let work_dir = std::path::PathBuf::from(&agent_loop.core.config.work_dir);
+                        let pulled = crate::agent::intent_turn::pull_intent_attachments(
+                            &transfer_attachments,
+                            &work_dir,
+                            &gateway_base,
+                            &node_token,
+                            &instance,
+                        )
+                        .await;
+                        if pulled.len() < transfer_attachments.len() {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                declared = transfer_attachments.len(),
+                                landed = pulled.len(),
+                                "intent attachment(s) unavailable — turn continues with what landed"
+                            );
+                        }
+                        pulled
+                    };
                     // ADR-100: the workspace references ("Add to Chat") join
                     // the pulled uploads. They need no pull — the path is
                     // node-local and this agent's own tools read it — so they
                     // arrive as parsed. One hint for the union, in the order the
                     // composer attached them.
-                    intent_attached_items =
-                        merge_intent_attachments(intent_attached_items.take(), attached_items);
+                    intent_attached_items = merge_intent_attachments(
+                        merge_intent_attachments(intent_attached_items.take(), pulled_transfers),
+                        attached_items,
+                    );
                     if let Some(items) = intent_attached_items.as_ref() {
                         llm_message = build_attachment_hint(
                             &llm_message,

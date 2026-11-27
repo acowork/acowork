@@ -10,7 +10,7 @@
 //! The pull takes the Gateway base URL as an argument (rather than looking up
 //! a port), which is what lets a stand-in server stand in for the Gateway.
 
-use acowork_runtime::agent::intent_turn::pull_intent_attachments;
+use acowork_runtime::agent::intent_turn::{pull_intent_attachments, transfer_attachments_from_params};
 
 #[tokio::test]
 async fn an_intent_attachment_is_streamed_into_the_workspace() {
@@ -48,8 +48,10 @@ async fn an_intent_attachment_is_streamed_into_the_workspace() {
         ]
     });
 
+    // Parsed the way the dispatcher parses it, then pulled the way the session
+    // task pulls it — the two halves of D11/D13 in one path.
     let items = pull_intent_attachments(
-        &params,
+        &transfer_attachments_from_params(&params),
         &work_dir,
         &gateway,
         "node-token-1",
@@ -105,7 +107,14 @@ async fn a_peer_filename_cannot_walk_out_of_the_inbox() {
         ]
     });
 
-    let items = pull_intent_attachments(&params, &work_dir, &gateway, "", "inst-receiver").await;
+    let items = pull_intent_attachments(
+        &transfer_attachments_from_params(&params),
+        &work_dir,
+        &gateway,
+        "",
+        "inst-receiver",
+    )
+    .await;
     assert_eq!(items.len(), 1);
     assert!(
         !work_dir.parent().unwrap().join("evil.txt").exists(),
@@ -146,7 +155,14 @@ async fn a_refused_transfer_leaves_no_file() {
         ]
     });
 
-    let items = pull_intent_attachments(&params, &work_dir, &gateway, "", "inst-receiver").await;
+    let items = pull_intent_attachments(
+        &transfer_attachments_from_params(&params),
+        &work_dir,
+        &gateway,
+        "",
+        "inst-receiver",
+    )
+    .await;
     assert!(items.is_empty(), "a refused transfer yields no reference");
     let inbox = work_dir.join("intent-attachments");
     let leftovers: Vec<String> = std::fs::read_dir(&inbox)
@@ -166,7 +182,7 @@ async fn an_intent_without_attachments_pulls_nothing() {
     let dir = tempfile::tempdir().expect("temp dir");
     let work_dir = dir.path().to_path_buf();
     let items = pull_intent_attachments(
-        &serde_json::json!({ "message": "hi" }),
+        &transfer_attachments_from_params(&serde_json::json!({ "message": "hi" })),
         &work_dir,
         "http://127.0.0.1:1",
         "",
@@ -178,4 +194,49 @@ async fn an_intent_without_attachments_pulls_nothing() {
         !work_dir.join("intent-attachments").exists(),
         "no inbox is created for a turn with no attachments"
     );
+}
+/// The invariant that keeps the agent responsive: **reading the declaration
+/// costs no I/O**.
+///
+/// The routing/dispatch path is one loop feeding every session of the agent, so
+/// it may only ever parse the reference list — a download there would stall
+/// unrelated turns behind one slow transfer (the defect this split exists to
+/// prevent). Bytes are fetched later, by the session task that runs the turn.
+/// A regression that pulls early shows up here as a request this mock refuses
+/// to serve.
+#[tokio::test]
+async fn reading_the_declaration_performs_no_request() {
+    let mut server = mockito::Server::new_async().await;
+    let transfer_id = "44444444-4444-4444-8444-444444444444";
+    let must_not_be_called = server
+        .mock("GET", format!("/api/transfers/{transfer_id}/content").as_str())
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(b"never pulled here".as_slice())
+        .expect(0)
+        .create_async()
+        .await;
+
+    let params = serde_json::json!({
+        acowork_core::protocol::INTENT_ATTACHMENTS_PARAM: [
+            { "id": transfer_id, "name": "big.bin", "mime": "application/octet-stream",
+              "size": 4, "sha256": "" }
+        ]
+    });
+    let declared = transfer_attachments_from_params(&params);
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared[0].name, "big.bin");
+
+    must_not_be_called.assert_async().await;
+    // The turn is the only thing that ever touches the bytes.
+    let dir = tempfile::tempdir().unwrap();
+    let pulled = pull_intent_attachments(
+        &declared,
+        dir.path(),
+        &format!("http://{}", server.socket_address()),
+        "",
+        "inst-receiver",
+    )
+    .await;
+    assert_eq!(pulled.len(), 1, "the turn's own pull is what lands the file");
 }

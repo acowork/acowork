@@ -2274,6 +2274,11 @@ async fn deliver_turn(
                     &envelope.params,
                 )
                 .unwrap_or_default(),
+                // ADR-122 §4.3 D13: references, pulled by the session task
+                // that runs the turn — never on this routing path.
+                transfer_attachments: crate::agent::intent_turn::transfer_attachments_from_params(
+                    &envelope.params,
+                ),
                 in_reply_to: envelope.in_reply_to.clone(),
                 // ADR-106 D3: the Chat row this turn answers, as
                 // declared by the Gateway. A router-bound turn

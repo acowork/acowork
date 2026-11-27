@@ -97,6 +97,7 @@ composer / mention 上传 >2 MiB 改走 §3；<2 MiB 走现 multipart。群聊�
 - 发送方 Runtime 先经 §3 把字节落 `/transfers/uploads`（**user 服务**共享区，v1.1 钉死；Gateway 只反代），complete 返回 transfer id；transfer 记录 MUST 存 `creator_instance_id`。
 - `intent_send` / `IntentRequest` 增 `attachments`（引用，D11）。**线上只读 `id`**：`{id, size, sha256, name}` 这类声明值一律由 Gateway 从 transfer 记录重新陈述后注入 `params`（§3「声明值不当事实」——发送方多写的键被忽略，不会被当成事实转给接收方）。Gateway 校验 id 存在且**发送方 = 创建者**（`creator_instance_id` 匹配，v1.1），pin 到 intent 行（行即接收方授权，与设计 27 §4.2.1 同构），转发进接收方执行轮。
 - 接收方 Runtime 经 node-auth HTTP 流式 GET 拉字节（D13，`GET /api/transfers/{id}/content?sender=<实例>`，与 `download_chat_attachment` 同形状：Gateway 校验调用方实例身份 → 注入可信身份头 → user 服务按 `granted_to` 授权），落自己 workspace 的 `intent-attachments/` 后按普通工作区引用（`AttachedItem::AttachedFile`）进入本轮。
+- **拉取的执行位置是契约的一部分**：入站分发（Runtime 的 MQTT 分发循环）**MUST NOT** 等待任何 transfer 下载——该循环逐条服务本 agent 的全部会话，一次下载会把无关轮次堵在后面（一个 1 GiB 附件或一个不响应的 transfer，等于让 agent 在整个超时窗口内停止响应）。分发侧只解析引用元数据（`IntentAttachmentMeta`），字节由**运行该轮次的会话任务**在构建轮次之前拉取落地。这与同一条 `SessionMessage::Intent` 上 `chat_attachment_ids` 的既有位置一致。
 - 旧 Gateway / 旧 Runtime 缺 `attachments` 键时降级为「本轮无附件」（与设计 27 对 `chat_attachments` 的降级同构），不整条消息失败。
 - **response 方向首版不带附件**（Q4 定案）：`kind = "response"` 的 intent 中 `attachments` 键 MUST 被忽略且不报错；将来放开是纯增量（字段已在信封上）。
 
