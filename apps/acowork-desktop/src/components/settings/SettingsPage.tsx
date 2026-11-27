@@ -823,6 +823,10 @@ function RecentEventsLog() {
  *  instead of dropping them silently. */
 const UNASSIGNED_NODE_ID = "__unassigned__";
 
+/** Upper bound offered by the Storage panel's upload-ceiling input (100 GiB).
+ *  Only the input's `max` — the enforced ceiling is whatever the Gateway holds. */
+const MAX_UPLOAD_MB = 1024 * 100;
+
 /** Two-level collapsible list: each node row expands to reveal its agents. */
 function NodesTree({
   nodes,
@@ -1182,7 +1186,10 @@ function GeneralTab() {
   const [showResetOnboardingConfirm, setShowResetOnboardingConfirm] = useState(false);
   // Level-1 collapsible cards (same grammar as the Setup panel), default open
   const [logSetupOpen, setLogSetupOpen] = useState(true);
-  const [dataDirectoryOpen, setDataDirectoryOpen] = useState(true);
+  const [storageOpen, setStorageOpen] = useState(true);
+  // Upload ceiling is edited locally and committed on blur: typing "1" on the
+  // way to "1024" would otherwise PUT a 1 MB ceiling on every keystroke.
+  const [uploadLimitMb, setUploadLimitMb] = useState("1024");
   const [aboutOpen, setAboutOpen] = useState(true);
   const [resetOnboardingOpen, setResetOnboardingOpen] = useState(true);
   const { logLevel, setLogLevel, logFileSizeMb, setLogFileSizeMb, logFileCount, setLogFileCount, frontendLogLevel, setFrontendLogLevel } = useSettingsStore();
@@ -1200,9 +1207,27 @@ function GeneralTab() {
         if (cfg.log_file_count !== undefined) {
           setLogFileCount(cfg.log_file_count);
         }
+        if (cfg.max_upload_bytes !== undefined) {
+          setUploadLimitMb(String(Math.round(cfg.max_upload_bytes / (1024 * 1024))));
+        }
       })
       .catch(() => { });
   }, [setLogLevel, setLogFileSizeMb, setLogFileCount]);
+
+  const commitUploadLimit = async () => {
+    const mb = Math.min(MAX_UPLOAD_MB, Math.max(1, parseInt(uploadLimitMb, 10) || 1));
+    setUploadLimitMb(String(mb));
+    const bytes = mb * 1024 * 1024;
+    if (bytes === config?.max_upload_bytes) return;
+    try {
+      const r = await fetch(`${getGatewayUrl()}/api/config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ max_upload_bytes: bytes }),
+      });
+      if (r.ok) setConfig((prev) => (prev ? { ...prev, max_upload_bytes: bytes } : prev));
+    } catch { /* ignore */ }
+  };
 
   const currentLogLevel = config?.log_level || logLevel || "info";
   const currentLogFileSize = config?.log_file_size_mb ?? logFileSizeMb;
@@ -1391,18 +1416,56 @@ function GeneralTab() {
 
       <ListBox dividers={false}>
         <ExpandableRow
-          open={dataDirectoryOpen}
-          onToggle={() => setDataDirectoryOpen((v) => !v)}
-          title={t("settings.dataDirectory")}
-          ariaLabel={t("settings.dataDirectory")}
+          open={storageOpen}
+          onToggle={() => setStorageOpen((v) => !v)}
+          title={t("settings.storage")}
+          ariaLabel={t("settings.storage")}
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
-          <input
-            type="text"
-            value={config?.data_dir ?? "\u2014"}
-            readOnly
-            className={`w-full ${inputReadonly}`}
-          />
+          {/* Data directory */}
+          <div className="mb-3">
+            <label className="block mb-1.5 text-xs text-text-tertiary ">
+              {t("settings.dataDirectory")}
+            </label>
+            <input
+              type="text"
+              value={config?.data_dir ?? "—"}
+              readOnly
+              className={`w-full ${inputReadonly}`}
+            />
+          </div>
+
+          {/* Single-file upload ceiling (ADR-122 D6) */}
+          <div className="mb-3">
+            <label className="block mb-1.5 text-xs text-text-tertiary ">
+              {t("settings.maxUploadSize")}
+            </label>
+            <div className="flex items-center gap-2">
+              <StyledInput
+                type="number"
+                min={1}
+                max={MAX_UPLOAD_MB}
+                value={uploadLimitMb}
+                onChange={(e) => setUploadLimitMb(e.target.value)}
+                onBlur={commitUploadLimit}
+                className="w-20"
+              />
+              <span className="text-xs text-text-tertiary">MB</span>
+            </div>
+            <p className="mt-1 text-10 text-text-tertiary">
+              {t("settings.maxUploadSizeHint")}
+            </p>
+          </div>
+
+          {/* Cache management — ADR-123 reserves this block */}
+          <div>
+            <label className="block mb-1.5 text-xs text-text-tertiary ">
+              {t("settings.cacheManagement")}
+            </label>
+            <p className="text-10 text-text-tertiary">
+              {t("settings.cacheManagementSoon")}
+            </p>
+          </div>
         </ExpandableRow>
       </ListBox>
 

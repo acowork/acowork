@@ -500,6 +500,8 @@ export interface GatewayConfig {
   log_file_size_mb: number;
   /** Maximum number of log files to keep (0 = unlimited, default 20) */
   log_file_count: number;
+  /** Single-file upload ceiling in bytes (ADR-122 D6, default 1 GiB) */
+  max_upload_bytes: number;
 }
 
 /** Generic message response */

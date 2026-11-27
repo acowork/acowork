@@ -414,6 +414,15 @@ pub struct GatewayConfigInfo {
     /// degrades to the documented default instead of failing the call.
     #[serde(default)]
     pub packages_dir: String,
+    /// Single-file upload ceiling in bytes (ADR-122 D6). `default` = the
+    /// shared kernel's value, so a Gateway that predates the field still
+    /// answers with the ceiling its own services are running.
+    #[serde(default = "default_upload_limit")]
+    pub max_upload_bytes: u64,
+}
+
+fn default_upload_limit() -> u64 {
+    acowork_core::upload::max_file_bytes()
 }
 
 impl GatewayClient {

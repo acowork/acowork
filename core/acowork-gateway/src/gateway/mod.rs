@@ -679,6 +679,7 @@ impl Gateway {
                 // authenticates as `user:service` with the shared
                 // internal publisher token.
                 mqtt_password: self.config.mqtt.auth_enabled.then(|| publisher_token.clone()),
+                max_upload_bytes: self.config.max_upload_bytes,
             };
             crate::lifecycle::user_supervisor::start_user_supervisor(
                 supervisor_cfg,
@@ -1656,6 +1657,7 @@ impl Gateway {
                 self.config.node_proxy_port,
                 self.config.node_lsp_relay_port,
                 &self.config.data_dir,
+                self.config.max_upload_bytes,
             )
             .await
             {
@@ -1925,6 +1927,7 @@ mod tests {
             log_level: "info".to_string(),
             log_file_size_mb: 10,
             log_file_count: 20,
+            max_upload_bytes: 1024 * 1024 * 1024,
             timeouts: acowork_core::Timeouts::default(),
             max_iterations: 20,
             dev_mode: true,

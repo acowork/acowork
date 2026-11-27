@@ -60,6 +60,15 @@ pub async fn get_file_size(file_path: String) -> Result<u64, String> {
 /// the ceiling became deployment-configurable (`ACOWORK_MAX_UPLOAD_BYTES`).
 /// Asking the side that enforces it removes the mirror instead of syncing it.
 #[tauri::command]
-pub async fn get_upload_limit_bytes() -> Result<u64, String> {
-    Ok(acowork_core::upload::max_file_bytes())
+pub async fn get_upload_limit_bytes(state: State<'_, AppState>) -> Result<u64, String> {
+    // Ask the Gateway, not this process: the Desktop app does not read the
+    // Gateway's TOML and is not the process that enforces the ceiling, so its
+    // own env would answer 1 GiB on a deployment that configured less.
+    let client = state.gateway.read().await;
+    match client.get_config().await {
+        Ok(cfg) => Ok(cfg.max_upload_bytes),
+        // Gateway unreachable — the local default still beats refusing to
+        // answer, and `upload_file` fails on the same connection anyway.
+        Err(_) => Ok(acowork_core::upload::max_file_bytes()),
+    }
 }

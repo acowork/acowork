@@ -33,6 +33,8 @@ pub struct ConfigResponse {
     pub log_file_size_mb: u64,
     /// Maximum number of log files to keep (0 = unlimited, default 20)
     pub log_file_count: u64,
+    /// Single-file upload ceiling in bytes (ADR-122 D6)
+    pub max_upload_bytes: u64,
     // Auto-sleep (per-agent `idle_timeout_secs`) was retired in
     // Sept 2026 — there is no Gateway-level equivalent to expose.
     pub dev_mode: bool,
@@ -71,6 +73,9 @@ pub struct UpdateConfigRequest {
     /// Maximum number of log files to keep (0 = unlimited)
     #[serde(default)]
     pub log_file_count: Option<u64>,
+    /// Single-file upload ceiling in bytes (ADR-122 D6); must be > 0
+    #[serde(default)]
+    pub max_upload_bytes: Option<u64>,
     // Auto-sleep (`idle_timeout_secs`) was retired in Sept 2026 — the
     // Gateway no longer carries a corresponding field. A legacy client
     // still sending it is harmless: `UpdateConfigRequest` has no
@@ -128,6 +133,7 @@ pub async fn get_config(
         max_output_tokens_limit: config.max_output_tokens_limit,
         log_file_count: config.log_file_count,
         log_file_size_mb: config.log_file_size_mb,
+        max_upload_bytes: config.max_upload_bytes,
         hf_mirrors: config.hf_mirrors.clone(),
     }))
 }
@@ -177,6 +183,15 @@ pub async fn update_config(
     if let Some(count) = body.log_file_count {
         updates.push(format!("log_file_count={}", count));
     }
+    if let Some(bytes) = body.max_upload_bytes {
+        // The value is forwarded verbatim to the enforcing processes, so a
+        // zero would make every upload fail 413 with no way to read the
+        // reason. Reject at the boundary instead.
+        if bytes == 0 {
+            return Err(ApiError::bad_request("max_upload_bytes must be > 0"));
+        }
+        updates.push(format!("max_upload_bytes={}", bytes));
+    }
     if let Some(ref mirrors) = body.hf_mirrors {
         updates.push(format!("hf_mirrors=[{}]", mirrors.join(",")));
     }
@@ -217,6 +232,9 @@ pub async fn update_config(
         }
         if let Some(count) = body.log_file_count {
             config.log_file_count = count;
+        }
+        if let Some(bytes) = body.max_upload_bytes {
+            config.max_upload_bytes = bytes;
         }
         if let Some(ref mirrors) = body.hf_mirrors {
             config.hf_mirrors = mirrors.clone();
@@ -334,6 +352,22 @@ mod tests {
         assert_eq!(req.log_level, Some("debug".to_string()));
         assert!(req.default_provider.is_none());
         assert!(req.default_model.is_none());
+        assert!(req.max_upload_bytes.is_none());
+    }
+
+    /// ADR-122 D6: the ceiling is one number owned by the Gateway config, and
+    /// a `gateway.toml` written before the key existed must still load — with
+    /// the same value the enforcing services fall back to, not a second default.
+    #[test]
+    fn test_max_upload_bytes_falls_back_to_the_shared_ceiling() {
+        let cfg: crate::config::GatewayConfig =
+            toml::from_str(
+                "vault_dir = \"/tmp/v\"
+data_dir = \"/tmp/x\"
+packages_dir = \"/tmp/p\"",
+            )
+            .unwrap();
+        assert_eq!(cfg.max_upload_bytes, acowork_core::upload::max_file_bytes());
     }
 
     #[test]
@@ -390,6 +424,7 @@ mod tests {
             max_output_tokens_limit: 32768,
             log_file_size_mb: 10,
             log_file_count: 20,
+            max_upload_bytes: 1024 * 1024 * 1024,
             hf_mirrors: Vec::new(),
         };
         let json = serde_json::to_string(&resp).unwrap();

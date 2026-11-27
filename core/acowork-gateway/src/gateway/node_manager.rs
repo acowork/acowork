@@ -376,6 +376,7 @@ pub async fn ensure_local_node(
     proxy_port: Option<u16>,
     lsp_relay_port: Option<u16>,
     data_dir: &str,
+    max_upload_bytes: u64,
 ) -> std::io::Result<Arc<LocalNodeSupervisor>> {
     // Step 0: pin the persisted own-machine node id so the reuse
     // window below matches the exact node this launcher saw last.
@@ -426,6 +427,7 @@ pub async fn ensure_local_node(
             local_token.as_deref(),
             proxy_port,
             lsp_relay_port,
+            max_upload_bytes,
         )
         .await?;
         // Background: learn the child's node_id from its identity file
@@ -450,6 +452,7 @@ async fn spawn_and_supervise(
     local_token: Option<&str>,
     proxy_port: Option<u16>,
     lsp_relay_port: Option<u16>,
+    max_upload_bytes: u64,
 ) -> std::io::Result<()> {
     let bin = node_binary();
     // Note: previously this function silently returned Ok(()) when
@@ -470,6 +473,7 @@ async fn spawn_and_supervise(
         local_token,
         proxy_port,
         lsp_relay_port,
+        max_upload_bytes,
     )?;
     tracing::info!(pid = child.id(), binary = %bin.display(), "Local node agent spawned");
 
@@ -499,7 +503,7 @@ async fn spawn_and_supervise(
                 return;
             }
 
-            match spawn_node_child(&bin, mqtt_port, &supervise_packages_dir, supervise_token.as_deref(), proxy_port, lsp_relay_port) {
+            match spawn_node_child(&bin, mqtt_port, &supervise_packages_dir, supervise_token.as_deref(), proxy_port, lsp_relay_port, max_upload_bytes) {
                 Ok(new_child) => {
                     child = new_child;
                     tracing::info!(pid = child.id(), "Local node agent respawned");
@@ -520,7 +524,7 @@ async fn spawn_and_supervise(
                             );
                             return;
                         }
-                        if let Ok(new_child) = spawn_node_child(&bin, mqtt_port, &supervise_packages_dir, supervise_token.as_deref(), proxy_port, lsp_relay_port) {
+                        if let Ok(new_child) = spawn_node_child(&bin, mqtt_port, &supervise_packages_dir, supervise_token.as_deref(), proxy_port, lsp_relay_port, max_upload_bytes) {
                             child = new_child;
                             tracing::info!(pid = child.id(), "Local node agent respawned");
                             break;
@@ -555,6 +559,7 @@ fn spawn_node_child(
     token: Option<&str>,
     proxy_port: Option<u16>,
     lsp_relay_port: Option<u16>,
+    max_upload_bytes: u64,
 ) -> std::io::Result<Child> {
     let mut cmd = Command::new(bin);
     let effective_proxy_port = proxy_port.unwrap_or(acowork_core::node::NODE_PROXY_PORT);
@@ -580,6 +585,15 @@ fn spawn_node_child(
     if let Some(port) = lsp_relay_port {
         cmd.args(["--lsp-relay-port", &port.to_string()]);
     }
+    // ADR-122 D6: the node inherits this into every Runtime it spawns (it
+    // does not clear the env), so one line here reaches all agents on this
+    // machine through the same `acowork_core::upload::max_file_bytes` reader.
+    // Ceiling: a remote (BYO) node's Runtimes keep their own env/default —
+    // the Gateway does not own their process tree.
+    cmd.env(
+        "ACOWORK_MAX_UPLOAD_BYTES",
+        max_upload_bytes.to_string(),
+    );
     // The Gateway-spawned node is a daemon, never an interactive CLI:
     // all three std handles must be explicitly null. The previous
     // `stderr(inherit)` + default stdin inherit leaked the *launcher

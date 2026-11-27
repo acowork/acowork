@@ -72,6 +72,15 @@ pub struct GatewayConfig {
     /// Maximum number of log files to keep (0 = unlimited, default 20)
     #[serde(default = "default_log_file_count")]
     pub log_file_count: u64,
+    /// Single-file upload ceiling in bytes (ADR-122 D6).
+    ///
+    /// One ceiling for every upload producer — chat attachments, workspace
+    /// saves, intent attachments — instead of a per-MIME pair. The Gateway
+    /// owns the value and pushes it to the processes that enforce it as
+    /// `ACOWORK_MAX_UPLOAD_BYTES` (see `spawn_user`/`spawn_node_child`), so
+    /// the TOML key and the runtime share one source rather than two mirrors.
+    #[serde(default = "default_max_upload_bytes")]
+    pub max_upload_bytes: u64,
     /// Centralized timeout configuration flattened into the historical TOML keys.
     #[serde(flatten)]
     pub timeouts: Timeouts,
@@ -803,6 +812,13 @@ fn default_log_file_size_mb() -> u64 {
 fn default_log_file_count() -> u64 {
     20
 }
+/// An unset `max_upload_bytes` defaults to the shared upload ceiling
+/// (`acowork_core::upload::max_file_bytes`): 1 GiB unless the deployment
+/// pinned `ACOWORK_MAX_UPLOAD_BYTES`. Delegating keeps a Gateway started
+/// without the key byte-identical to a service that never saw one.
+fn default_max_upload_bytes() -> u64 {
+    acowork_core::upload::max_file_bytes()
+}
 fn default_max_iterations() -> u32 {
     20
 }
@@ -893,6 +909,10 @@ impl GatewayConfig {
                 .as_ref()
                 .map(|c| c.log_file_count)
                 .unwrap_or_else(default_log_file_count),
+            max_upload_bytes: file_config
+                .as_ref()
+                .map(|c| c.max_upload_bytes)
+                .unwrap_or_else(default_max_upload_bytes),
             timeouts: file_config
                 .as_ref()
                 .map(|c| c.timeouts.clone())
@@ -1131,6 +1151,7 @@ impl Default for GatewayConfig {
             log_level: default_log_level(),
             log_file_size_mb: default_log_file_size_mb(),
             log_file_count: default_log_file_count(),
+            max_upload_bytes: default_max_upload_bytes(),
             timeouts: Timeouts::default(),
             max_iterations: default_max_iterations(),
             dev_mode: true,

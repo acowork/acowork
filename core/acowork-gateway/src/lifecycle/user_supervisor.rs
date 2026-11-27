@@ -143,6 +143,11 @@ pub struct UserSupervisorConfig {
     /// which the broker admits `user:service` with (ADR-084 §决策 4b).
     /// `None` (auth off, the default) forwards nothing.
     pub mqtt_password: Option<String>,
+    /// Gateway-wide single-file upload ceiling (ADR-122 D6), injected as
+    /// `ACOWORK_MAX_UPLOAD_BYTES`. Process env rather than a CLI flag: the
+    /// shared upload kernel (`acowork_core::upload::max_file_bytes`) is the
+    /// one place that reads it, so no per-crate flag parsing has to exist.
+    pub max_upload_bytes: u64,
 }
 
 /// Spawn the user supervisor task. Non-fatal: if the service cannot start,
@@ -547,6 +552,16 @@ async fn spawn_user(cfg: &UserSupervisorConfig) -> Result<(tokio::process::Child
     if let Some(path) = &cfg.config {
         cmd.arg("--config").arg(path);
     }
+    // ADR-122 D6: the upload ceiling is Gateway config, and this service is
+    // the one that enforces it for chat attachments. Passed through the env
+    // the shared kernel already reads (`acowork_core::upload::max_file_bytes`)
+    // so there is exactly one source and no `--max-upload-bytes` flag to parse.
+    // Ceiling: the value is fixed for the life of this process — a `PUT
+    // /api/config` change lands here on the next restart, not mid-flight.
+    cmd.env(
+        "ACOWORK_MAX_UPLOAD_BYTES",
+        cfg.max_upload_bytes.to_string(),
+    );
 
     let child = cmd.spawn().map_err(|e| {
         format!(
