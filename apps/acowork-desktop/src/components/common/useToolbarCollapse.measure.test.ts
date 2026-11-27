@@ -36,6 +36,11 @@ type Box = {
 function buildToolbar(rowWidth: number) {
   document.body.innerHTML = "";
   const node = document.createElement("div");
+  // jsdom applies no stylesheet, so the hook's `getComputedStyle` read of the
+  // row's own padding/gap needs the values the real row carries (`px-3 … gap-2`).
+  node.style.paddingLeft = "12px";
+  node.style.paddingRight = "12px";
+  node.style.columnGap = "8px";
   const left = document.createElement("div");
   left.dataset.toolbarCluster = "left";
   node.appendChild(left);

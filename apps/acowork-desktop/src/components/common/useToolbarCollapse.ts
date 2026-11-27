@@ -109,15 +109,23 @@ export function useToolbarCollapse(): {
         // schedule another pass once the toolbar is actually mounted.
         if (!leftCluster) return;
 
-        // Layout constants: container padding (px-3 = 12px each side),
-        // gap-2 between the left cluster and right cluster.
         // The right cluster's width is MEASURED, not counted: it is a
         // row of icon-only buttons whose own width is whatever the DOM
         // gives it, so reading `offsetWidth` covers "added a new
         // button", "button label changes", "icon-only stays icon-only
         // under all conditions" without anyone editing a number here.
-        const PAD_X = 24;
-        const FLEX_GAP = 8;
+        //
+        // The row's own padding and gap are measured for the same reason.
+        // They used to be the constants 24 / 8, matching `px-3 … gap-2`; the
+        // composer strip then changed to `pl-[38px]` (hanging its buttons off
+        // the `+` circle) and the fold went on believing it had 26px more than
+        // it did — which does not fold late, it truncates: a row that thinks
+        // it fits never collapses a label.
+        const rowStyle = getComputedStyle(node);
+        const PAD_X =
+          (parseFloat(rowStyle.paddingLeft) || 0) +
+          (parseFloat(rowStyle.paddingRight) || 0);
+        const FLEX_GAP = parseFloat(rowStyle.columnGap) || 8;
         const rightCluster = node.querySelector<HTMLElement>(
           '[data-toolbar-cluster="right"]',
         );
