@@ -327,6 +327,9 @@ pub async fn connect_mcp_with_reconcile_and_filter(
     node_token: Option<&str>,
 ) -> McpConnectResult {
     let configs = resolve_node_token_template(work_dir, configs, node_token);
+    // Report the pass as in flight before the I/O: a handshake that hangs for
+    // seconds is a state the Tools panel must be able to name.
+    crate::mcp_status::begin_attempt(&configs);
     let (registry, failures) = McpRegistry::connect_all(&configs)
         .await
         .expect("connect_all is non-fatal and should never fail");
@@ -363,6 +366,14 @@ pub async fn connect_mcp_with_reconcile_and_filter(
             wrappers.push(wrapper);
         }
     }
+
+    // Record the outcome for the Tools panel before returning: a failed
+    // connect empties the server's reconciled tool rows, and without this the
+    // panel cannot tell that emptiness apart from "server exposes nothing"
+    // (it rendered three enabled servers with no tools and no error on
+    // 2026-11-26). Single funnel — startup, MQTT reload and the panel's retry
+    // all pass through here.
+    crate::mcp_status::record_outcome(&configs, &failures);
 
     tracing::info!(
         server_count = registry.server_count(),

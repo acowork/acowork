@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Loader2, Terminal } from "lucide-react";
+import { Loader2, RefreshCw, Terminal } from "lucide-react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useMcpStore, mcpEnsureKey, type McpEnsureStatus } from "../../stores/mcpStore";
 import { getGatewayUrl } from "../../lib/config";
@@ -13,6 +13,7 @@ import type {
   McpServerView,
   AgentMcpToolItem,
   McpRecommendationView,
+  McpServerStatus,
 } from "../../lib/types";
 import { McpRecommendationGroup } from "./McpRecommendationGroup";
 
@@ -34,6 +35,23 @@ const EMPTY_OBJECT: Record<string, never> = {};
 interface BuiltinToolEntry {
   name: string;
   enabled: boolean;
+}
+
+/** The two halves of `GET /agents/{id}/mcp-tools` the panel renders together. */
+interface McpToolsPayload {
+  servers: Record<string, AgentMcpToolItem[]>;
+  status: Record<string, McpServerStatus>;
+}
+
+/**
+ * Has the server finished its connect pass? True when its tools are back, or
+ * when the Runtime no longer reports it as `connecting` (it either failed —
+ * the new message is already in `status` — or it connected with an empty tool
+ * list). Used by the retry poll to stop waiting.
+ */
+function mcpSettled(payload: McpToolsPayload, serverName: string): boolean {
+  if ((payload.servers[serverName] ?? []).length > 0) return true;
+  return payload.status[serverName]?.state !== "connecting";
 }
 
 // ── Sub-component: collapsible MCP server card ────────────────────────
@@ -64,6 +82,18 @@ interface McpServerCardProps {
    *  nothing being ensured — custom/local servers, or already usable).
    *  Drives the 探测中/安装中/失败 badge and the failure detail line. */
   ensure?: McpEnsureStatus;
+  /** Live connect state from the Runtime's `/mcp-tools` `server_status`.
+   *  `agent_mcp_tools.json` is reconciled against the live `tools/list`, so a
+   *  failed connect leaves `tools: []` — which on its own is indistinguishable
+   *  from a server that exposes nothing. Absent = connected on the last pass. */
+  status?: McpServerStatus;
+  /** A retry for this server is in flight (POST + settle poll). Local to the
+   *  panel; the Runtime's own `connecting` state takes over once the
+   *  background pass starts. */
+  retrying?: boolean;
+  /** Re-run connect for this server. Offered whenever the server is on and
+   *  has nothing to show — exactly the broken-looking states. */
+  onRetry: () => void;
 }
 
 /**
@@ -93,6 +123,9 @@ export function McpServerCard({
   switchDisabled,
   toolSwitchDisabled,
   ensure,
+  status: rawStatus,
+  retrying: rawRetrying,
+  onRetry,
 }: McpServerCardProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -107,6 +140,20 @@ export function McpServerCard({
   // materialises the tool list and the chevron appears.
   const hasExpandableBody = isChecked && tools.length > 0;
   const ensureBusy = ensure?.state === "probing" || ensure?.state === "installing";
+  // A switched-off server has no connect state to report: the Runtime only
+  // dials what is active, and a stale entry from before the toggle would
+  // otherwise label a disabled row as failing.
+  const status = isChecked ? rawStatus : undefined;
+  const retrying = isChecked && rawRetrying;
+  // The Runtime's own connect state, and the panel's own click. Both are
+  // "waiting", and both outrank "broken" — a connecting server must not offer
+  // a retry that would queue a second pass.
+  const connecting = retrying || status?.state === "connecting";
+  // On, settled, still no tools: broken-looking, and before this change it
+  // looked healthy. `loading` covers the window between the Switch flip and
+  // the first read, so this only fires once the Runtime has reported an
+  // outcome.
+  const emptyAndSettled = isChecked && !ensureBusy && !loading && tools.length === 0;
   const showBody = open && hasExpandableBody;
   // Note: no outer ListBox here — the caller places each server row
   // inside the MCP group card's plain body list (Debug-panel style),
@@ -160,14 +207,54 @@ export function McpServerCard({
               testId={`mcp-ensure-${server.name}`}
               hint={t("agentSetup.ensureViewLogs")}
             />
+          ) : connecting ? (
+            // A connect pass is running (the Runtime's own state, or the
+            // panel's just-clicked retry). Not clickable: offering a retry
+            // here would only queue a second pass behind this one.
+            <span
+              className="inline-flex items-center gap-1 rounded-full border border-border-divider px-1.5 py-[1px] text-10 text-text-secondary"
+              data-testid={`mcp-connecting-${server.name}`}
+            >
+              <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+              <span>{t("agentSetup.mcpConnecting")}</span>
+            </span>
+          ) : status?.state === "failed" ? (
+            // The Runtime named the failure — say it and offer the retry. The
+            // message itself is in `description`.
+            <LogEntryButton
+              tone="error"
+              label={t("agentSetup.mcpConnectFailed")}
+              onClick={onRetry}
+              testId={`mcp-retry-${server.name}`}
+              hint={t("agentSetup.mcpRetryHint")}
+              icon="retry"
+            />
+          ) : emptyAndSettled ? (
+            // On, settled, no tools, and the Runtime reports no failure: it
+            // connected and exposes nothing. Neutral tone on purpose — calling
+            // this an error would be the mirror of the bug (a row claiming a
+            // failure it does not have), and the retry is still there because
+            // "no tools" is the one thing a user cannot verify from here.
+            <LogEntryButton
+              tone="busy"
+              label={t("agentSetup.mcpNoTools")}
+              onClick={onRetry}
+              testId={`mcp-retry-${server.name}`}
+              hint={t("agentSetup.mcpRetryHint")}
+              icon="retry"
+            />
           ) : (
             <Badge>{server.transport}</Badge>
           )
         }
         description={
-          ensure?.state === "failed" && ensure.error
-            ? ensure.error
-            : server.command || server.url || ""
+          // The live connect error wins over the endpoint: it is the reason
+          // the row has no tools, and it is the only place it is stated.
+          (ensure?.state === "failed" && ensure.error) ||
+          (status?.state === "failed" && status.error) ||
+          server.command ||
+          server.url ||
+          ""
         }
         trailing={
           // The Switch component owns its own click handler; we stop
@@ -255,9 +342,19 @@ interface LogEntryButtonProps {
   hint: string;
   busy?: boolean;
   tone: "busy" | "error";
+  /** Glyph for the affordance: terminal = "opens logs", retry = "reconnects". */
+  icon?: "terminal" | "retry";
 }
 
-function LogEntryButton({ label, onClick, testId, hint, busy, tone }: LogEntryButtonProps) {
+function LogEntryButton({
+  label,
+  onClick,
+  testId,
+  hint,
+  busy,
+  tone,
+  icon = "terminal",
+}: LogEntryButtonProps) {
   return (
     <button
       type="button"
@@ -278,7 +375,11 @@ function LogEntryButton({ label, onClick, testId, hint, busy, tone }: LogEntryBu
     >
       {busy && <Loader2 className="h-3 w-3 animate-spin" />}
       <span>{label}</span>
-      <Terminal className="h-2.5 w-2.5 opacity-60" aria-hidden />
+      {icon === "retry" ? (
+        <RefreshCw className="h-2.5 w-2.5 opacity-60" aria-hidden />
+      ) : (
+        <Terminal className="h-2.5 w-2.5 opacity-60" aria-hidden />
+      )}
     </button>
   );
 }
@@ -448,6 +549,15 @@ export function ToolsCards({
   // time, so the frontend simply renders what the server sends — it
   // never maintains its own tool list or defaults.
   const [mcpToolsConfig, setMcpToolsConfig] = useState<Record<string, AgentMcpToolItem[]>>({});
+  // Server name → live connect state, from the same `/mcp-tools` read. A
+  // failed (or in-flight) connect removes the server's tool rows entirely
+  // (reconcile is against the live `tools/list`), so this is the only thing
+  // that separates "could not connect" from "exposes no tools".
+  const [mcpServerStatus, setMcpServerStatus] = useState<Record<string, McpServerStatus>>({});
+  // Per-server retry in flight (the POST, plus the settle poll). Local on
+  // purpose: it is the user's click, not a Runtime fact — the Runtime's own
+  // `connecting` state takes over as soon as the background pass starts.
+  const [mcpRetrying, setMcpRetrying] = useState<Record<string, boolean>>({});
   const [mcpToolsSaving, setMcpToolsSaving] = useState(false);
 
   // Group-level collapse state for the two tool cards (Builtin Tools /
@@ -484,6 +594,52 @@ export function ToolsCards({
   );
   const [reloadToken, setReloadToken] = useState(0);
   const reloadTools = useCallback(() => setReloadToken((n) => n + 1), []);
+
+  /**
+   * Read the Runtime's per-server tool list **and** live connect status.
+   *
+   * One reader for three call sites — first mount, the config-refresh event,
+   * and the retry's settle poll — because the two halves must land in the same
+   * render: a retry that connects has to bring the tools back and drop the old
+   * error together, or the card keeps claiming a failure it no longer has.
+   *
+   * Returns the parsed payload so a caller can decide from the value it just
+   * stored instead of re-reading a state variable that has not re-rendered
+   * yet. `ifCancelled` lets the mount path keep its "agent switched while the
+   * request was in flight" guard without duplicating the fetch.
+   */
+  const reloadMcpTools = useCallback(
+    async (ifCancelled?: () => boolean): Promise<McpToolsPayload | null> => {
+      if (!selectedAgentId) return null;
+      try {
+        const resp = await with503Retry(
+          () => fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/mcp-tools`),
+          { tag: `ToolsCards.mcpTools(${selectedAgentId})`, logger: log },
+        );
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        if (ifCancelled?.()) return null;
+        const payload: McpToolsPayload = {
+          servers:
+            data.servers && typeof data.servers === "object"
+              ? (data.servers as Record<string, AgentMcpToolItem[]>)
+              : (EMPTY_OBJECT as Record<string, AgentMcpToolItem[]>),
+          status:
+            data.server_status && typeof data.server_status === "object"
+              ? (data.server_status as Record<string, McpServerStatus>)
+              : (EMPTY_OBJECT as Record<string, McpServerStatus>),
+        };
+        setMcpToolsConfig(payload.servers);
+        setMcpServerStatus(payload.status);
+        return payload;
+      } catch {
+        // Agent not ready / transient — the next refresh event retries. The
+        // panel must not blank the list it already shows on one failed read.
+        return null;
+      }
+    },
+    [selectedAgentId],
+  );
 
   useEffect(() => {
     if (!selectedAgentId) return;
@@ -533,23 +689,13 @@ export function ToolsCards({
         }
 
         // ADR-069: per-tool opt-in list — separate endpoint from the
-        // merged /tools view (which has no `mcp_tools` field). The
-        // backend is the single source of truth: it reconciles
-        // agent_mcp_tools.json against the live MCP `tools/list` at
-        // connect time, so this is the complete list the frontend
-        // renders directly (name + enabled + description).
-        try {
-          const mcpToolsResp = await with503Retry(
-            () => fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/mcp-tools`),
-            { tag: `ToolsCards.fetchMcpTools(${selectedAgentId})`, logger: log },
-          );
-          if (mcpToolsResp.ok && !cancelled) {
-            const mcpToolsData = await mcpToolsResp.json();
-            if (mcpToolsData.servers && typeof mcpToolsData.servers === "object") {
-              setMcpToolsConfig(mcpToolsData.servers as Record<string, AgentMcpToolItem[]>);
-            }
-          }
-        } catch { /* agent not ready — user can re-open tab later */ }
+        // merged /tools view (which has no `mcp_tools` field). The backend is
+        // the single source of truth: it reconciles agent_mcp_tools.json
+        // against the live MCP `tools/list` at connect time, so this is the
+        // complete list the frontend renders directly (name + enabled +
+        // description) — plus the live connect state that explains an empty
+        // one.
+        await reloadMcpTools(() => cancelled);
       } catch { /* agent not ready — user can re-open tab later */ }
     })();
 
@@ -588,39 +734,27 @@ export function ToolsCards({
         // ADR-069: refresh the per-tool opt-in list from its dedicated
         // endpoint (the merged /tools view has no `mcp_tools` field).
         try {
-          const mcpToolsResp = await fetch(
-            `${getGatewayUrl()}/api/agents/${selectedAgentId}/mcp-tools`,
-          );
-          if (mcpToolsResp.ok) {
-            const mcpToolsData = await mcpToolsResp.json();
-            if (mcpToolsData.servers && typeof mcpToolsData.servers === "object") {
-              const fresh = mcpToolsData.servers as Record<string, AgentMcpToolItem[]>;
-              setMcpToolsConfig(fresh);
-              // After the new tool list lands, drop the per-server
-              // spinner for any server whose reconcile is observably
-              // settled. The "settled" condition is keyed off the
-              // server's current `activeServers` membership:
-              //   - on + fresh.tools has entries  → reconcile wrote tools, done
-              //   - off                             → user explicitly wants
-              //                                       it off; no reconcile
-              //                                       indicator should linger
-              // Servers still loading on+empty (e.g. third-party MCP
-              // still connecting) keep the spinner until the next
-              // event / poll settles them.
-              const liveActive = useMcpStore
-                .getState()
-                .activeServers[selectedAgentId] ?? EMPTY_ARRAY;
-              const pending = useMcpStore
-                .getState()
-                .perServerLoading[selectedAgentId];
-              if (pending) {
-                for (const serverName of Object.keys(pending)) {
-                  if (!pending[serverName]) continue;
-                  const isOn = liveActive.includes(serverName);
-                  const hasTools = (fresh[serverName] ?? []).length > 0;
-                  if (isOn ? hasTools : true) {
-                    clearServerLoading(selectedAgentId, serverName);
-                  }
+          const fresh = await reloadMcpTools();
+          // After the new tool list lands, drop the per-server spinner for
+          // any server whose reconcile is observably settled. The "settled"
+          // condition is keyed off the server's current `activeServers`
+          // membership:
+          //   - on + fresh.tools has entries  → reconcile wrote tools, done
+          //   - off                             → user explicitly wants it off;
+          //                                       no reconcile indicator should linger
+          // Servers still loading on+empty (e.g. third-party MCP still
+          // connecting) keep the spinner until the next event / poll settles
+          // them.
+          if (fresh) {
+            const liveActive = useMcpStore.getState().activeServers[selectedAgentId] ?? EMPTY_ARRAY;
+            const pending = useMcpStore.getState().perServerLoading[selectedAgentId];
+            if (pending) {
+              for (const serverName of Object.keys(pending)) {
+                if (!pending[serverName]) continue;
+                const isOn = liveActive.includes(serverName);
+                const hasTools = (fresh.servers[serverName] ?? []).length > 0;
+                if (isOn ? hasTools : true) {
+                  clearServerLoading(selectedAgentId, serverName);
                 }
               }
             }
@@ -712,6 +846,57 @@ export function ToolsCards({
     const next = { ...mcpToolsConfig, [serverName]: nextRows };
     setMcpToolsConfig(next);
     saveMcpToolsConfig(next);
+  };
+
+  /**
+   * Retry one server's connect.
+   *
+   * `POST /mcp-reconnect` only signals the Runtime's MCP config watcher — the
+   * reconnect itself runs in the background on the same connect+reconcile pass
+   * a config change takes. So the answer is read back rather than assumed:
+   * poll `/mcp-tools` until the server reports a settled state (its tool rows
+   * are back, it failed again, or it left `server_status`), then stop.
+   *
+   * The whole pass reconnects every active server — the Runtime rebuilds its
+   * tool index on connect, so a single server cannot be swapped in without
+   * leaving the index describing a dead client. That is the Runtime's call,
+   * not something to paper over here.
+   *
+   * ponytail: 500ms × 20 = 10s ceiling, not an event stream — the Runtime has
+   * no per-server push today. Past the ceiling the retry button simply stays
+   * on screen; a slow server costs one more click, never a stuck spinner.
+   */
+  const retryMcpServer = async (serverName: string) => {
+    if (!selectedAgentId) return;
+    const agentId = selectedAgentId;
+    setMcpRetrying((s) => ({ ...s, [serverName]: true }));
+    try {
+      const resp = await fetch(
+        `${getGatewayUrl()}/api/agents/${agentId}/mcp-reconnect`,
+        { method: "POST" },
+      );
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+        throw new Error(err.error || `HTTP ${resp.status}`);
+      }
+      const startedAt = Date.now();
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const payload = await reloadMcpTools();
+        // The watcher is woken by the same POST that returned, so the first
+        // reads can still carry the *previous* outcome — an early "settled"
+        // is not trusted until the pass has had a round-trip to start.
+        if (payload && Date.now() - startedAt > 1500 && mcpSettled(payload, serverName)) {
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      }
+      log.warn("retryMcpServer: server still connecting after 10s", { agentId, serverName });
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      useMcpStore.setState({ error: message });
+    } finally {
+      setMcpRetrying((s) => ({ ...s, [serverName]: false }));
+    }
   };
 
   // No agent → nothing to configure. The host panel (Setup) already renders
@@ -838,6 +1023,9 @@ export function ToolsCards({
                           ? ensureStatus[mcpEnsureKey(selectedAgentId, server.name)]
                           : undefined
                       }
+                      status={mcpServerStatus[server.name]}
+                      retrying={!!mcpRetrying[server.name]}
+                      onRetry={() => void retryMcpServer(server.name)}
                     />
                   );
                 })}

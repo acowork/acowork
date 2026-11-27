@@ -2478,9 +2478,23 @@ export interface AgentMcpToolItem {
  * is the same shape (sans `agent_id`) — the desktop sends the complete
  * list verbatim and the backend persists it as-is.
  */
+/**
+ * Live connect state of one MCP server, from `/mcp-tools`' `server_status`.
+ *
+ * `servers` is reconciled against the live `tools/list`, so a server that
+ * could not connect has **no rows at all** there — this is what separates
+ * "could not connect" from "exposes nothing". A server missing from the map
+ * connected on the last pass; that is the common case, not an error.
+ */
+export type McpServerStatus =
+  | { state: "connecting" }
+  | { state: "failed"; error: string };
+
 export interface AgentMcpToolsConfig {
   agent_id: string;
   servers: Record<string, AgentMcpToolItem[]>;
+  /** `GET` only (the `PUT` body is just `{servers}`). */
+  server_status?: Record<string, McpServerStatus>;
 }
 
 /** Request body for PUT /api/agents/{id}/mcp-servers */

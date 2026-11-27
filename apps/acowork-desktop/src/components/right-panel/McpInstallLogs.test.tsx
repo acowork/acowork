@@ -39,6 +39,7 @@ function renderCard(over: Partial<Parameters<typeof McpServerCard>[0]> = {}) {
       switchDisabled={false}
       toolSwitchDisabled={false}
       ensure={ensure()}
+      onRetry={() => {}}
       {...over}
     />,
   );
@@ -118,5 +119,56 @@ describe("MCP install progress", () => {
     expect(screen.getByTestId("mcp-ensure-logs-text").textContent).toBe(
       i18n.t("agentSetup.ensureLogsWaiting"),
     );
+  });
+});
+
+// ── Connect state (2026-11-26) ────────────────────────────────────────
+//
+// A server whose connect failed keeps `tools: []` (reconcile is against the
+// live `tools/list`), which used to render as a healthy enabled switch with an
+// empty body — no error, no action. The Runtime now reports each server's live
+// connect state, and the card has to state it and offer the reconnect.
+describe("MCP connect state", () => {
+  it("names the failure and offers a retry", () => {
+    const onRetry = vi.fn();
+    renderCard({
+      ensure: undefined,
+      status: { state: "failed", error: "tcp connect error: os error 10051" },
+      onRetry,
+    });
+
+    expect(screen.getByText(/os error 10051/)).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("mcp-retry-playwright"));
+
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a spinner, not a retry, while the Runtime is connecting", () => {
+    renderCard({ ensure: undefined, status: { state: "connecting" } });
+
+    expect(screen.getByTestId("mcp-connecting-playwright")).toBeTruthy();
+    expect(screen.queryByTestId("mcp-retry-playwright")).toBeNull();
+  });
+
+  it("offers a neutral retry when the server connects with no tools", () => {
+    // Connected, exposes nothing: not a failure, and not healthy either — the
+    // user still needs a way to re-check.
+    renderCard({ ensure: undefined });
+
+    expect(screen.getByTestId("mcp-retry-playwright")).toBeTruthy();
+    expect(screen.queryByText(/os error/)).toBeNull();
+  });
+
+  it("offers no retry for a server that is switched off", () => {
+    renderCard({ ensure: undefined, isChecked: false });
+
+    expect(screen.queryByTestId("mcp-retry-playwright")).toBeNull();
+  });
+
+  it("offers no retry while the reconcile read is still in flight", () => {
+    renderCard({ ensure: undefined, loading: true });
+
+    expect(screen.queryByTestId("mcp-retry-playwright")).toBeNull();
   });
 });
