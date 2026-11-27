@@ -399,7 +399,11 @@ describe("RunBlockActionRow", () => {
         target: { files: [new File(["pdf bytes"], "spec.pdf", { type: "application/pdf" })] },
       });
       await waitFor(() =>
-        expect(uploadMock).toHaveBeenCalledWith("c1", expect.any(File)),
+        expect(uploadMock).toHaveBeenCalledWith(
+          "c1",
+          expect.any(File),
+          expect.any(Function),
+        ),
       );
       expect(document.querySelector('[data-run-attachment="att-spec.pdf"]')).not.toBeNull();
 

@@ -61,6 +61,7 @@ import {
   useChatSessionStore,
   type ChatAttachmentMeta,
 } from "../../stores/chatSessionStore";
+import { useUploadingFiles } from "./uploadProgress";
 
 /** One 24×24 hover circle shared by all four controls. Deliberately NOT
  *  `toolbarIconButton` (`h-7 w-7 rounded-md`, sized for the composer's cluster):
@@ -191,6 +192,9 @@ export function RunBlockActionRow({
   const attachInputRef = useRef<HTMLInputElement | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachmentMeta[]>([]);
   const [uploading, setUploading] = useState(false);
+  // Same in-flight tray as the two chat composers: this drawer uploads through
+  // the same `upload()`, so it would otherwise show a dead spinner.
+  const { uploadingFiles, begin: beginUpload } = useUploadingFiles();
 
   const handleFilesChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
@@ -199,8 +203,15 @@ export function RunBlockActionRow({
     setUploading(true);
     try {
       for (const f of files) {
-        const meta = await useChatSessionStore.getState().upload(chatSessionId, f);
-        setPendingAttachments((prev) => [...prev, meta]);
+        const tracker = beginUpload(f);
+        try {
+          const meta = await useChatSessionStore
+            .getState()
+            .upload(chatSessionId, f, tracker.onProgress);
+          setPendingAttachments((prev) => [...prev, meta]);
+        } finally {
+          tracker.done();
+        }
       }
     } catch (err) {
       console.warn("[RunBlockActionRow] attachment upload failed:", err);
@@ -411,6 +422,21 @@ export function RunBlockActionRow({
             inert={!open}
             aria-hidden={!open}
           >
+          {uploadingFiles.map((u) => (
+            <span
+              key={u.key}
+              title={u.filename}
+              className="inline-flex h-5 min-w-0 shrink-0 items-center gap-1 rounded-full bg-[var(--color-accent)]/12 px-1.5 text-text-secondary"
+              style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
+            >
+              <Paperclip className="h-3 w-3 shrink-0 animate-pulse" strokeWidth={1.75} />
+              <span className="shrink-0">
+                {u.sizeBytes
+                  ? `${Math.min(100, Math.round(((u.sentBytes ?? 0) / u.sizeBytes) * 100))}%`
+                  : "…"}
+              </span>
+            </span>
+          ))}
           {pendingAttachments.length > 0 && (
             <div className="flex min-w-0 shrink-0 max-w-[150px] items-center gap-1 overflow-hidden">
               {pendingAttachments.map((a) => (

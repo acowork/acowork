@@ -65,6 +65,7 @@ import { UserAvatar } from "../common/UserAvatar";
 import { OverlayScrollbar, OverlayScrollTarget } from "../common/OverlayScrollbar";
 import { OVERLAY_SCROLL_HOST_CLASS, OVERLAY_SCROLL_VIEWPORT_CLASS } from "../common/overlayScrollThumb";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
+import { UploadingFileChips, useUploadingFiles } from "./uploadProgress";
 import { ChatUsageIcon } from "./ChatUsageIcon";
 import { openChatAttachment } from "../../lib/openChatAttachment";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
@@ -879,6 +880,9 @@ export function GroupChatPanel() {
     ChatAttachmentMeta[]
   >([]);
   const [uploading, setUploading] = useState(false);
+  // In-flight uploads for the tray below. This panel owns both group chats and
+  // one-to-one DMs, so a large attachment to another human lands here.
+  const { uploadingFiles, begin: beginUpload } = useUploadingFiles();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // @-mention autocomplete: the active token under the caret + which popup
@@ -1431,10 +1435,15 @@ export function GroupChatPanel() {
       setUploading(true);
       try {
         for (const f of files) {
-          const meta = await useChatSessionStore
-            .getState()
-            .upload(activeGroupId, f);
-          setPendingAttachments((prev) => [...prev, meta]);
+          const tracker = beginUpload(f);
+          try {
+            const meta = await useChatSessionStore
+              .getState()
+              .upload(activeGroupId, f, tracker.onProgress);
+            setPendingAttachments((prev) => [...prev, meta]);
+          } finally {
+            tracker.done();
+          }
         }
       } catch (err) {
         console.warn("[GroupChatPanel] attachment upload failed:", err);
@@ -1442,7 +1451,7 @@ export function GroupChatPanel() {
         setUploading(false);
       }
     },
-    [activeGroupId],
+    [activeGroupId, beginUpload],
   );
 
   const handleFilesChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2078,8 +2087,9 @@ export function GroupChatPanel() {
             )}
             {/* Pending-attachment tray — chips with a remove affordance,
                 same grammar as the 1:1 chat composer. */}
-            {pendingAttachments.length > 0 && (
+            {(uploadingFiles.length > 0 || pendingAttachments.length > 0) && (
               <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+                <UploadingFileChips files={uploadingFiles} />
                 {pendingAttachments.map((a) => (
                   <ChatAttachmentChip
                     key={a.id}
