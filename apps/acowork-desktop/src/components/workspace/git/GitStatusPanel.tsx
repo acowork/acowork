@@ -338,7 +338,10 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
     }
     if (changes.length === 0) {
       return (
-        <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
+        // `min-h` + `py-3`: the empty state must not collapse to the text
+        // line's own height — the message would touch the banner's border
+        // above and the panel's border below and read as a divider.
+        <div className="flex min-h-[3.25rem] items-center justify-center py-3 text-xs text-text-tertiary">
           {t("gitStatus.clean")}
         </div>
       );
@@ -348,9 +351,15 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
       {/* Overflow moved to the OverlayScrollbar viewport: long file paths
           exceed the panel's width, so the x-axis still needs to scroll —
           `showXThumb` + `overflow-x-auto` is the same pairing FileTree uses
-          (the native bar cannot be re-enabled on one axis only). */}
-      <OverlayScrollbar showXThumb className="overflow-x-auto py-0.5">
-        <ul>
+          (the native bar cannot be re-enabled on one axis only).
+          Vertical breathing room around the change list: `pt-2` keeps the
+          first row off the banner's bottom border, and the scroller's own
+          `pb-2` (`containerClassName`, i.e. padding on the OUTER box, not
+          on the viewport) leaves the same 8px below the last row — the
+          floating horizontal thumb lives in that strip instead of painting
+          over the last row's text. */}
+      <OverlayScrollbar showXThumb containerClassName="pb-2" className="overflow-x-auto">
+        <ul className="pt-2">
         {pagedChanges.map((c) => {
           const meta = statusMeta(c);
           return (
