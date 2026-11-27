@@ -70,6 +70,22 @@ describe("NodeGroupHeader", () => {
     expect(header.indexOf("bg-ok-solid")).toBeGreaterThan(name);
   });
 
+  it("drops the monitor glyph and the name on the avatar rail", () => {
+    // Regression: the band knows nothing about the sidebar's collapsed
+    // width, and its `shrink-0` children (chevron, monitor, name, dot) could
+    // not shrink below ~72px. At the 64px rail they overflowed the flex
+    // toggle button and painted the monitor straight on top of the
+    // permissions gear. The fix is to stop drawing them, not to add
+    // `overflow-hidden`, which would also have eaten the gear's hit area.
+    const header = src.slice(src.indexOf("function NodeGroupHeader"));
+    expect(src).toContain("compact={isCollapsed}");
+    expect(header).toMatch(/\{!compact && <Monitor /);
+    expect(header).toMatch(/\{!compact && <span className="truncate">\{nodeName\}/);
+    // The gear survives the rail: it is the band's only action there, so it
+    // may lose margin but never the whole button.
+    expect(header).toMatch(/compact \? "mr-1" : "mr-2"/);
+  });
+
   it("sits on the same fill as the right-panel card title bars", () => {
     // The node band is raised off `nav-surface` with the one token that
     // also drives ListBox's card (right-panel Agent Status / Session
