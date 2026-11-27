@@ -634,6 +634,10 @@ const UPLOAD_CHUNK_BYTES = 2 * 1024 * 1024;
 async function uploadChatAttachment(
   chatSessionId: string,
   file: File,
+  /** Called with the number of bytes the server has accepted so far. A
+   *  document chip renders it as `sent / total`, so a slow link is visible
+   *  instead of an indefinite spinner. */
+  onProgress?: (sent: number) => void,
 ): Promise<ChatAttachmentMeta> {
   if (file.size <= UPLOAD_CHUNK_BYTES) {
     const form = new FormData();
@@ -644,6 +648,9 @@ async function uploadChatAttachment(
       { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form },
     );
     if (!resp.ok) throw new Error(`upload → ${resp.status}`);
+    // One request, so the first honest report is the server's answer. Without
+    // it the chip would stay at 0 B and then jump to done.
+    onProgress?.(file.size);
     return resp.json();
   }
 
@@ -679,6 +686,9 @@ async function uploadChatAttachment(
       body: bytes.subarray(offset, end),
     });
     if (!resp.ok) throw new Error(`upload chunk at ${offset} → ${resp.status}`);
+    // After the server accepted the chunk, never before: a reported offset is
+    // one a resume could start from.
+    onProgress?.(end);
   }
 
   const done = await fetch(
@@ -978,7 +988,11 @@ interface ChatSessionStore {
     /** See `sendGroupText`'s `responders` — for a 1:1 chat this is its peer. */
     responders?: string[],
   ): Promise<boolean>;
-  upload(chatSessionId: string, file: File): Promise<ChatAttachmentMeta>;
+  upload(
+    chatSessionId: string,
+    file: File,
+    onProgress?: (sent: number) => void,
+  ): Promise<ChatAttachmentMeta>;
   /** The doorbell reaction: re-read every session that could be on screen. */
   wake(): Promise<void>;
 }
@@ -1401,7 +1415,8 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     return ok;
   },
 
-  upload: (chatSessionId, file) => uploadChatAttachment(chatSessionId, file),
+  upload: (chatSessionId, file, onProgress) =>
+    uploadChatAttachment(chatSessionId, file, onProgress),
 
   wake: () => wakeCoalesced(get),
 }));

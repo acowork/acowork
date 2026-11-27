@@ -1035,6 +1035,10 @@ impl GatewayClient {
     /// Replaces the legacy `/api/sessions/:sid/documents` route (deleted as
     /// part of ADR-046 §Backend Storage).
     #[allow(clippy::too_many_arguments)]
+    ///
+    /// `on_progress` reports bytes the server has accepted so far, on the same
+    /// `Channel<u64>` contract `download_attachment` uses for the reverse
+    /// direction, so one chip component can render either side of a transfer.
     pub async fn upload_file(
         &self,
         agent_id: &str,
@@ -1043,6 +1047,7 @@ impl GatewayClient {
         format: &str,
         width: Option<u32>,
         height: Option<u32>,
+        on_progress: Option<&tauri::ipc::Channel<u64>>,
     ) -> Result<FileUploadResponse> {
         let file_name = std::path::Path::new(file_path)
             .file_name()
@@ -1069,7 +1074,16 @@ impl GatewayClient {
         let size = tokio::fs::metadata(file_path).await?.len();
         if size > acowork_core::upload::CHUNK_BYTES {
             return self
-                .upload_file_chunked(agent_id, session_id, file_path, format, width, height, size)
+                .upload_file_chunked(
+                    agent_id,
+                    session_id,
+                    file_path,
+                    format,
+                    width,
+                    height,
+                    size,
+                    on_progress,
+                )
                 .await;
         }
 
@@ -1103,7 +1117,14 @@ impl GatewayClient {
                 Ok(self.client.post(&url).multipart(form))
             })
             .await?;
-        parse_gateway_response(resp).await
+        let landed = parse_gateway_response(resp).await?;
+        // One request carried the whole file, so the only honest report is
+        // "all of it" once the server has answered. Without it the chip would
+        // sit at 0 B until it flipped to done.
+        if let Some(report) = on_progress {
+            let _ = report.send(size);
+        }
+        Ok(landed)
     }
 
     /// Upload one file through the chunked route (ADR-122 §3).
@@ -1128,6 +1149,7 @@ impl GatewayClient {
         width: Option<u32>,
         height: Option<u32>,
         size: u64,
+        on_progress: Option<&tauri::ipc::Channel<u64>>,
     ) -> Result<FileUploadResponse> {
         let file_name = std::path::Path::new(file_path)
             .file_name()
@@ -1200,6 +1222,11 @@ impl GatewayClient {
                 ));
             }
             offset += want as u64;
+            // After the server accepted this chunk, never before: a reported
+            // offset is one the upload could resume from.
+            if let Some(report) = on_progress {
+                let _ = report.send(offset);
+            }
         }
 
         let mut query: Vec<String> = Vec::new();

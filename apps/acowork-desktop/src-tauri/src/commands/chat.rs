@@ -13,6 +13,11 @@ use crate::state::AppState;
 /// `width` / `height` for images that the desktop measured via `new Image()`.
 ///
 /// Reaches the runtime via `POST /api/agents/{agent_id}/sessions/{sid}/files`.
+///
+/// `on_progress` carries accepted-byte counts while the upload runs, mirroring
+/// `download_attachment`'s channel so one chip can render either direction.
+/// Required rather than optional: `Option<Channel<_>>` does not implement
+/// `Deserialize`, and there is exactly one caller.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn upload_file(
@@ -23,10 +28,19 @@ pub async fn upload_file(
     format: String,
     width: Option<u32>,
     height: Option<u32>,
+    on_progress: tauri::ipc::Channel<u64>,
 ) -> Result<FileUploadResponse, String> {
     let client = state.gateway.read().await;
     client
-        .upload_file(&agent_id, &session_id, &file_path, &format, width, height)
+        .upload_file(
+            &agent_id,
+            &session_id,
+            &file_path,
+            &format,
+            width,
+            height,
+            Some(&on_progress),
+        )
         .await
         .map_err(|e| e.to_string())
 }

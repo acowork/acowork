@@ -872,6 +872,14 @@ export interface PendingAttachedItem {
    *  the bubble clears. Backend never sees this — `image_upload`'s wire
    *  payload is `documentId` + dimensions only. */
   localUrl?: string;
+  /** Name and weight, known before the upload starts. Without these the
+   *  in-flight chip has nothing to label itself with — `item` only arrives
+   *  once the server has answered. */
+  filename?: string;
+  sizeBytes?: number;
+  /** Bytes the backend has accepted so far (ADR-122 chunked upload). Absent
+   *  on a single-request upload until it lands. */
+  sentBytes?: number;
 }
 
 /** Chat message in the UI */

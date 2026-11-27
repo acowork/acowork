@@ -1,5 +1,5 @@
 import React, { useEffect, useInsertionEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { Channel, invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore, type ConnectionStatus, STUCK_FORCE_RECONNECT_MS } from "../../stores/chatStore";
@@ -1410,8 +1410,12 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     // (`get_upload_limit_bytes`, ADR-122 D6). Without this check a 2 GB file
     // would spend its whole upload before being refused at `complete`. Bail
     // early with a friendly toast instead.
+    // The size read here also becomes the chip's denominator, so it is hoisted
+    // out of the `try`.
+    let fileSize: number | undefined;
     try {
       const size = await invoke<number>("get_file_size", { filePath });
+      fileSize = size;
       const limit = await uploadLimitBytes();
       if (limit !== undefined && size > limit) {
         addToast({
@@ -1459,6 +1463,8 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
       tempId,
       status: "uploading",
       localUrl,
+      filename,
+      sizeBytes: fileSize,
     }]);
 
     try {
@@ -1471,6 +1477,15 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
         width = dims.width;
         height = dims.height;
       }
+
+      // Accepted-byte counts come back on the same `Channel<u64>` contract
+      // `download_attachment` uses, so one chip renders either direction.
+      const progress = new Channel<number>();
+      progress.onmessage = (sent) => {
+        session.setPendingAttachedItems(prev => prev.map((p) =>
+          p.tempId === tempId ? { ...p, sentBytes: sent } : p
+        ));
+      };
 
       const result = await invoke<{
         documentId: string;
@@ -1486,6 +1501,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
         format,
         width,
         height,
+        onProgress: progress,
       });
 
       const item: AttachedItem = isImage
@@ -2595,6 +2611,13 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                         alt=""
                         className="h-full w-full object-cover opacity-60"
                       />
+                      {p.sentBytes != null && (
+                        <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-black/55 py-0.5 text-center text-xs leading-tight text-white">
+                          {p.sizeBytes
+                            ? `${Math.min(100, Math.round((p.sentBytes / p.sizeBytes) * 100))}%`
+                            : formatBytes(p.sentBytes)}
+                        </span>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleRemovePending(p.tempId)}
@@ -2607,15 +2630,19 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                   );
                 }
                 // Document upload (or upload-in-flight without resolved item).
-                const filename = item && item.type === "file_upload" ? item.filename : "";
-                const format = item && item.type === "file_upload" ? item.format : "";
-                const size = item && item.type === "file_upload" ? item.sizeBytes : undefined;
+                // `item` only exists after the server answers, so the in-flight
+                // chip falls back to the name and size recorded at pick time.
+                const isFileUpload = item?.type === "file_upload";
+                const filename = isFileUpload ? item.filename : (p.filename ?? "");
+                const format = isFileUpload ? item.format : "";
+                const size = isFileUpload ? item.sizeBytes : p.sizeBytes;
                 return (
                   <DocumentChip
                     key={p.tempId}
                     filename={filename}
                     format={format}
                     size={size}
+                    sentBytes={p.status === "uploading" ? p.sentBytes : undefined}
                     status={p.status}
                     errorMessage={p.errorMessage}
                     onRemove={() => handleRemovePending(p.tempId)}

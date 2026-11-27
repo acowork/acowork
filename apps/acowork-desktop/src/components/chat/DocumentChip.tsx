@@ -14,6 +14,10 @@ export interface DocumentChipProps {
   format: string;
   /** File size in bytes (optional) */
   size?: number;
+  /** Bytes the server has accepted so far. When present on an `uploading`
+   *  chip the size reads `sent / total` — a slow link is then visible instead
+   *  of an indefinite spinner. */
+  sentBytes?: number;
   /** Upload/persistence status */
   status?: DocumentChipStatus;
   /** Error message to display (when status is "error") */
@@ -47,6 +51,7 @@ export function DocumentChip({
   filename,
   format,
   size,
+  sentBytes,
   status,
   errorMessage,
   onRemove,
@@ -76,7 +81,9 @@ export function DocumentChip({
       <span className="max-w-[200px] truncate font-medium">{filename}</span>
       {size != null && (
         <span className="text-text-tertiary ">
-          {formatSize(size)}
+          {status === "uploading" && sentBytes != null
+            ? `${formatSize(sentBytes)} / ${formatSize(size)}`
+            : formatSize(size)}
         </span>
       )}
 

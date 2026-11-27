@@ -71,6 +71,7 @@ import { AgentAvatar } from "../common/AgentAvatar";
 import { OverlayScrollbar, OverlayScrollTarget } from "../common/OverlayScrollbar";
 import { OVERLAY_SCROLL_HOST_CLASS, OVERLAY_SCROLL_VIEWPORT_CLASS } from "../common/overlayScrollThumb";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
+import { DocumentChip } from "./DocumentChip";
 import { openChatAttachment } from "../../lib/openChatAttachment";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
@@ -579,6 +580,13 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const [pendingAttachments, setPendingAttachments] = useState<
     ChatAttachmentMeta[]
   >([]);
+  // In-flight uploads. The chip for a finished file needs the resolved meta
+  // (`pendingAttachments`), which the server only returns at the end — so the
+  // bytes on the wire would otherwise be invisible. Same `DocumentChip` as the
+  // execution surface renders, from the same `sent / total` numbers.
+  const [uploadingFiles, setUploadingFiles] = useState<
+    { key: string; filename: string; sizeBytes: number; sentBytes?: number }[]
+  >([]);
   const [uploading, setUploading] = useState(false);
   // Workspace references added with "Add to Chat" (rendered by
   // `AttachedContextChips`). They are content: a human who points at a file and
@@ -1020,8 +1028,23 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     setUploading(true);
     try {
       for (const f of files) {
-        const meta = await upload(sessionId, f);
-        setPendingAttachments((prev) => [...prev, meta]);
+        // One entry per file, keyed on identity: two same-named files picked
+        // together must not share a chip.
+        const key = `up-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        setUploadingFiles((prev) => [
+          ...prev,
+          { key, filename: f.name, sizeBytes: f.size },
+        ]);
+        try {
+          const meta = await upload(sessionId, f, (sent) => {
+            setUploadingFiles((prev) =>
+              prev.map((u) => (u.key === key ? { ...u, sentBytes: sent } : u)),
+            );
+          });
+          setPendingAttachments((prev) => [...prev, meta]);
+        } finally {
+          setUploadingFiles((prev) => prev.filter((u) => u.key !== key));
+        }
       }
     } catch (err) {
       console.warn("[AgentChatView] attachment upload failed:", err);
@@ -1570,8 +1593,18 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             panel — paths the Agent reads live, not uploaded copies. The
             uploaded bytes above are a separate list with a separate channel. */}
         <AttachedContextChips surface="chat" />
-        {pendingAttachments.length > 0 && (
+        {(uploadingFiles.length > 0 || pendingAttachments.length > 0) && (
           <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+            {uploadingFiles.map((u) => (
+              <DocumentChip
+                key={u.key}
+                filename={u.filename}
+                format={u.filename.split(".").pop()?.toLowerCase() ?? ""}
+                size={u.sizeBytes}
+                sentBytes={u.sentBytes}
+                status="uploading"
+              />
+            ))}
             {pendingAttachments.map((a) => (
               <ChatAttachmentChip
                 key={a.id}
