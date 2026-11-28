@@ -314,9 +314,9 @@ const WATCHDOG_INTERVAL_MS = 5_000;
  *  `connecting` / `reconnecting` older than this is promoted to
  *  `stale` and gets one `force_reconnect_mqtt`; the episode clock is
  *  then restarted so a still-stuck session retries every window.
- *  Exported so the input-area status banner (P0-7) can compute the
- *  "X seconds until auto-recovery" countdown UI without hardcoding 30s
- *  in two places. */
+ *  Exported so the title-bar connection pill (ConnectionStatusPill) can
+ *  compute the "X seconds until auto-recovery" countdown without
+ *  hardcoding 30s in two places. */
 export const STUCK_FORCE_RECONNECT_MS = 30_000;
 
 /** A `connecting` / `reconnecting` / `stale` status means a connection

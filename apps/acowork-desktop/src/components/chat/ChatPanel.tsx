@@ -3,7 +3,7 @@ import { Channel, invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { uploadPercent } from "./uploadProgress";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentStore } from "../../stores/agentStore";
-import { useChatStore, type ConnectionStatus, STUCK_FORCE_RECONNECT_MS } from "../../stores/chatStore";
+import { useChatStore, type ConnectionStatus } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSkillStore } from "../../stores/skillStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
@@ -294,204 +294,6 @@ function getInputPlaceholderKey(
   }
 }
 
-/**
- * P0-7: Live status banner above the input area. Shows the current
- * `effectiveConnection` and a real-time countdown ("X seconds until
- * auto-reconnect") so the user has a visible signal that the system is
- * working — not just a static "Connecting..." label that could mean
- * anything from "about to finish" to "stuck forever".
- *
- * Renders ONLY when:
- *   - effectiveConnection is one of connecting / reconnecting / stale /
- *     disconnected / **idle** (was: no banner for idle — fixed so a
- *     token-less boot that left the Rust client slot at `None` becomes
- *     visible to the user; the input placeholder still shows "Gateway
- *     not connected" while the HTTP side is down, so we don't double-up).
- *   - NOT `connected` (no banner once things are working).
- *
- * The countdown is driven by the connecting-episode clock
- * (`staleSince`, see chatStore): it counts down to
- * `staleSince + STUCK_FORCE_RECONNECT_MS` — the moment the watchdog
- * fires `force_reconnect_mqtt`. It therefore exists ONLY while a
- * connecting episode is in flight. `disconnected` is a terminal state
- * (the Rust session will not reconnect on its own), so instead of a
- * bogus "0s until auto-reconnect" it offers the one meaningful action:
- * a manual reconnect (H-2 of the review). `idle` is also a terminal
- * state (the Rust client was never created) — `force_reconnect_mqtt`
- * errors out without one (chat_mqtt.rs:887), so this branch offers
- * `connect_mqtt` instead: it is idempotent when a client already
- * targets the same broker, and it bootstraps one when none exists. We
- * tick at 1 Hz, which is enough resolution for a human-friendly
- * display and avoids sub-second re-renders that would trigger Zustand
- * churn.
- */
-function ConnectionStatusBanner({
-  effectiveConnection,
-  staleSince,
-}: {
-  effectiveConnection: ConnectionStatus;
-  staleSince: number | null;
-}): React.ReactElement | null {
-  const { t } = useTranslation();
-  const { addToast } = useToast();
-  // H-2: `disconnected` never auto-recovers — offer the manual action
-  // (the button is disabled while the invoke is in flight).
-  const [reconnecting, setReconnecting] = useState(false);
-  const handleReconnect = useCallback(async () => {
-    setReconnecting(true);
-    try {
-      await invoke("force_reconnect_mqtt");
-    } catch (err) {
-      log.warn("[connection-banner] force_reconnect_mqtt failed:", err);
-    } finally {
-      setReconnecting(false);
-    }
-  }, []);
-  // `idle` mirrors `force_reconnect_mqtt` semantics but targets the
-  // bootstrap path: there is no Rust client to rebuild, so we ask
-  // Tauri to create one (`connect_mqtt` is idempotent — see
-  // chat_mqtt.rs:208-230). Same Idempotency holds once the client is
-  // already live: returns immediately when the endpoint matches.
-  const handleConnect = useCallback(async () => {
-    setReconnecting(true);
-    try {
-      await invoke("connect_mqtt");
-    } catch (err) {
-      log.warn("[connection-banner] connect_mqtt failed:", err);
-      // Used to die in the log — the button looked dead ("clicked it,
-      // nothing happened"). Surface the reason (e.g. the relay+http
-      // rejection) so the user can act instead of re-clicking forever.
-      addToast({ type: "error", message: String(err) });
-    } finally {
-      setReconnecting(false);
-    }
-  }, [addToast]);
-  // The banner speaks for the MQTT/agent-side liveness — the single
-  // authority for connection UI. It no longer requires the HTTP `status`
-  // to read "connected": that display-side signal must not decide what
-  // the user is told about the real connection.
-  const isBannerWorthy =
-    effectiveConnection === "connecting" ||
-    effectiveConnection === "reconnecting" ||
-    effectiveConnection === "stale" ||
-    effectiveConnection === "disconnected" ||
-    effectiveConnection === "idle";
-
-  // Tick once per second so the countdown animates. Cheap (single
-  // setState/ChatPanel re-render, no global store updates).
-  const [now, setNow] = useState<number>(Date.now());
-  useEffect(() => {
-    if (!isBannerWorthy) return;
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [isBannerWorthy]);
-
-  if (!isBannerWorthy) return null;
-
-  const deadlineAt = staleSince !== null ? staleSince + STUCK_FORCE_RECONNECT_MS : null;
-  const secondsRemaining =
-    deadlineAt !== null ? Math.max(0, Math.ceil((deadlineAt - now) / 1000)) : null;
-
-  // Per-state label + icon. `idle` shares the `disconnected` row in
-  // the visual treatment (amber / AlertTriangle / manual action) — both
-  // are terminal states where the Rust side needs the user's nudge —
-  // but it gets its own i18n string so the message says "MQTT not
-  // initialized" rather than "Agent disconnected" (the latter implies
-  // we WERE connected and lost it; `idle` means we never connected).
-  const stateLabel: Record<
-    "connecting" | "reconnecting" | "stale" | "disconnected" | "idle",
-    string
-  > = {
-    connecting: t("chatPanel.connectionBanner.connecting"),
-    reconnecting: t("chatPanel.connectionBanner.reconnecting"),
-    stale: t("chatPanel.connectionBanner.stale"),
-    disconnected: t("chatPanel.connectionBanner.disconnected"),
-    idle: t("chatPanel.connectionBanner.idle"),
-  };
-  const label = stateLabel[effectiveConnection as keyof typeof stateLabel] ?? "";
-
-  // Visual severity drives the colour. `idle` joins `stale`/`disconnected`
-  // as amber (warning); the rest are sky/blue (info). `idle` does not get
-  // a countdown — the user clicks Connect, the watchdog does not auto-
-  // recover an empty client slot.
-  const isWarn =
-    effectiveConnection === "stale" ||
-    effectiveConnection === "disconnected" ||
-    effectiveConnection === "idle";
-  const containerCls = isWarn
-    ? "border-warning-border/60 bg-warning-surface text-warning-quiet"
-    : "border-info/60 bg-info-surface text-info";
-  const iconCls = isWarn ? "text-warning" : "text-info";
-  const retryCls = isWarn
-    ? "text-warning-quiet tabular-nums"
-    : "text-info tabular-nums";
-
-  const retryText =
-    secondsRemaining === null
-      ? null
-      : secondsRemaining === 1
-        ? t("chatPanel.connectionBanner.retryInOneSecond")
-        : t("chatPanel.connectionBanner.retryIn", { seconds: secondsRemaining });
-
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      data-testid="chat-connection-banner"
-      className={cn(
-        "mx-3 mt-2 flex items-center gap-2 rounded-md border px-3 py-2 text-xs",
-        containerCls,
-      )}
-    >
-      {isWarn ? (
-        <AlertTriangle className={cn("h-3.5 w-3.5 flex-shrink-0", iconCls)} aria-hidden="true" />
-      ) : (
-        <Loader className={cn("h-3.5 w-3.5 flex-shrink-0 animate-spin", iconCls)} aria-hidden="true" />
-      )}
-      <span className="flex-1 truncate">{label}</span>
-      {effectiveConnection === "disconnected" ? (
-        <button
-          type="button"
-          data-testid="chat-connection-banner-reconnect"
-          onClick={handleReconnect}
-          disabled={reconnecting}
-          className={cn(
-            "flex-shrink-0 rounded border px-2 py-0.5 text-xs font-medium transition-colors",
-            "border-warning-border/70 text-warning-quiet hover:bg-warning-surface-hover",
-            "dark:border-amber-600/70 dark:text-amber-200 dark:hover:bg-amber-900/40",
-            reconnecting && "opacity-60",
-          )}
-        >
-          {t("chatPanel.connectionBanner.reconnectNow")}
-        </button>
-      ) : effectiveConnection === "idle" ? (
-        <button
-          type="button"
-          data-testid="chat-connection-banner-connect"
-          onClick={handleConnect}
-          disabled={reconnecting}
-          className={cn(
-            "flex-shrink-0 rounded border px-2 py-0.5 text-xs font-medium transition-colors",
-            "border-warning-border/70 text-warning-quiet hover:bg-warning-surface-hover",
-            "dark:border-amber-600/70 dark:text-amber-200 dark:hover:bg-amber-900/40",
-            reconnecting && "opacity-60",
-          )}
-        >
-          {t("chatPanel.connectionBanner.connectNow")}
-        </button>
-      ) : retryText !== null ? (
-        <span className={retryCls} data-testid="chat-connection-banner-countdown">
-          {retryText}
-        </span>
-      ) : (
-        <span className="text-text-tertiary ">
-          {t("chatPanel.connectionBanner.recoveringHint")}
-        </span>
-      )}
-    </div>
-  );
-}
-
 // Stable empty defaults so memoized transcript rows keep prop identity when
 // the session has no pending approvals / questions (AGENTS.md store rule).
 const EMPTY_APPROVALS: Record<string, ToolApprovalNeededEvent> = {};
@@ -717,10 +519,8 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   // ChatPanel no longer reads it directly — `effectiveConnection` is the
   // single source of truth for the input box state.
   const effectiveConnection = useChatStore((s) => s.effectiveConnection);
-  // Watchdog's "since" timestamp for the current non-connected state. The
-  // status banner (ConnectionStatusBanner, P0-7) reads this to compute
-  // the "X seconds until auto-reconnect" countdown.
-  const mqttStaleSince = useChatStore((s) => s.staleSince);
+  // The non-connected-state countdown lives in the title bar's
+  // ConnectionStatusPill, which reads `staleSince` itself.
   const availableModels = useChatStore((s) => s.availableModels);
   // The depth levels the current model declares (models.dev
   // `reasoning_options`). Undefined = unknown (custom model) -> the generic
@@ -2703,16 +2503,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
             )}
             {/* Attached context chips (from right-click "Add to Chat") */}
             <AttachedContextChips />
-            {/* P0-7: live connection-status banner with auto-reconnect countdown.
-                Renders nothing when the connection is healthy — only shows when
-                the watchdog is actively trying to recover (connecting / stale /
-                disconnected). The placeholder below is the fallback for the
-                rare case where the banner isn't mounted (e.g. while the
-                watchdog is still in its initial idle state). */}
-            <ConnectionStatusBanner
-              effectiveConnection={effectiveConnection}
-              staleSince={mqttStaleSince}
-            />
+
             {/* Text field row: `+` on the left, the three icon buttons on the
                 right, the text between them — one line tall until the draft
                 wraps, then the field grows to six lines (see
