@@ -4169,6 +4169,13 @@ export function convertConversationEntry(
         steps: (meta.steps as number) ?? (meta.raw_count as number) ?? 0,
         tools: Array.isArray(meta.tools) ? (meta.tools as string[]) : [],
         toolsTruncated: meta.tools_truncated === true,
+        // Forwarded artifact facts (`produced` / `doc`), verbatim: the banner
+        // derivation reads them exactly as it reads a live row's `toolData`.
+        // Only well-formed objects survive — a malformed element degrades to
+        // "that call produced nothing", never to a thrown renderer.
+        facts: Array.isArray(meta.facts)
+          ? (meta.facts.filter((f) => !!f && typeof f === "object") as Record<string, unknown>[])
+          : undefined,
       },
     };
   }
