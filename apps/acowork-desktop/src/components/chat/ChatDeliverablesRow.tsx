@@ -28,9 +28,11 @@
  * interface returns them base64-encoded, which is what used to render as a wall
  * of characters.
  *
- * An online document is addressable by `doc_id` through the Gateway doc proxy;
- * clicking it opens a read-only Markdown preview tab (`openDocPreview`), reusing
- * the same doc viewer the doc navigation uses.
+ * An online document is addressable by `doc_id`; clicking it goes through
+ * `fileEditorStore.openDocEntry` with the shared `DocEntryRef` shape, which
+ * picks the view by extension (Markdown body vs the byte viewer) — so a
+ * `.pptx` deliverable opens as a deck, not as a blank editor. The row never
+ * carries bytes for either kind.
  *
  * Bytes are re-fetched through the ordinary workspace file route by the same
  * hook the editor preview uses, and cached by the same LRU; nothing about a
@@ -109,12 +111,15 @@ export function ChatDeliverablesRow({ message, agentId }: ChatDeliverablesRowPro
     [agentId],
   );
 
-  /** Open an online document as a read-only Markdown preview tab. */
+  /** Open an online document through the one doc entry point. Which view it
+   *  gets (Markdown body vs byte viewer) is `openDocEntry`'s call — the card
+   *  does not know or care whether the deliverable is a `.md` or a `.pptx`. */
   const openDoc = useCallback((doc: DeliverableDoc) => {
-    useFileEditorStore.getState().openDocPreview({
+    useFileEditorStore.getState().openDocEntry({
       docId: doc.docId,
       path: doc.path,
-      title: doc.name,
+      name: doc.name,
+      ext: null,
     });
   }, []);
 

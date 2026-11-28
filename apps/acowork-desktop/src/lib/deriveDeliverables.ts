@@ -17,6 +17,19 @@
  * online documents share a single derivation and a single renderer. The Runtime
  * supplies facts; everything about *what to show and where* lives here.
  *
+ * ## Two row shapes, one derivation
+ *
+ * A turn reaches this module in one of two shapes, and the banner must not be
+ * able to tell them apart:
+ *   - **live / raw page** — one row per tool call; the facts sit on each
+ *     `tool_result`'s `toolData`;
+ *   - **projected page** (`GET /messages?groups=stub`, every history load) — a
+ *     contiguous explore run collapses into ONE `explore_stub` row that
+ *     forwards the same facts on `exploreStub.facts`.
+ * Both are read through the same parsers in {@link rowFacts}. Before the stub
+ * forwarded them, a reloaded session showed no deliverables row at all while
+ * the live turn kept its own.
+ *
  * ## Legacy compatibility
  *
  * Sessions recorded before this change carry a persisted `deliverables` system
@@ -46,10 +59,10 @@ import {
   DELIVERABLES_META_TYPE,
   isDeliverablesRow,
   isImageDeliverable,
-  parseProducedFiles,
   type DeliverableFile,
 } from "./deliverableFiles";
-import { collectTurnDocs, type DeliverableDoc } from "./deliverableDocs";
+import { dedupeDocs, type DeliverableDoc } from "./deliverableDocs";
+import { turnArtifactFacts } from "./artifactFacts";
 
 const MAX_IMAGES = 8;
 const MAX_OTHER_FILES = 8;
@@ -117,8 +130,14 @@ interface TurnBanner {
 
 /** Resolve one turn's banner from its rows (pure; no caching). */
 function resolveTurnBanner(turn: readonly ChatMessage[]): TurnBanner {
-  const toolResults = turn.filter((m) => m.type === "tool_result");
-  const docs = collectTurnDocs(toolResults);
+  // One fold over the turn's rows, whatever shape they arrive in: live
+  // `tool_result` rows and projected `explore_stub` rows both contribute their
+  // artifact facts here (the row-shape adapter is `artifactFacts.ts`), so the
+  // banner is a function of the turn's content and of nothing else. The legacy
+  // persisted row (pre-ADR-119-revision sessions) carries files only; docs are
+  // still derived and attached to it.
+  const facts = turnArtifactFacts(turn);
+  const docs = dedupeDocs(facts.docs);
   const legacyIdx = turn.findIndex((m) => isDeliverablesRow(m));
   const last = turn[turn.length - 1];
 
@@ -134,7 +153,7 @@ function resolveTurnBanner(turn: readonly ChatMessage[]): TurnBanner {
     return { row, legacyIdx, sig: `legacy:${legacy.id}:${JSON.stringify(docs)}` };
   }
 
-  const files = applyFilePolicy(toolResults.flatMap((m) => parseProducedFiles(m.toolData)));
+  const files = applyFilePolicy(facts.files);
   if (files.length === 0 && docs.length === 0) {
     return { row: null, legacyIdx: -1, sig: "none" };
   }

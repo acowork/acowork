@@ -1,6 +1,6 @@
 #!/bin/bash
 # CI script for ACowork.AI
-# Usage: ./dev/ci.sh [redlines|versions|check|clippy|test|integration|smoke|all]
+# Usage: ./dev/ci.sh [redlines|versions|check|clippy|test|integration|smoke|cov|all]
 
 set -e
 
@@ -1021,10 +1021,14 @@ run_deliverables_coupling_redline() {
     echo "Checking ADR-119 deliverables decoupling red line..."
     local root="$SCRIPT_DIR/.."
     local rust_mod="$root/core/acowork-runtime/src/agent/turn_deliverables.rs"
+    # The artifact-fact registry (the transcript projection's forward list) is
+    # the same kind of surface: it names metadata KEYS and must never learn the
+    # tool that stamped them, or the projection becomes tool-aware.
+    local rust_facts="$root/core/acowork-runtime/src/agent/artifact_facts.rs"
     local ts_lib="$root/apps/acowork-desktop/src/lib/deliverableFiles.ts"
     local ts_row="$root/apps/acowork-desktop/src/components/chat/ChatDeliverablesRow.tsx"
     local f
-    for f in "$rust_mod" "$ts_lib" "$ts_row"; do
+    for f in "$rust_mod" "$rust_facts" "$ts_lib" "$ts_row"; do
         if [ ! -f "$f" ]; then
             echo "ERROR: the ADR-119 red line points at a file that no longer exists:"
             echo "  $f"
@@ -1054,7 +1058,7 @@ run_deliverables_coupling_redline() {
         $0 ~ /^[[:space:]]*(\/\/|\/\*|\*|\{\/\*)/ { next }
         $0 ~ /(playwright|[Ss]creenshot|browser|chromium|mcp_[a-z0-9]+__)/ { print FILENAME ":" FNR ":" $0; next }
         $0 ~ /(tool_?[Nn]ame|function\.name)[[:space:]]*(==|!=|===|!==)/ { print FILENAME ":" FNR ":" $0 }
-    ' "$rust_mod" "$ts_lib" "$ts_row" 2>/dev/null || true)
+    ' "$rust_mod" "$rust_facts" "$ts_lib" "$ts_row" 2>/dev/null || true)
     if [ -n "$offenders" ]; then
         echo "ERROR: the deliverables code path branches on what produced a file (ADR-119):"
         echo "$offenders"
@@ -1064,9 +1068,9 @@ run_deliverables_coupling_redline() {
         exit 1
     fi
 
-    if grep -qE '^[[:space:]]*use[[:space:]]+crate::tools::builtin' "$rust_mod" 2>/dev/null; then
-        echo "ERROR: turn_deliverables.rs imports a concrete tool module (ADR-119):"
-        grep -nE '^[[:space:]]*use[[:space:]]+crate::tools::builtin' "$rust_mod"
+    if grep -qE '^[[:space:]]*use[[:space:]]+crate::tools::builtin' "$rust_mod" "$rust_facts" 2>/dev/null; then
+        echo "ERROR: the deliverables code path imports a concrete tool module (ADR-119):"
+        grep -nE '^[[:space:]]*use[[:space:]]+crate::tools::builtin' "$rust_mod" "$rust_facts"
         echo "The module owns the rules, not the tool set; a tool-side dependency"
         echo "turns \"any MCP that returns an image\" back into \"that one MCP\"."
         exit 1
@@ -1269,6 +1273,168 @@ run_desktop_agent_literal_redline() {
     fi
 }
 
+# ── doc 域地址收敛红线（P-1：R1 / R3）───────────────────────────────────
+#
+# 技术方案：项目管理/p-66e68d1a/技术方案/doc域分层收敛-数据模型-中间件-业务.md
+#
+# 两条门保护同一件事：**文档库条目的「命名」与「寻址」各只有一个真相**。多一处
+# 手拼路径，改名 / 扩展名 / 路径渲染之间就会多出第二个真相，而它们只在某种组合下
+# 才互相矛盾 —— 这种缺陷 review 读不出来，grep 能。
+#
+# R3（命名）：全 core 只允许写入实现 `service/document_impl.rs` 手拼 `{}.md`，且必须
+# 是已知的 3 处（create / rename / 落盘）。白名单只会变小：P2 把它们换成
+# `DocMeta::file_name()` 之后，这条门收紧到"一处都不许"。
+run_doc_addressing_redline() {
+    echo "Checking doc addressing red line (P-1 R3: single naming rule)..."
+    local core="$SCRIPT_DIR/../core"
+    local writer="acowork-doc/src/service/document_impl.rs"
+    local hits count offenders
+    hits=$(grep -rnE 'format!\("\{\}\.md"' --include='*.rs' "$core"/*/src || true)
+    if [ -z "$hits" ]; then
+        echo "ERROR: the doc addressing red line matched nothing at all — not even in"
+        echo "       $writer. The pattern moved or was rewritten."
+        echo "       Repoint this gate; a guard over a vanished pattern passes vacuously."
+        exit 1
+    fi
+    offenders=$(printf '%s\n' "$hits" | grep -v "/$writer:" | grep -v '^$' || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: hand-built \"{}.md\" outside the single writer (P-1 R3):"
+        echo "$offenders"
+        echo "       A document's file name comes from DocMeta::file_name(); see the P-1"
+        echo "       section of the doc-module consolidation design."
+        exit 1
+    fi
+    count=$(printf '%s\n' "$hits" | grep -c . || true)
+    if [ "$count" -ne 3 ]; then
+        echo "ERROR: expected exactly 3 hand-built \"{}.md\" sites in $writer, found $count:"
+        echo "$hits"
+        echo "       The allowlist only shrinks: P2 replaces all three with"
+        echo "       DocMeta::file_name() and this gate then forbids the pattern outright."
+        exit 1
+    fi
+    echo "Doc addressing red line: OK (3 known sites, writer module only)"
+}
+
+# R1（边界）：桌面上唯一的 doc URL 构造者是 `lib/doc-api.ts`。`/api/doc/mcp` 出现在
+# `lib/hostedMcpTools.ts` 的 MCP 挂载表里 —— 那是端点声明，不是 URL 拼接，白名单放行。
+run_doc_url_boundary_redline() {
+    echo "Checking desktop doc-URL boundary red line (P-1 R1)..."
+    local desk="$SCRIPT_DIR/../apps/acowork-desktop/src"
+    local offenders
+    offenders=$(grep -rn '/api/doc' --include='*.ts' --include='*.tsx' "$desk" \
+        | grep -v '\.test\.' \
+        | grep -vE ':[0-9]+:[[:space:]]*(\*|//|/\*)' \
+        | grep -vE '/(doc-api|hostedMcpTools)\.ts:' || true)
+    # No whitelist, and that is deliberate (P2 closed the last entry): the byte
+    # cache no longer builds a doc URL itself — `workspaceFileBlob.ts` hands the
+    # `__doc__` source marker to `doc-api.ts::getDocFileUrl`. A whitelist entry
+    # that has been forgotten is a gate that is not there, so this list stays
+    # empty by construction.
+    if [ -n "$offenders" ]; then
+        echo "ERROR: a doc-library URL is being built outside lib/doc-api.ts (P-1 R1):"
+        echo "$offenders"
+        echo "       lib/doc-api.ts is the single URL constructor — add an exported function"
+        echo "       there instead of pasting a path."
+        exit 1
+    fi
+    echo "Desktop doc-URL boundary red line: OK"
+}
+
+# Desktop doc-domain layering lock (P2 R2).
+#
+# The doc domain has a middleware layer anyone may use — `lib/doc-api.ts`
+# (URL), `lib/docEntry.ts` (entry shape + kind rule), `lib/docFileBlob.ts`
+# (bytes) — and a business layer that is nobody else's to import:
+# `views/doc/**` and `stores/doc/**`. Without this gate a chat card or a search
+# hit re-grows a private path into doc internals, which is exactly how the
+# "two open entries with different abilities" problem came back the last time.
+#
+# The importers are PINNED, not pattern-matched: a new business→doc-business
+# edge has to be added here on purpose, and the reason has to be written down.
+run_doc_layering_redline() {
+    echo "Checking desktop doc layering red line (P2 R2)..."
+    local desk="$SCRIPT_DIR/../apps/acowork-desktop/src"
+    local edges leaks file offenders=""
+
+    edges=$(grep -rnE "from \"[./]*(views|stores)/doc/" "$desk" \
+        --include='*.ts' --include='*.tsx' \
+        | grep -vE '\.(test|spec)\.' \
+        | grep -vE "^$desk/(views|stores)/doc/" || true)
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        file=${line%%:*}
+        case "$file" in
+            # The editor tab hosts the doc viewers — that IS the seam between
+            # the open intent (`openDocEntry`) and the doc business views.
+            "$desk/components/editor/FileEditorPanel.tsx") ;;
+            # Mounts the doc settings panel.
+            "$desk/components/layout/AppLayout.tsx") ;;
+            # The workspace tree shows doc-library nodes in place.
+            "$desk/components/workspace/FileTree/FileTree.tsx") ;;
+            # A search hit navigates to the doc VIEW (not a tab) — a product
+            # decision that needs the doc editor store directly.
+            "$desk/components/search/GlobalSearchDialog.tsx") ;;
+            # Middleware: folder events feed the doc tree store.
+            "$desk/lib/docFsEvents.ts") ;;
+            # The doc route shell itself.
+            "$desk/views/DocsView.tsx") ;;
+            *) offenders="$offenders$line
+" ;;
+        esac
+    done <<EOF
+$edges
+EOF
+    if [ -n "$offenders" ]; then
+        echo "ERROR: new business → doc-business import edge (P2 R2):"
+        printf '%s' "$offenders"
+        echo "       Use the doc middleware instead: lib/doc-api.ts / lib/docEntry.ts /"
+        echo "       lib/docFileBlob.ts, or fileEditorStore.openDocEntry for opening."
+        echo "       If the edge is genuinely right, pin it in run_doc_layering_redline."
+        exit 1
+    fi
+
+    # The `__doc__` source marker and the viewer coordinates belong to the
+    # middleware. A business module building them by hand is the shape of
+    # "reaction: nothing visible when clicked" — it addresses a route the
+    # domain does not own.
+    leaks=$(grep -rnE 'DOC_FILE_AGENT_ID|docFileRef\(' "$desk" \
+        --include='*.ts' --include='*.tsx' \
+        | grep -vE '\.(test|spec)\.' \
+        | grep -vE ':[0-9]+:[[:space:]]*(\*|//|/\*)' \
+        | grep -vE "^$desk/(lib|views/doc|components/editor)/" || true)
+    if [ -n "$leaks" ]; then
+        echo "ERROR: doc byte coordinates built outside the doc middleware (P2 R2):"
+        echo "$leaks"
+        echo "       Go through fileEditorStore.openDocEntry / lib/docFileBlob.ts."
+        exit 1
+    fi
+    echo "Desktop doc layering red line: OK"
+}
+
+# Every bot's `prompts/rules.md` must carry the output-budget rule (PM
+# t-7db412be). The rule lives in the prompt because the runtime cannot know
+# what "too long" means for a giveable answer; what CI can know is that the
+# prompt is still there. A ninth bot added without it is verbose from day one
+# and nothing fails — this is the one line that makes "every bot" true tomorrow.
+# Judge is the phrase, not rules.md's own byte count: the file is a document,
+# the budget is about what the agent writes.
+run_output_budget_redline() {
+    echo "Checking per-bot output-budget rule red line..."
+    local missing="" d
+    for d in "$SCRIPT_DIR"/../bots/*/; do
+        # `bots/bot-packages/` is a directory of artifacts, not a bot source.
+        [ -f "$d/manifest.toml" ] || continue
+        grep -qF "## Output Budget" "$d/prompts/rules.md" 2>/dev/null \
+            || missing="$missing $(basename "$d")"
+    done
+    if [ -n "$missing" ]; then
+        echo "ERROR: no output-budget rule in prompts/rules.md of:$missing"
+        echo "       Copy the 'Output Budget' section from any sibling bot."
+        exit 1
+    fi
+    echo "output-budget rule presence: OK"
+}
+
 run_all_redlines() {
     run_node_redline
     run_mqtt_redline
@@ -1298,6 +1464,11 @@ run_all_redlines() {
     run_site_bot_term_redline
     run_package_ext_redline
     run_desktop_agent_literal_redline
+    run_output_budget_redline
+    # doc 域地址收敛（技术方案 P-1）：命名唯一 + 边界唯一。
+    run_doc_addressing_redline
+    run_doc_url_boundary_redline
+    run_doc_layering_redline
 }
 
 run_clippy() {
@@ -1378,6 +1549,28 @@ run_smoke() {
     python3 -u "$SCRIPT_DIR/e2e_frontend_smoke/smoke_test.py"
 }
 
+# 覆盖率（技术方案 P-1 门 4）：只对本次收敛的两个 crate 出摘要，门限落在"改动面"与
+# 两个解析器上，不给全仓一个数字 —— 全仓阈值只会诱导写没有断言的测试来凑行数。
+#
+# 工具是 cargo-llvm-cov（需要 `rustup component add llvm-tools-preview`）：
+#   cargo install cargo-llvm-cov --locked
+run_cov() {
+    if ! cargo llvm-cov --version >/dev/null 2>&1; then
+        echo "ERROR: cargo-llvm-cov is not installed, so coverage cannot be measured."
+        echo "       Coverage that is not measured is not a gate. Install it with:"
+        echo "         rustup component add llvm-tools-preview"
+        echo "         cargo install cargo-llvm-cov --locked"
+        exit 1
+    fi
+    echo "=== Coverage summary: acowork-doc + acowork-pm (doc-domain consolidation) ==="
+    cargo llvm-cov -p acowork-doc -p acowork-pm --summary-only
+    echo
+    echo "Gate (see the doc-module consolidation design, P-1):"
+    echo "  - changed lines ............ >= 90%"
+    echo "  - acowork-doc addressing .... 100% branch on resolve_entry_ref / path_of"
+    echo "  - desktop pure logic ....... linkResolver + openDocEntry dispatch (vitest, --coverage)"
+}
+
 case "$MODE" in
     # The greps only. Seconds, no toolchain, no network — this is what a PR
     # gate can afford to run first, on every push.
@@ -1404,6 +1597,9 @@ case "$MODE" in
     smoke)
         run_smoke
         ;;
+    cov)
+        run_cov
+        ;;
     all)
         run_all_redlines
         run_version_gate
@@ -1415,7 +1611,7 @@ case "$MODE" in
         ;;
     *)
         echo "Unknown mode: $MODE"
-        echo "Usage: $0 [redlines|versions|check|clippy|test|integration|smoke|all]"
+        echo "Usage: $0 [redlines|versions|check|clippy|test|integration|smoke|cov|all]"
         exit 1
         ;;
 esac

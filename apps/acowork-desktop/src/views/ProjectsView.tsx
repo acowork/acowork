@@ -17,7 +17,7 @@ import { SplitHandle } from "../components/common/SplitHandle";
 import { CAPSULE_PANE_CN } from "../components/common/capsule";
 import { cn } from "../lib/utils";
 import { usePmProjectStore } from "../stores/pm/projectStore";
-import { usePmBoardStore } from "../stores/pm/boardStore";
+import { projectScope, sameScope, usePmBoardStore } from "../stores/pm/boardStore";
 import { usePmTaskDetailStore } from "../stores/pm/taskDetailStore";
 import { usePmHealthStore } from "../stores/pm/healthStore";
 import { ProjectSidebar } from "./pm/ProjectSidebar";
@@ -45,7 +45,7 @@ export function ProjectsView() {
 
   const boardLoading = usePmBoardStore((s) => s.loading);
   const boardError = usePmBoardStore((s) => s.error);
-  const boardProjectId = usePmBoardStore((s) => s.projectId);
+  const boardScope = usePmBoardStore((s) => s.scope);
   const boardUpdatedAt = usePmBoardStore((s) => s.updatedAt);
   const loadTasks = usePmBoardStore((s) => s.loadTasks);
   const clearBoard = usePmBoardStore((s) => s.clear);
@@ -265,7 +265,8 @@ export function ProjectsView() {
           loading={
             boardLoading ||
             (selected !== null &&
-              (boardProjectId !== selected.id || boardUpdatedAt === null))
+              (!sameScope(boardScope, projectScope(selected.id)) ||
+                boardUpdatedAt === null))
           }
           error={boardError}
           onRetry={handleRetry}

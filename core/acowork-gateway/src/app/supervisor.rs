@@ -117,10 +117,10 @@ async fn reap_previous_instance(cfg: &GenericAppConfig) {
 /// Returns the PID that was signalled, if any, so uninstall can wait until
 /// Windows releases the directory handle on `apps/{id}/versions/.../bin`.
 pub async fn stop_app(app_id: &str, state: &SharedState) -> Option<u32> {
-    if let Some(map) = stop_map().as_mut() {
-        if let Some(tx) = map.remove(app_id) {
-            let _ = tx.send(true);
-        }
+    if let Some(map) = stop_map().as_mut()
+        && let Some(tx) = map.remove(app_id)
+    {
+        let _ = tx.send(true);
     }
     let pid = {
         let mut gw = state.write().await;
@@ -328,12 +328,11 @@ async fn spawn_and_monitor(cfg: &GenericAppConfig, state: &SharedState) {
 async fn wait_for_ready(cfg: &GenericAppConfig, pid: u32) -> Option<u16> {
     let deadline = Instant::now() + supervisor_defaults::STARTUP_GRACE;
     loop {
-        if let Ok(text) = tokio::fs::read_to_string(&cfg.port_file).await {
-            if let Ok(port) = text.trim().parse::<u16>() {
-                if check_health(port, &cfg.health_path).await {
-                    return Some(port);
-                }
-            }
+        if let Ok(text) = tokio::fs::read_to_string(&cfg.port_file).await
+            && let Ok(port) = text.trim().parse::<u16>()
+            && check_health(port, &cfg.health_path).await
+        {
+            return Some(port);
         }
         if !crate::lifecycle::process::check_health(pid).await {
             return None;
@@ -444,6 +443,10 @@ async fn clear_state(app_id: &str, state: &SharedState) {
 
 /// Build the supervisor config from a declaration. Kept separate from the
 /// spawn loop so it can be unit-tested without launching a process.
+///
+/// 「参数多」在这里是说真话：每个参数都原样落进 [`GenericAppConfig`] 的一个
+/// 命名字段，包成一个结构体只是把同一组字段抄两遍（而且调用点还要先拼）。
+#[allow(clippy::too_many_arguments)]
 pub fn config_from_manifest(
     manifest: &acowork_core::app::AppManifest,
     binary: PathBuf,

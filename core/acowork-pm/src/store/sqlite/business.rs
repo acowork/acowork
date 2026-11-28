@@ -24,15 +24,18 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{PmError, Result};
 use crate::types::{
-    ActivityKind, AttachmentId, AttachmentMeta, CreateProject, CreateTask, DependencyKind,
-    MemberKind, Project, ProjectId, ProjectMember, ProjectStatus, ReparentTask, ReviewStatus, Task,
-    TaskActivity, TaskFilter, TaskId, TaskResult, TaskSort, TaskStatus, UpdateProject, UpdateTask,
+    ActivityKind, AttachmentId, AttachmentMeta, CreateProject, CreateTask, MemberKind, Project,
+    ProjectId, ProjectMember, ProjectStatus, ReparentTask, ReviewStatus, Task, TaskActivity,
+    TaskFilter, TaskId, TaskResult, TaskSort, TaskStatus, UpdateProject, UpdateTask,
 };
 
-use super::{SqlitePmStore, db_err, load_task_from, update_task_row};
+use super::{
+    SqlitePmStore, db_err, load_task_from, update_task_row, validate_dependency_graph,
+};
 use crate::store::contract::PmStore;
 use crate::store::rules::{
-    ensure_creation_approved, parse_task_id, priority_rank, seeded_activity, validate_transition,
+    ensure_creation_approved, normalize_dependencies, parse_task_id, priority_rank,
+    seeded_activity, validate_transition,
 };
 
 // ── Activity helpers ────────────────────────────────────────────────
@@ -438,7 +441,7 @@ impl PmStore for SqlitePmStore {
     async fn create_task_as(
         &self,
         project_id: &ProjectId,
-        input: CreateTask,
+        mut input: CreateTask,
         created_by: &str,
         created_by_kind: MemberKind,
     ) -> Result<Task> {
@@ -501,12 +504,11 @@ impl PmStore for SqlitePmStore {
             (None, 0)
         };
 
-        for dep in &input.depends_on {
-            parse_task_id(dep.task_id.as_str())?;
-            if dep.task_id == task_id {
-                return Err(PmError::DependencyCycle(task_id.to_string()));
-            }
-        }
+        // 依赖：纯规则（只接受 blocks / 拒自引用 / 去重）+ 图校验（目标存在 /
+        // 传递成环）。创建与更新两条写路径共用这两个入口，规则不在业务代码里
+        // 再写一遍 —— 之前这里只有自引用一条检查，那是最短的环，不是全部的环。
+        let depends_on = normalize_dependencies(&task_id, std::mem::take(&mut input.depends_on))?;
+        self.with_conn(|conn| validate_dependency_graph(conn, &task_id, &depends_on))?;
 
         let review_status = if created_by_kind == MemberKind::User {
             ReviewStatus::NotRequired
@@ -529,7 +531,7 @@ impl PmStore for SqlitePmStore {
             dispatch_message_id: None,
             dispatch_attempts: 0,
             dispatch_error: None,
-            depends_on: input.depends_on,
+            depends_on,
             attachments: vec![],
             result: None,
             created_by: created_by.to_string(),
@@ -678,12 +680,8 @@ impl PmStore for SqlitePmStore {
             task.start_at = input.start_at.flatten();
         }
         if let Some(deps) = input.depends_on {
-            for dep in &deps {
-                parse_task_id(dep.task_id.as_str())?;
-                if dep.task_id == *id {
-                    return Err(PmError::DependencyCycle(id.to_string()));
-                }
-            }
+            let deps = normalize_dependencies(id, deps)?;
+            self.with_conn(|conn| validate_dependency_graph(conn, id, &deps))?;
             task.depends_on = deps;
         }
         task.updated_at = Utc::now();
@@ -1010,11 +1008,10 @@ impl PmStore for SqlitePmStore {
             .load_task(task_id)?
             .ok_or_else(|| PmError::TaskNotFound(task_id.to_string()))?;
         let mut blocked = Vec::new();
-        for dep in task
-            .depends_on
-            .iter()
-            .filter(|d| d.kind == DependencyKind::Blocks)
-        {
+        // 只看"有没有这条边"，不看 `kind`：闸门的问句是"前置满没满足"，
+        // 不是"作者管这条边叫什么"。按标签过滤正是 `relates` 边能拦住却不拦
+        // 的原因（见 `dispatch_blocked`）。
+        for dep in &task.depends_on {
             let satisfied = matches!(
                 self.load_task(&dep.task_id)?.map(|t| t.status),
                 Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)
@@ -1194,8 +1191,11 @@ mod tests {
     use super::*;
     use crate::config::PmConfig;
     use crate::store::contract::PmMaintenance;
+    // `DependencyKind` 只在测试里出现：生产代码**不再读** `kind`（闸门看边不看
+    // 标签），这正是这次收敛的目标，所以它不是业务依赖。
     use crate::types::{
-        AttachmentId, AttachmentKind, CreateProject, CreateTask, Dependency, Priority, TaskType,
+        AttachmentId, AttachmentKind, CreateProject, CreateTask, Dependency, DependencyKind,
+        Priority, TaskType,
     };
 
     fn new_store(dir: &Path) -> SqlitePmStore {
@@ -1663,6 +1663,251 @@ mod tests {
             .unwrap();
         // Still blocked: the prerequisite is Done only after a submit+approve.
         assert!(db.dispatch_due_ids(Utc::now(), 10).is_empty());
+    }
+
+    // ── 依赖契约：`depends_on` 只有一种语义（阻塞）────────────────────
+    //
+    // 这一组锁的是"依赖到底管不管事"。事故形态：一批卡把前置写成 `relates`
+    // 声称有依赖，闸门却只读 `blocks`，于是审批一过就开跑，前置还在 pending。
+
+    async fn project_with_members(db: &SqlitePmStore, title: &str) -> ProjectId {
+        let project = db
+            .create_project_as(
+                CreateProject {
+                    title: title.into(),
+                    description: String::new(),
+                    metadata: Default::default(),
+                },
+                "human",
+                MemberKind::User,
+            )
+            .await
+            .unwrap();
+        db.add_project_member(&project.id, "agent-1", MemberKind::Agent)
+            .await
+            .unwrap();
+        project.id
+    }
+
+    fn dep(task: &Task, kind: DependencyKind) -> Dependency {
+        Dependency {
+            task_id: task.id.clone(),
+            kind,
+        }
+    }
+
+    /// 写入侧只接受 `blocks`：`relates` 不是"弱依赖"，是漏洞入口。
+    /// 且必须**报错**而不是静默改写 —— 静默改写会让调用方继续以为那条边不拦事。
+    #[tokio::test]
+    async fn a_dependency_must_be_blocking_on_create_and_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = new_store(tmp.path());
+        let pid = project_with_members(&db, "dep kinds").await;
+        let blocker = db
+            .create_task(&pid, task_input("blocker", None), "human")
+            .await
+            .unwrap();
+        let me = db
+            .create_task(&pid, task_input("me", None), "human")
+            .await
+            .unwrap();
+
+        for kind in [DependencyKind::Relates, DependencyKind::Duplicates] {
+            let mut input = task_input("bad", None);
+            input.depends_on = vec![dep(&blocker, kind)];
+            let err = db
+                .create_task_as(&pid, input, "human", MemberKind::User)
+                .await
+                .unwrap_err();
+            assert_eq!(err.error_code(), "unsupported_dependency_kind", "{kind:?}");
+            assert_eq!(err.http_status(), 400);
+
+            let err = db
+                .update_task(
+                    &me.id,
+                    UpdateTask {
+                        depends_on: Some(vec![dep(&blocker, kind)]),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.error_code(), "unsupported_dependency_kind", "{kind:?}");
+        }
+
+        // 合法的那种边照旧能写，且真的存成 blocks。
+        let updated = db
+            .update_task(
+                &me.id,
+                UpdateTask {
+                    depends_on: Some(vec![dep(&blocker, DependencyKind::Blocks)]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.depends_on[0].kind, DependencyKind::Blocks);
+    }
+
+    /// 旧实现只拦"依赖自己"这一条（最短的环）。A→B→C→A 三条边过去能写进去，
+    /// 结果是三张卡互相拦死、谁都派不出去，而服务端认为校验通过。
+    #[tokio::test]
+    async fn a_transitive_dependency_cycle_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = new_store(tmp.path());
+        let pid = project_with_members(&db, "cycle").await;
+        let a = db
+            .create_task(&pid, task_input("a", None), "human")
+            .await
+            .unwrap();
+        let b = {
+            let mut input = task_input("b", None);
+            input.depends_on = vec![dep(&a, DependencyKind::Blocks)];
+            db.create_task_as(&pid, input, "human", MemberKind::User)
+                .await
+                .unwrap()
+        };
+        let c = {
+            let mut input = task_input("c", None);
+            input.depends_on = vec![dep(&b, DependencyKind::Blocks)];
+            db.create_task_as(&pid, input, "human", MemberKind::User)
+                .await
+                .unwrap()
+        };
+
+        // c 已经（传递地）依赖 a：让 a 依赖 c 就是一条回边。
+        let err = db
+            .update_task(
+                &a.id,
+                UpdateTask {
+                    depends_on: Some(vec![dep(&c, DependencyKind::Blocks)]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_code(), "dependency_cycle", "{err:?}");
+        assert_eq!(err.http_status(), 409);
+
+        // 拒绝之后图必须原样不动（不能留半条边）。
+        assert!(db.get_task(&a.id).await.unwrap().unwrap().depends_on.is_empty());
+    }
+
+    /// 悬挂依赖 = 打不开的锁：`dispatch_blocked` 对读不到的前置是 fail-closed，
+    /// 所以这种边必须在写入时就拒掉，而不是留一张永远派不出去的卡。
+    #[tokio::test]
+    async fn a_dependency_on_a_missing_task_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = new_store(tmp.path());
+        let pid = project_with_members(&db, "dangling").await;
+        let ghost = TaskId::parse("t-ghost000").unwrap();
+        let mut input = task_input("waits for nothing", None);
+        input.depends_on = vec![Dependency {
+            task_id: ghost,
+            kind: DependencyKind::Blocks,
+        }];
+        let err = db
+            .create_task_as(&pid, input, "human", MemberKind::User)
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_code(), "dependency_target_not_found");
+        assert_eq!(err.http_status(), 404);
+    }
+
+    /// **闸门不读 `kind`**：存量的 `relates` 边照样拦路。
+    ///
+    /// 这是整个收敛的地基。事故的成因是闸门按标签过滤（只认 `blocks`），于是
+    /// 一条"声明过的依赖"可以不拦任何东西。现在闸门只问"前置满没满足"，
+    /// 校验层只收 `blocks`，两层各自独立：即使迁移没跑、或数据被人写脏，
+    /// 依赖也不会失效 —— 只会表现为数据不整齐。
+    #[tokio::test]
+    async fn a_legacy_kind_edge_still_blocks_dispatch_and_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = new_store(tmp.path());
+        let pid = project_with_members(&db, "legacy kinds").await;
+        let blocker = db
+            .create_task(&pid, task_input("blocker", None), "human")
+            .await
+            .unwrap();
+        let mut input = task_input("dependent", None);
+        input.assignee = Some("agent-1".into());
+        let dependent = db
+            .create_task_as(&pid, input, "human", MemberKind::User)
+            .await
+            .unwrap();
+
+        // 无依赖时：到点、已批准、已指派 → 在派发候选里。
+        assert_eq!(db.dispatch_due_ids(Utc::now(), 10), vec![dependent.id.clone()]);
+
+        // 造出"存量"形状（`relates`），绕过写入校验 —— 正是旧数据的落库方式。
+        let mut legacy = dependent.clone();
+        legacy.depends_on = vec![Dependency {
+            task_id: blocker.id.clone(),
+            kind: DependencyKind::Relates,
+        }];
+        db.save_task(&legacy).unwrap();
+
+        // 派发扫描跳过它（fail-closed），claim 也拒绝 —— 与 `kind` 无关。
+        assert!(
+            db.dispatch_due_ids(Utc::now(), 10).is_empty(),
+            "a legacy `relates` edge must still block dispatch"
+        );
+        let err = db.claim_task(&dependent.id, "agent-1").await.unwrap_err();
+        assert_eq!(err.error_code(), "dependency_not_satisfied", "{err:?}");
+
+        // 前置完成 → 闸门打开，证明拦的是"前置没做完"，不是"标签叫 relates"。
+        let mut done = db.get_task(&blocker.id).await.unwrap().unwrap();
+        done.status = TaskStatus::Done;
+        db.save_task(&done).unwrap();
+        db.claim_task(&dependent.id, "agent-1").await.unwrap();
+    }
+
+    /// 迁移是**纯数据订正**：把存量 `relates` 改写成 `blocks`。
+    ///
+    /// 它的正确性不承担语义 —— 闸门已经不看 `kind` 了 —— 所以它可以是一次性的：
+    /// `meta` 里留标记，第二次启动不再全量解析 `props`。这条测试同时钉住"只跑
+    /// 一次"这个刻意的取舍：标记之后新出现的脏值不会被再扫一遍（代价是数据不
+    /// 整齐，收益是启动不做全表 JSON 解析）。
+    #[tokio::test]
+    async fn migrating_legacy_dependency_kinds_is_a_one_shot_rewrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = new_store(tmp.path());
+        let pid = project_with_members(&db, "legacy kinds migration").await;
+        let blocker = db
+            .create_task(&pid, task_input("blocker", None), "human")
+            .await
+            .unwrap();
+        let dependent = db
+            .create_task(&pid, task_input("dependent", None), "human")
+            .await
+            .unwrap();
+
+        let mut legacy = dependent.clone();
+        legacy.depends_on = vec![Dependency {
+            task_id: blocker.id.clone(),
+            kind: DependencyKind::Duplicates,
+        }];
+        db.save_task(&legacy).unwrap();
+
+        assert_eq!(db.migrate_dependency_kinds().await.unwrap(), 1);
+        assert_eq!(
+            db.get_task(&dependent.id).await.unwrap().unwrap().depends_on[0].kind,
+            DependencyKind::Blocks
+        );
+
+        // 一旦落标记，重复启动不再扫表（返回 0，且不再改写新出现的旧值）。
+        let mut dirty_again = db.get_task(&dependent.id).await.unwrap().unwrap();
+        dirty_again.depends_on = vec![Dependency {
+            task_id: blocker.id.clone(),
+            kind: DependencyKind::Relates,
+        }];
+        db.save_task(&dirty_again).unwrap();
+        assert_eq!(db.migrate_dependency_kinds().await.unwrap(), 0);
+        assert_eq!(
+            db.get_task(&dependent.id).await.unwrap().unwrap().depends_on[0].kind,
+            DependencyKind::Relates,
+            "the marker makes the rewrite one-shot — enforcement does not depend on it"
+        );
     }
 
     /// The `cascade` flag is a real contract: refusing a destructive delete

@@ -87,6 +87,8 @@ pub fn pm_router(
             "/projects/{pid}/tasks",
             get(tasks::list).post(tasks::create),
         )
+        // 跨项目列表（`?assignee=` 为主用法）。静态段，与 `/tasks/{tid}` 不冲突。
+        .route("/tasks", get(tasks::list_all))
         .route(
             "/tasks/{tid}",
             get(tasks::get).patch(tasks::update).delete(tasks::delete),

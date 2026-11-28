@@ -142,6 +142,8 @@ export function useTaskForm({
       // 一致——不再是一片空白，让人以为"没排期 = 不会派发"。
       startAt: initial ? isoToLocalDateTime(initial.start_at) : nowDateTimeField(),
       parentId: initial?.parent_id ?? defaultParentId ?? "",
+      // 只留 id：`kind` 不是这一层的维度（依赖 = 阻塞），保存时统一写 `blocks`。
+      // 曾经的写法连 `kind` 一起丢、保存时补 `relates`，把服务端数据改坏了。
       dependsOn: initial?.depends_on?.map((d) => d.task_id) ?? [],
     }),
     [initial, defaultParentId],
@@ -216,7 +218,15 @@ export function useTaskForm({
     if (!title) return { ok: false, reason: "title_required" };
     setSaving(true);
     try {
-      const dependsOn = values.dependsOn.map((id) => ({ task_id: id, kind: "relates" as const }));
+      // 依赖只有一种语义：阻塞。所以这里没有 kind 选择器 —— 早先这一行写的是
+      // `kind: "relates"`（硬编码），后果是：凡是从这个 dialog 保存过一次的
+      // 任务，它的**全部** `blocks` 依赖当场被降级成不参与任何闸门的 `relates`，
+      // 依赖再也拦不住派发。表单里没有 kind 这一维，就没有第二种可能。
+      //
+      // 全量提交（不是只提交增删的边）是刻意的：语义单一之后全量写是幂等的，
+      // 顺带把历史遗留的 `relates` 边修回 `blocks`（服务端也有一条一次性迁移
+      // 做同一件事，两条路径指向同一个终态）。
+      const dependsOn = values.dependsOn.map((id) => ({ task_id: id, kind: "blocks" as const }));
       const dueIso = values.dueAt ? localDateTimeToIso(values.dueAt) : null;
       const startIso = values.startAt ? localDateTimeToIso(values.startAt) : null;
 

@@ -1672,7 +1672,7 @@ mod tests {
             );
         }
 
-        delete_node(
+        let _ = delete_node(
             State(state.clone()),
             Path("gpu-1".to_string()),
             Some(user_ctx("alice")),

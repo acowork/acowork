@@ -31,14 +31,47 @@ export interface PmBoardTree {
   children: PmBoardTree[];
 }
 
+/**
+ * 一份任务列表属于谁 —— store 里同一时刻只装一份 `tasks`，这就是它的归属：
+ *
+ * - `project`：项目看板 / 群聊右侧面板（`GET /projects/{pid}/tasks`）
+ * - `assignee`：某个 agent 跨项目的活（`GET /tasks?assignee=`），即 bot 单聊
+ *   右侧的任务面板
+ *
+ * 是一个 union 而不是两个可空字段：`projectId` + `assignee` 那种写法允许
+ * 两个都设、两个都空、或者和 `tasks` 对不上，而每次读取都要自己重新推一遍
+ * 「这份数据到底是谁的」。构造只走 [`projectScope`] / [`assigneeScope`]，
+ * 比较只走 [`sameScope`]。
+ *
+ * 为什么两个作用域共用一个 store 而不是两份：卡片上的批准 / 状态流转 / 回滚
+ * 都是对 `tasks` 的乐观更新（`TaskCard`、`KanbanColumn` 直接读 store），
+ * 换一份数据源就得把整条渲染链改成注入式，而这三个视图本来也不会同时出现。
+ */
+export type PmBoardScope =
+  | { readonly kind: "project"; readonly id: string }
+  | { readonly kind: "assignee"; readonly id: string };
+
+export const projectScope = (id: string): PmBoardScope => ({ kind: "project", id });
+export const assigneeScope = (id: string): PmBoardScope => ({ kind: "assignee", id });
+
+/** 两个作用域是不是同一份数据（按值比，不按引用）。 */
+export function sameScope(a: PmBoardScope | null, b: PmBoardScope | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.kind === b.kind && a.id === b.id;
+}
+
 interface PmBoardState {
-  projectId: string | null;
+  /** `tasks` 当前属于谁；null = 空。 */
+  scope: PmBoardScope | null;
   tasks: PmTaskResponse[];
   loading: boolean;
   error: string | null;
   updatedAt: number | null;
 
   loadTasks: (pid: string, opts?: { silent?: boolean }) => Promise<void>;
+  /** 只装某个 agent（`task.assignee`）的任务，跨项目聚合。 */
+  loadAssigned: (assignee: string, opts?: { silent?: boolean }) => Promise<void>;
   /** 按状态分组的扁平任务列表（主看板 4 列） */
   tasksByStatus: (status: TaskStatus) => PmTaskResponse[];
   /** 根任务（parent_id=null）按列分组 */
@@ -92,29 +125,55 @@ export const usePmBoardStore = create<PmBoardState>((set, get) => {
     childrenCache = cache;
   }
 
+  /**
+   * 两个 `load*` 的唯一躯干：缓存 / 合并同作用域的在途请求 / 换作用域先清空 /
+   * 迟到响应丢弃。作用域是唯一的比较依据（[`sameScope`]），所以「这份数据
+   * 是谁的」只有一处判断。
+   */
+  async function load(
+    scope: PmBoardScope,
+    fetch: () => Promise<PmTaskResponse[]>,
+    silent: boolean,
+  ) {
+    const same = sameScope(get().scope, scope);
+    // 同一作用域的在途请求合并成一次；换作用域时绝不能被吞掉（否则面板会
+    // 永远空着等一个不会来的响应）。
+    if (get().loading && same) return;
+    if (!silent && same && get().updatedAt) {
+      if (Date.now() - get().updatedAt! < CACHE_MS) return;
+    }
+    set({
+      loading: !silent,
+      error: null,
+      scope,
+      // 换作用域先清空：否则上一个作用域的卡片会在新数据回来前那一帧被画出来。
+      ...(same ? {} : { tasks: [], updatedAt: null }),
+    });
+    try {
+      const tasks = await fetch();
+      // 响应回来时作用域已经换了 —— 丢掉，否则这份列表会落到别的作用域上。
+      if (!sameScope(get().scope, scope)) return;
+      rebuildCache(tasks);
+      set({ tasks, loading: false, error: null, updatedAt: Date.now() });
+    } catch (e) {
+      if (!sameScope(get().scope, scope)) return;
+      set({ loading: false, error: e instanceof Error ? e.message : String(e) });
+      log.warn(`[pm:board] load ${scope.kind}:${scope.id} failed:`, e);
+    }
+  }
+
   return {
-    projectId: null,
+    scope: null,
     tasks: [],
     loading: false,
     error: null,
     updatedAt: null,
 
-    loadTasks: async (pid, { silent = false } = {}) => {
-      if (get().loading) return;
-      if (!silent && get().projectId === pid && get().updatedAt) {
-        const age = Date.now() - get().updatedAt!;
-        if (age < CACHE_MS) return;
-      }
-      set({ loading: !silent, error: null, projectId: pid });
-      try {
-        const tasks = await pmApi.listProjectTasks(pid);
-        rebuildCache(tasks);
-        set({ tasks, loading: false, error: null, updatedAt: Date.now() });
-      } catch (e) {
-        set({ loading: false, error: e instanceof Error ? e.message : String(e) });
-        log.warn("[pm:board] loadTasks failed:", e);
-      }
-    },
+    loadTasks: (pid, { silent = false } = {}) =>
+      load(projectScope(pid), () => pmApi.listProjectTasks(pid), silent),
+
+    loadAssigned: (assignee, { silent = false } = {}) =>
+      load(assigneeScope(assignee), () => pmApi.listAssignedTasks(assignee), silent),
 
     tasksByStatus: (status) => get().tasks.filter((t) => t.status === status),
 
@@ -249,21 +308,16 @@ export const usePmBoardStore = create<PmBoardState>((set, get) => {
     },
 
     reload: async () => {
-      const pid = get().projectId;
-      if (!pid) return;
-      set({ loading: true });
-      try {
-        const tasks = await pmApi.listProjectTasks(pid);
-        rebuildCache(tasks);
-        set({ tasks, loading: false, error: null, updatedAt: Date.now() });
-      } catch (e) {
-        set({ loading: false, error: e instanceof Error ? e.message : String(e) });
-      }
+      // 走作用域自己的加载口子；`silent` 让缓存条件不生效 = 立即重取。
+      const { scope } = get();
+      if (!scope) return;
+      if (scope.kind === "project") await get().loadTasks(scope.id, { silent: true });
+      else await get().loadAssigned(scope.id, { silent: true });
     },
 
     clear: () => {
       childrenCache = new Map();
-      set({ projectId: null, tasks: [], updatedAt: null, error: null });
+      set({ scope: null, tasks: [], updatedAt: null, error: null });
     },
   };
 });

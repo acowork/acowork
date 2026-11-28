@@ -7,6 +7,12 @@ import { getCachedFileVersion } from "./fileTree";
 import { HOSTED_PREVIEW_EXT_RE } from "../components/editor/filePreview";
 import { log } from "../lib/logger";
 import { getDoc } from "../lib/doc-api";
+import {
+    docEntryFileName,
+    docEntryFromRead,
+    isImportedEntry,
+    type DocEntryRef,
+} from "../lib/docEntry";
 import type { GitCommitDto } from "./gitStore";
 
 /**
@@ -167,8 +173,11 @@ export interface OpenFile {
     /** The doc-service document id (only for kind === "doc"). Stable across
      *  rename/move, so it — not the path — keys the tab. */
     docId?: string;
-    /** Library-relative path of the document (only for kind === "doc"). */
-    docPath?: string;
+    /** The entry itself (only for kind === "doc") — path / name / ext in the
+     *  one shared shape (`lib/docEntry.ts`). Keeping the whole ref on the tab
+     *  means the viewer branch neither re-derives the file name nor guesses
+     *  whether the entry has editable Markdown body. */
+    docEntry?: DocEntryRef;
     /** Document version last loaded (only for kind === "doc"). */
     docVersion?: number;
     /** The URL to load (only for kind === "url") */
@@ -281,12 +290,21 @@ interface FileEditorState {
         content: string;
         language: string;
     }) => void;
-    /** Open a read-only virtual tab previewing a doc-service online document.
-     *  Content is fetched by `doc_id` through the Gateway doc proxy, so the
-     *  tab works regardless of which node holds the agent. Addressed as
-     *  `doc:${docId}` (stable across rename/move); reopening activates the
-     *  existing tab. Never saved, never dirty, no fs-watch. */
-    openDocPreview: (opts: { docId: string; path: string; title?: string }) => void;
+    /** Open a doc-service entry as a read-only virtual tab. **The one entry
+     *  point** for a document reference from outside the doc panel — chat
+     *  deliverable cards, Markdown links, PM refs and search hits all call it.
+     *
+     *  Which view the tab gets is decided here, once, by
+     *  `lib/docEntry.ts::docEntryKind()`:
+     *    - `"markdown"` → body fetched by `doc_id` through the Gateway doc
+     *      proxy and rendered read-only;
+     *    - `"file"` (pdf / docx / xlsx / pptx / image) → the tab hosts the same
+     *      byte viewer the doc panel and the workspace use (`DocFilePreview`),
+     *      bytes come from the blob cache, nothing is fetched into `content`.
+     *
+     *  Addressed as `doc:${docId}` (stable across rename/move); reopening
+     *  activates the existing tab. Never saved, never dirty, no fs-watch. */
+    openDocEntry: (entry: DocEntryRef) => void;
     /** Open a URL in a new tab (rendered in an iframe). Does nothing if the URL is invalid. */
     openUrl: (agentId: string, url: string) => void;
     /** ADR-078: open a read-only virtual diff/log tab (Monaco DiffEditor
@@ -788,13 +806,17 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         }));
     },
 
-    openDocPreview: ({ docId, path, title }) => {
-        const fileId = `doc:${docId}`;
+    openDocEntry: (entry) => {
+        const fileId = `doc:${entry.docId}`;
         if (get().openFiles.some((f) => f.id === fileId)) {
             set({ activeFileId: fileId });
             return;
         }
-        const fileName = path.split("/").pop() || title || docId;
+        const fileName = docEntryFileName(entry);
+        // 导入条目（pdf/docx/xlsx/pptx/图片）没有可编辑正文：不拉 `content`，
+        // 也不挂 loading —— tab 直接交给 `DocFilePreview`，字节由它按扩展名
+        // 选 viewer、经 blob 缓存取。只有 Markdown 需要一次 `getDoc`。
+        const imported = isImportedEntry(entry);
         const newFile: OpenFile = {
             id: fileId,
             // A doc-service document is Gateway-owned, not a workspace file:
@@ -805,25 +827,26 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             workspaceId: "",
             // Prefix the library path so it can never collide with a workspace
             // file's Monaco model; `sourceRelPath` strips the prefix for display.
-            relPath: `doc:${path}`,
+            relPath: `doc:${entry.path}`,
             fileName,
             content: "",
             originalContent: "",
-            loading: true,
+            loading: !imported,
             saving: false,
-            language: "markdown",
+            language: imported ? "plaintext" : "markdown",
             dirty: false,
             mode: "preview",
             kind: "doc",
-            docId,
-            docPath: path,
+            docId: entry.docId,
+            docEntry: entry,
         };
         set((state) => ({ openFiles: [...state.openFiles, newFile], activeFileId: fileId }));
+        if (imported) return;
 
         // Fetch the body through the doc proxy. The tab already exists (with a
         // spinner) so a slow fetch never blocks the click; failure leaves an
         // actionable error in the tab rather than a blank pane.
-        void getDoc(docId)
+        void getDoc(entry.docId)
             .then((read) => {
                 set((state) => ({
                     openFiles: state.openFiles.map((f) =>
@@ -833,17 +856,17 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                                   content: read.content,
                                   originalContent: read.content,
                                   loading: false,
-                                  docPath: read.path,
+                                  docEntry: docEntryFromRead(read),
                                   docVersion: read.meta.version,
                                   relPath: `doc:${read.path}`,
-                                  fileName: read.path.split("/").pop() || f.fileName,
+                                  fileName: docEntryFileName(docEntryFromRead(read)),
                               }
                             : f,
                     ),
                 }));
             })
             .catch((e: unknown) => {
-                log.warn(`[fileEditor] openDocPreview ${docId} failed:`, e);
+                log.warn(`[fileEditor] openDocEntry ${entry.docId} failed:`, e);
                 const message = e instanceof Error ? e.message : String(e);
                 set((state) => ({
                     openFiles: state.openFiles.map((f) =>

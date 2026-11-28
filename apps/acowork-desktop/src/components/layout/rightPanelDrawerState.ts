@@ -138,6 +138,7 @@ export function isPanelTabKey(key: DrawerKey | null): PanelTab | null {
     case "memory":
     case "debug":
     case "setup":
+    case "tasks":
       return key;
     default:
       return null;

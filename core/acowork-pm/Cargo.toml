@@ -20,8 +20,11 @@ path = "src/main.rs"
 default = []
 # Generate thumbnails for image attachments on upload
 image-thumb = ["dep:image"]
-# Promote dependencies to blocking before claim (default: soft warn only)
-strict-deps = []
+# (No dependency-related feature flag: `depends_on` is blocking on every build.
+# A `strict-deps` feature used to sit here promising "promote to blocking,
+# default: soft warn only" — nothing ever read it, and claim has never warned
+# softly: it returns 409 dependency_not_satisfied. A flag that describes a
+# behaviour the binary does not have is worse than no flag.)
 
 [dependencies]
 acowork-core.workspace = true

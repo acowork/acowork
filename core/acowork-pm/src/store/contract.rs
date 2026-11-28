@@ -19,6 +19,19 @@ pub trait PmMaintenance: Send + Sync {
     /// One-shot `start_at` backfill on legacy pending tasks; returns rows changed.
     async fn migrate_null_start_at(&self) -> Result<usize>;
 
+    /// One-shot rewrite of stored dependencies to the single kind the write
+    /// path accepts (`blocks`), for databases written before `relates` /
+    /// `duplicates` were retired. Returns the number of tasks whose list
+    /// changed.
+    ///
+    /// It is **data hygiene, not enforcement**: the gates no longer read
+    /// `kind` (`dispatch_blocked` walks edges), so a database that never runs
+    /// this is still correct — it is only untidy. That is what lets the
+    /// rewrite be genuinely one-shot: the implementing store records a marker
+    /// in `meta` and skips the full `props` scan on later starts. See
+    /// `types::DependencyKind`.
+    async fn migrate_dependency_kinds(&self) -> Result<usize>;
+
     /// Flush pending writes before the process exits.
     async fn shutdown(&self) -> Result<()>;
 

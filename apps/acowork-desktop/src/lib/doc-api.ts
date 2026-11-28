@@ -18,6 +18,7 @@ import type {
   DirMeta,
   DocMeta,
   DocRead,
+  DocResolveResult,
   DocTreeNode,
   MoveDocInput,
   PermissionsView,
@@ -191,6 +192,53 @@ export function getDoc(docId: string): Promise<DocRead> {
   return request<DocRead>(`/docs/${encodeURIComponent(docId)}`);
 }
 
+/**
+ * `POST /refs/resolve` — 库内地址（`doc-…` 或 `研发/纪要.pdf`）→ 条目。
+ *
+ * 与 `/refs/validate` 的区别是**没有 Markdown 闸门**：链接可以指向库里任何条目
+ * （pdf / docx / xlsx / pptx / 图片），校验只回答「PM 的交付物引用是否落地」。
+ * 两条路由共用服务端的同一个 `resolve_entry`，所以地址语法不会漂移。
+ *
+ * 结果与输入一一对应、顺序不变 —— 调用方按位置对齐自己的输入。
+ */
+export function resolveDocEntries(refs: string[]): Promise<DocResolveResult[]> {
+  return request<{ results: DocResolveResult[]; all_found: boolean }>("/refs/resolve", {
+    method: "POST",
+    body: JSON.stringify({ refs }),
+  }).then((r) => r.results);
+}
+
+/**
+ * 代表「这一份字节来自文档库」的来源标记。
+ *
+ * 字节缓存与 viewer 统一按工作区坐标 `(agentId, workspaceId, relPath)` 取字节
+ * （同一批 viewer、同一份 blob LRU，见 `lib/docFileBlob.ts`），而文档条目没有
+ * 工作区 —— 这个哨兵就是那个「没有工作区」的坐标值，和 `__agent_home__` 代表
+ * 「没有 workspace 的 home」同构。它住在 doc 的地址层（这里），因为谁要知道
+ * 「这份字节该走哪个路由」，答案就必须和路由常量在同一个模块里。
+ */
+export const DOC_FILE_AGENT_ID = "__doc__";
+
+/**
+ * 文档库条目的**字节**地址（`GET /api/doc/docs/{id}/file`）。
+ *
+ * 这是 `/api/doc` 字面量在桌面上的唯一构造处之一（R1）。它之所以必须住在这里
+ * 而不是在字节缓存里：字节缓存（`lib/workspaceFileBlob.ts`）服务的是**工作区
+ * 文件**，文档库只是它的一个外部来源；让缓存自己拼 doc 路由，等于把 doc 域的
+ * URL 知识散到中间件之外，改路由时就得靠 grep 找齐。
+ *
+ * 它返回的是**可以 fetch 的字符串**（`fetch` 拦截器会补 bearer），不是可以塞进
+ * `<img src>` / `<iframe src>` 的地址 —— 标签带不了 `Authorization` 头，那是
+ * 「白屏 401」那个 bug 的形状。渲染面拿 blob（或 `blob:` URL），不拿这个字符串。
+ */
+export function getDocFileUrl(docId: string): string {
+  // 与 `workspaceFileBlob` 的构造器同一条去尾斜杠规则：`getGatewayUrl()` 的
+  // 返回值在测试 / 反向代理配置里可能带尾斜杠，拼出 `//api/doc` 会被
+  // Axum 的路由当成不同的路径。
+  const base = getGatewayUrl().replace(/\/+$/g, "");
+  return `${base}/api/doc/docs/${encodeURIComponent(docId)}/file`;
+}
+
 /** `PUT /api/docs/:doc_id` — 直接更新（人类路径，带 base_version 乐观并发） */
 export function updateDoc(docId: string, input: UpdateDocInput): Promise<DocMeta> {
   return request<DocMeta>(`/docs/${encodeURIComponent(docId)}`, {
@@ -255,25 +303,53 @@ export function saveDocFile(docId: string, bytes: Uint8Array): Promise<DocMeta> 
 }
 
 /**
- * 上传对话框 / `<input type=file>` 共用的 accept 串。
+ * 可导入文件的扩展名 —— 桌面上**唯一**一份列表。
  *
- * 与服务端 `core/acowork-doc/src/types.rs::IMPORTABLE_EXTS` 同一张表：
- * 这里多列几个常见图片别名没关系（服务端仍会拒收），少列一个就是用户
- * 选不到支持的格式。
+ * 服务端的同一张表是 `core/acowork-doc/src/types.rs::IMPORTABLE_EXTS`（那里还带
+ * 每种格式的 MIME 与「是否按文本读」）。两份表由
+ * `docImportExts.consistency.test.ts` 逐项比对：多一个 / 少一个都会红 —— 因为
+ * 「服务端支持但用户选不到」和「用户选了但被拒收」是同一类静默错位，只能靠测试
+ * 兜住。
+ *
+ * 这里只放**扩展名**：MIME 是服务端知识，桌面除了 accept 串里的三个通配类型，
+ * 不再复述它。
  */
-export const DOC_IMPORT_ACCEPT =
-  ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.md,.markdown," +
-  ".png,.jpg,.jpeg,.gif,.webp,.svg,.bmp," +
-  "application/pdf,image/*,text/*," +
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document," +
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet," +
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+export const DOC_IMPORT_EXTS = [
+  "pdf",
+  "doc",
+  "docx",
+  "xls",
+  "xlsx",
+  "ppt",
+  "pptx",
+  "csv",
+  "md",
+  "markdown",
+  "txt",
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "svg",
+  "bmp",
+] as const;
 
-/** `GET /api/docs/:doc_id/path` — 相对路径 */
-export async function getDocPath(docId: string): Promise<string> {
-  const v = await request<{ path: string }>(`/docs/${encodeURIComponent(docId)}/path`);
-  return v.path;
-}
+/**
+ * 上传对话框 / `<input type=file>` 的 accept 串，由 {@link DOC_IMPORT_EXTS} 派生。
+ *
+ * 后面那几个 MIME 通配是给人用的便利（`image/*` 让系统选择器按类型过滤），服务端
+ * 仍按扩展名判定，所以它们不会放宽任何东西。
+ */
+export const DOC_IMPORT_ACCEPT = [
+  ...DOC_IMPORT_EXTS.map((ext) => `.${ext}`),
+  "application/pdf",
+  "image/*",
+  "text/*",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+].join(",");
 
 // ── 更新请求（审核队列）──────────────────────────────────────────────
 

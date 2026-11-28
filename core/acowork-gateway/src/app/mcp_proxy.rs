@@ -215,8 +215,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut gw = GatewayState::new(&dir.to_string_lossy());
-        let mut cfg = crate::config::GatewayConfig::default();
-        cfg.data_dir = dir.to_string_lossy().to_string();
+        let cfg = crate::config::GatewayConfig {
+            data_dir: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
         gw.config = Some(cfg);
         gw.user_verifier = Some(crate::http::test_support::verifier());
         gw.internal_service_token = Some(SERVICE_TOKEN.to_string());

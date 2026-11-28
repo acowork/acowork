@@ -134,7 +134,7 @@ async fn cache_report(State(state): State<AppState>) -> Json<CacheReportResponse
     // several nodes offline behind a slow relay). `join_all` keeps the worst
     // case at one timeout regardless of how many rows answer late.
     let node_ids = online_nodes(&state).await;
-    rows.extend(join_all(services.iter().map(|t| fetch_row(t))).await);
+    rows.extend(join_all(services.iter().map(fetch_row)).await);
     rows.extend(join_all(node_ids.iter().map(|id| fetch_node_row(&state, id))).await);
 
     let probe = config
@@ -436,8 +436,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let mut config = crate::config::GatewayConfig::default();
-        config.data_dir = dir.to_string_lossy().to_string();
+        let config = crate::config::GatewayConfig {
+            data_dir: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
         let mut gw = crate::gateway::state::GatewayState::new(&config.data_dir.clone());
         gw.config = Some(config);
 

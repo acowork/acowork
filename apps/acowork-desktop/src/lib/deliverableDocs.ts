@@ -101,6 +101,22 @@ function docFromFact(fact: Record<string, unknown>): DeliverableDoc | null {
 }
 
 /**
+ * Read the doc fact a row's **metadata** carries (`metadata.doc`), or null.
+ *
+ * This is the shape every path shares: a live `tool_result` row's `toolData`,
+ * and one element of an `explore_stub`'s forwarded `facts` — same keys, same
+ * parser, so a turn reconstructs identically whether it was streamed or
+ * reloaded from a projected history page.
+ */
+export function docFromMetadata(
+  metadata: Record<string, unknown> | undefined | null,
+): DeliverableDoc | null {
+  const fact = metadata?.doc;
+  if (!fact || typeof fact !== "object") return null;
+  return docFromFact(fact as Record<string, unknown>);
+}
+
+/**
  * Parse one tool_result message into a produced document, or null.
  *
  * Reads the Runtime-stamped `metadata.doc` fact first (it survives the live
@@ -114,11 +130,8 @@ export function parseDocToolResult(msg: ChatMessage): DeliverableDoc | null {
   // A failed call produced nothing.
   if (msg.toolStatus === "error") return null;
   // Preferred: the fact the Runtime stamped on metadata (live == restored).
-  const meta = msg.toolData?.doc;
-  if (meta && typeof meta === "object") {
-    const doc = docFromFact(meta as Record<string, unknown>);
-    if (doc) return doc;
-  }
+  const stamped = docFromMetadata(msg.toolData);
+  if (stamped) return stamped;
   // Legacy fallback: the persisted MCP envelope in content.
   const kind = docToolKind(msg.toolName);
   if (!kind) return null;
@@ -131,14 +144,28 @@ export function parseDocToolResult(msg: ChatMessage): DeliverableDoc | null {
 }
 
 /**
+ * Dedupe a turn's documents by `doc_id`, keeping the LAST occurrence (a
+ * `doc_move` after a `doc_write` supersedes the temporary name).
+ *
+ * The policy belongs to the turn, not to a row shape: live rows and a stub's
+ * forwarded facts both land here, so splitting a run across a page boundary
+ * cannot duplicate a card.
+ */
+export function dedupeDocs(docs: readonly DeliverableDoc[]): DeliverableDoc[] {
+  const byId = new Map<string, DeliverableDoc>();
+  for (const doc of docs) byId.set(doc.docId, doc);
+  return [...byId.values()];
+}
+
+/**
  * Collect the documents a turn produced, deduped by `doc_id` keeping the LAST
- * occurrence (a `doc_move` after a `doc_write` supersedes the temporary name).
+ * occurrence.
  */
 export function collectTurnDocs(messages: readonly ChatMessage[]): DeliverableDoc[] {
-  const byId = new Map<string, DeliverableDoc>();
+  const out: DeliverableDoc[] = [];
   for (const msg of messages) {
     const doc = parseDocToolResult(msg);
-    if (doc) byId.set(doc.docId, doc);
+    if (doc) out.push(doc);
   }
-  return [...byId.values()];
+  return dedupeDocs(out);
 }

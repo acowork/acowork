@@ -47,7 +47,7 @@ describe("hover reporting", () => {
     const onTabHover = vi.fn();
     render(<RightNavBar {...base} onTabHover={onTabHover} />);
 
-    // workspace / status / memory / debug / setup — in rail order.
+    // workspace / status / memory / debug / tasks / setup — in rail order.
     fireEvent.mouseEnter(tiles()[0]);
     fireEvent.mouseEnter(tiles()[2]);
     expect(onTabHover.mock.calls.map(([tab]) => tab)).toEqual(["workspace", "memory"]);
@@ -63,7 +63,7 @@ describe("hover reporting", () => {
 
   it("still draws the rail when the owner does not wire hover at all", () => {
     render(<RightNavBar {...base} />);
-    expect(tiles()).toHaveLength(5);
+    expect(tiles()).toHaveLength(6);
   });
 });
 

@@ -35,6 +35,10 @@ use crate::types::{
 use crate::store::contract::PmMaintenance;
 use crate::store::rules::{parse_task_id, priority_rank};
 
+/// `meta` 里的一次性标记键：依赖种类改写完成后置为 `done`（见
+/// `PmMaintenance::migrate_dependency_kinds`）。
+const DEPENDENCY_KIND_MIGRATION_KEY: &str = "migrate_dependency_kinds";
+
 /// Convert a `rusqlite` failure into the PM error envelope without adding a
 /// new `PmError` variant (which would ripple through `http_status` and
 /// `error_code` for no client-visible benefit).
@@ -349,6 +353,68 @@ fn load_task_from(conn: &Connection, id: &TaskId) -> Result<Option<Task>> {
     json.map(|j| Ok(serde_json::from_str(&j)?)).transpose()
 }
 
+/// 依赖图校验里需要 IO 的那一半：**目标必须存在**，且新边不能闭成环。
+///
+/// 纯规则那一半在 `store::rules::normalize_dependencies`（格式 / 种类 / 自引用 /
+/// 去重）。两条写路径（create / update）都必须过这一关，否则依赖就是一句没人
+/// 校验的话 —— 这正是这批卡出事的方式。
+///
+/// 为什么目标存在是一条硬规则：`dispatch_blocked` 对悬挂引用是 **fail-closed**
+/// （永远拦着），所以放一条指向已删除任务的边进来，等于给这张卡挂了一把打不开
+/// 的锁，而且报错里只有"被某个任务拦着"，看不出是幽灵。
+///
+/// 这是**写入前**的校验，不与被校验的那次写入共享临界区：两个并发请求各自通过
+/// 校验、再各自写入，理论上仍能闭出一个环。接受这个窗口的理由是后果形状 ——
+/// 环上每张卡都被 fail-closed 拦住（不丢数据、不误派发），人一改依赖就恢复；
+/// 而要做到真正原子，得把 `insert_task` / `save_task` 的临界区一起重构，那是
+/// 另一件事，不该混在这次语义收敛里。
+fn validate_dependency_graph(
+    conn: &Connection,
+    task_id: &TaskId,
+    deps: &[crate::types::Dependency],
+) -> Result<()> {
+    for dep in deps {
+        if load_task_from(conn, &dep.task_id)?.is_none() {
+            return Err(PmError::DependencyTargetNotFound(
+                dep.task_id.to_string(),
+            ));
+        }
+        // 环：新边 dep → 我，而 dep 已经（传递地）依赖我。
+        if dependency_reaches(conn, &dep.task_id, task_id)? {
+            return Err(PmError::DependencyCycle(task_id.to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// 依赖图（`blocks` 边）上，`from` 能否**传递地**到达 `target`。
+///
+/// 旧实现只有"不能依赖自己"这一条自引用检查 —— 那是最短的环，不是全部的环。
+/// A→B、B→C、C→A 三条边过去能被收下，结果是三张卡互相拦死，谁都派不出去，
+/// 而服务端自认为校验通过了。这里沿 `blocks` 边做一次 DFS（依赖的唯一语义），
+/// `visited` 保证**已经存在**的环也能终止而不是把扫描器卡死。
+fn dependency_reaches(conn: &Connection, from: &TaskId, target: &TaskId) -> Result<bool> {
+    let mut visited: std::collections::HashSet<TaskId> = std::collections::HashSet::new();
+    let mut stack: Vec<TaskId> = vec![from.clone()];
+    while let Some(current) = stack.pop() {
+        if &current == target {
+            return Ok(true);
+        }
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        let Some(task) = load_task_from(conn, &current)? else {
+            continue;
+        };
+        // 同样不看 `kind`：图论意义上一条边就是一条边，按标签过滤会让
+        // 一条 `relates` 边悄悄逃出环检测。
+        for dep in &task.depends_on {
+            stack.push(dep.task_id.clone());
+        }
+    }
+    Ok(false)
+}
+
 fn load_project_from(conn: &Connection, id: &ProjectId) -> Result<Option<Project>> {
     let json: Option<String> = conn
         .query_row(
@@ -453,16 +519,21 @@ fn icon_content_type(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Dependency gate over an already-loaded task. A dangling blocker blocks,
-/// Done / Cancelled satisfies the dependency-block rule.
+/// Dependency gate over an already-loaded task: **every** `depends_on` edge blocks
+/// until its target is `done` / `cancelled`, and a dangling blocker blocks too
+/// (fail-closed).
+///
+/// It deliberately does not look at [`DependencyKind`]. The gate's question is
+/// "is the prerequisite satisfied?", never "what did the author call this edge?".
+/// Branching on `kind` here is precisely how a `relates` edge became a declared
+/// dependency that nobody enforced. `kind` is a legacy field the write path no
+/// longer accepts (`store::rules::normalize_dependencies`); **enforcement must be
+/// correct even when stored data still carries one**, so it reads edges, not labels.
+///
 /// Takes the connection explicitly so the dispatch scan can stay inside one
 /// critical section instead of re-entering the connection `Mutex`.
 fn dispatch_blocked(conn: &Connection, task: &Task) -> Result<bool> {
-    for dep in task
-        .depends_on
-        .iter()
-        .filter(|d| d.kind == DependencyKind::Blocks)
-    {
+    for dep in &task.depends_on {
         let blocker = load_task_from(conn, &dep.task_id)?;
         if !matches!(
             blocker.map(|b| b.status),
@@ -506,6 +577,75 @@ impl PmMaintenance for SqlitePmStore {
             }
             tx.commit().map_err(db_err)?;
             Ok(rows.len())
+        })
+    }
+
+    /// 存量依赖对齐：把每一条 `relates` / `duplicates` 边改写为 `blocks`。
+    ///
+    /// 只改数据、不动 schema，所以不参与 `SCHEMA_VERSION`；靠"第二次跑无事可做"
+    /// 保证幂等（与 `migrate_null_start_at` 同一形态）。返回**被改写的任务数**，
+    /// 不是边数 —— 运维读日志时要的是"有多少张卡受影响"。
+    ///
+    /// 不写 activity：一次迁移可能命中上百张卡，逐卡留痕只会把真正的事件淹掉。
+    /// 汇总条数进服务日志（`server.rs`），审计从这里看。
+    async fn migrate_dependency_kinds(&self) -> Result<usize> {
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(db_err)?;
+            // 标记位：没有它，这条迁移每次启动都要把**全库** `props` 解析一遍
+            // （`depends_on` 没有投影列，只能读 JSON）。它是纯数据订正，一旦完成
+            // 就不会再有历史值出现 —— 写入侧只收 `blocks`，闸门也不读 `kind`
+            // （`dispatch_blocked`），所以即使有人回滚到旧二进制后再升回来，
+            // 漏掉一次重扫也只是数据不整齐，不会让依赖失效。
+            let done: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM meta WHERE key = ?1",
+                    params![DEPENDENCY_KIND_MIGRATION_KEY],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db_err)?;
+            if done.as_deref() == Some("done") {
+                return Ok(0);
+            }
+            let mut stmt = tx
+                .prepare("SELECT id, props FROM tasks")
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(db_err)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(db_err)?;
+            drop(stmt);
+            let mut rewritten = 0usize;
+            for (id, json) in &rows {
+                let mut task: Task = serde_json::from_str(json)?;
+                let mut changed = false;
+                for dep in &mut task.depends_on {
+                    if dep.kind != DependencyKind::Blocks {
+                        dep.kind = DependencyKind::Blocks;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    continue;
+                }
+                tx.execute(
+                    "UPDATE tasks SET props = ?2 WHERE id = ?1",
+                    params![id, serde_json::to_string(&task)?],
+                )
+                .map_err(db_err)?;
+                rewritten += 1;
+            }
+            tx.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, 'done')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![DEPENDENCY_KIND_MIGRATION_KEY],
+            )
+            .map_err(db_err)?;
+            tx.commit().map_err(db_err)?;
+            Ok(rewritten)
         })
     }
 

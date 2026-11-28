@@ -71,7 +71,6 @@ pub fn doc_router(state: DocState) -> Router {
         .route("/docs/{doc_id}", delete(c::delete_doc))
         .route("/docs/{doc_id}/title", patch(c::rename_doc))
         .route("/docs/{doc_id}/move", post(c::move_doc))
-        .route("/docs/{doc_id}/path", get(c::doc_path))
         .route("/docs/{doc_id}/file", get(c::doc_file).put(c::save_doc_file).layer(
             axum::extract::DefaultBodyLimit::max(crate::limit::UPLOAD_CEILING),
         ))
@@ -106,6 +105,13 @@ pub fn doc_router(state: DocState) -> Router {
         .route(
             acowork_core::doc_layout::DOC_REFS_VALIDATE_ROUTE,
             post(rf::validate_refs),
+        )
+        // Addressing (link/open side): same resolver, no markdown gate — a
+        // library entry may be a pdf/docx/pptx, and a link must be able to
+        // reach it. P0 of the doc-domain consolidation design.
+        .route(
+            acowork_core::doc_layout::DOC_REFS_RESOLVE_ROUTE,
+            post(rf::resolve_refs),
         )
         // ── permissions (design §9) ───────────────────────────────────
         .route("/permissions/{kind}/{id}", get(p::get_permissions))

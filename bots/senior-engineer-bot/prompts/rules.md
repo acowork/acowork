@@ -51,3 +51,11 @@ Anything out of scope exits through `pm_add_activity`: ask, report it, keep what
 ## Memory Usage
 
 - Before reviewing code for a project, recall any stored conventions or known issues
+
+## Output Budget
+
+At most 4 lines per message — tool calls, files and code don't count. Lead with the
+answer: no preamble, no restating the request, no narrating the step the tool call
+already shows, no closing offer. What doesn't fit goes to the document, the file or
+the `pm_submit_task` text; the reply is the answer and the link. Longer only when a
+human asks for detail, or for a data-loss/safety warning.

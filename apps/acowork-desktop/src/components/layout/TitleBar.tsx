@@ -6,6 +6,7 @@ import { useLayoutStore } from "../../stores/layoutStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { GatewaySwitcherMenu } from "./GatewaySwitcherMenu";
+import { ConnectionStatusPill } from "./ConnectionStatusPill";
 import { AppearanceMenu } from "./AppearanceMenu";
 import { StatusPill } from "./StatusPill";
 
@@ -135,6 +136,15 @@ export function TitleBar({
         className="flex items-center gap-1"
         onMouseDown={(e) => e.stopPropagation()}
       >
+        {/* MQTT/agent liveness + its Connect/Reconnect action. It used to be a
+            full-width amber strip inside the chat composer, where it pushed the
+            text field down on every reconnect.
+            It goes FIRST in the cluster, left of the Gateway glyph, on purpose:
+            the cluster is right-anchored, so a new sibling at the left edge
+            grows the row leftward and leaves every existing icon where the eye
+            already knows it. Inserted after the glyph it would shove the whole
+            cluster sideways for as long as the pill is up. */}
+        <ConnectionStatusPill />
         <GatewaySwitcherMenu onOpenGatewaySettings={onOpenGatewaySettings} />
         {/* Transient status message (Gateway outage / MQTT loss / debug
             output). It sits next to the Gateway outage pill so both read as

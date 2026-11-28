@@ -846,8 +846,24 @@ Gateway 会校验并把它当作 scope 注入（等同于以该用户身份读�
 `kind="explore_stub"` 记录，`content` 为空，`metadata` 携带
 
 ```json
-{ "start": 1, "end": 4, "raw_count": 3, "steps": 2, "tools": ["bash"], "tools_truncated": false }
+{ "start": 1, "end": 4, "raw_count": 3, "steps": 2, "tools": ["bash"], "tools_truncated": false,
+  "facts": [{ "doc": { "doc_id": "doc-abc", "path": "研发/纪要.md", "name": "纪要", "version": 2 } },
+            { "produced": [{ "workspace_id": "ws-1", "rel_path": "out/report.md", "mime": "text/markdown", "bytes": 42, "created": true }] }] }
 ```
+
+`facts`（**可选**，run 内没有任何产出时不出现该键）：这段 run 里**承载产物事实**
+的行的 metadata 逐字转发，一条一行、按日志顺序。它是
+`core/acowork-runtime/src/agent/artifact_facts.rs::FACT_KEYS` 登记的那些键
+（今天：`produced` 文件/图片坐标、`doc` 在线文档）；配对键 `tool_name` /
+`tool_call_id` 不转发，未登记键不转发。**传输层不解释内容**：去重、限量、
+`created` 过滤与展示形态一律由客户端决定（ADR-119）。
+
+为什么要转发：轮次结束的交付物行是客户端业务逻辑，输入就是这些事实。折叠把承载
+事实的行换成 stub 之后，若不转发，同一个回合在 live 与重新加载的历史页里会重建
+成两个样子（历史页干脆没有交付物行）。`facts` **不落盘**，每次读窗口时由
+`collapse_explore_runs` 现算，所以存量的 `tool_result` metadata 仍是唯一真相，
+老会话读一次即生效，无需迁移。旧 Runtime 不带该键 = 「不知道」，与「没有产出」
+不是一回事，客户端应退化为不显示。
 
 `start` / `end` 是该 run 的 **data-index 坐标**（与 offset 同维度，end 开区间）；
 `raw_count` 是该段的**坐标宽度**（`end - start`，raw 行数），`steps` 是这段

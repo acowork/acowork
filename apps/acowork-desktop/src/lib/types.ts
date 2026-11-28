@@ -634,6 +634,23 @@ export interface ExploreStubMeta {
    *  `toolsTruncated`; the detail read is unbounded by that cap. */
   tools: string[];
   toolsTruncated: boolean;
+  /** The run's **artifact facts**, forwarded verbatim by the projection: one
+   *  element per member row that carried anything beyond its pairing keys —
+   *  i.e. the same `metadata` objects the live path puts on each `tool_result`
+   *  (`produced` for files/images, `doc` for online documents). Absent when the
+   *  run produced nothing, and absent entirely on a Runtime that predates the
+   *  forwarding (version skew: absence means "not known", never "none").
+   *
+   *  Why the stub carries them: folding the run away must not fold its facts
+   *  away. Without them a reloaded session lost every turn's deliverables row
+   *  while the live turn kept its own — the same transcript reconstructing as
+   *  two different conversations. The Runtime does not interpret them (ADR-119:
+   *  what counts, how many, and how it looks is decided here, by
+   *  `deriveDeliverables`).
+   *
+   *  NOT a second source of truth: it is recomputed from the stored rows on
+   *  every `groups=stub` read, never persisted. */
+  facts?: Record<string, unknown>[];
 }
 // NB: the run's raw rows are NOT carried here. They live in the store's
 // `exploreDetails` cache (keyed by stub id) and reach the block as its

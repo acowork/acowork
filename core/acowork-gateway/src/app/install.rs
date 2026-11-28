@@ -161,14 +161,14 @@ pub fn install_app_package(
         let app_dir = apps_root.join(&manifest.id);
         let existing = read_state(&app_dir);
         if let Some(ref state) = existing {
-            if let (Some(prev), Some(next)) = (&state.fingerprint, &fingerprint) {
-                if prev != next {
-                    return Err(InstallError::new(
-                        "signer_mismatch",
-                        409,
-                        "upgrade certificate fingerprint does not match the installed one",
-                    ));
-                }
+            if let (Some(prev), Some(next)) = (&state.fingerprint, &fingerprint)
+                && prev != next
+            {
+                return Err(InstallError::new(
+                    "signer_mismatch",
+                    409,
+                    "upgrade certificate fingerprint does not match the installed one",
+                ));
             }
             let version_dir = app_dir.join("versions").join(&manifest.version);
             if version_dir.exists() {
@@ -405,7 +405,7 @@ fn move_dir_retry(src: &Path, dst: &Path) -> io::Result<()> {
             Err(e) => return Err(e),
         }
     }
-    Err(last.unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "move_dir retry exhausted")))
+    Err(last.unwrap_or_else(|| io::Error::other("move_dir retry exhausted")))
 }
 
 fn is_sharing_violation(err: &io::Error) -> bool {
@@ -457,10 +457,10 @@ pub fn cleanup_trash(data_dir: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if let Some(ts) = name.rsplit('.').next().and_then(|s| s.parse::<u64>().ok()) {
-            if ts < cutoff {
-                let _ = fs::remove_dir_all(entry.path());
-            }
+        if let Some(ts) = name.rsplit('.').next().and_then(|s| s.parse::<u64>().ok())
+            && ts < cutoff
+        {
+            let _ = fs::remove_dir_all(entry.path());
         }
     }
 }

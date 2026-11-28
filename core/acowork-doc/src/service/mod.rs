@@ -21,6 +21,9 @@
 //!   restore, and 30-day lazy purge.
 //! - `search.rs` / `search_impl.rs` — `SearchService` cross-directory
 //!   keyword scan (no global index, design §3).
+//! - `path_renderer.rs` — `DocPathRenderer`: the single translation from the
+//!   store's `{dir_id}/{file_name}` layout to the human path (`研发/纪要.md`)
+//!   that REST / MCP / refs all publish.
 //!
 //! API-layer modules in `crate::api::*` depend on these traits only — never
 //! on `crate::store::*` or `crate::types` directly. This lets the on-the-
@@ -32,6 +35,7 @@ pub mod directory;
 pub mod directory_impl;
 pub mod document;
 pub mod document_impl;
+pub mod path_renderer;
 pub mod policy;
 pub mod request;
 pub mod request_impl;
@@ -47,6 +51,7 @@ pub use directory::{CreateDirectoryInput, DirectoryService};
 pub use directory_impl::LibraryDirectoryService;
 pub use document::{CreateDocumentInput, DocumentService, UpdateDocumentInput};
 pub use document_impl::LibraryDocumentService;
+pub use path_renderer::DocPathRenderer;
 pub use policy::{gate_owner, gate_write, OwnerGate, WriteGate};
 pub use request::{ApproveOutcome, RequestService, SubmitRequestInput};
 pub use request_impl::LibraryRequestService;

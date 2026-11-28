@@ -10,13 +10,17 @@
  * - `dependentClosureIds`：**传递**依赖自己的那些任务。让其中之一成为自己的
  *   依赖，`depends_on` 图就闭成环（服务端 `dependency_cycle` 会 409）。
  *
- * 两者都在看板已经持有的那份数组上做纯内存遍历（N 个任务、每条边访问一次），
+ * 依赖的**语义**（阻塞）也只有一处实现：`dependencySatisfied`，与服务端的
+ * `dispatch_blocked` 同一条规则。
+ *
+ * 三者都在看板已经持有的那份数组上做纯内存遍历（N 个任务、每条边访问一次），
  * 所以选择器每次渲染重算都负担得起 —— 不需要接口，也不需要缓存失效策略。
  *
- * ⚠️ 环的判定只看边、不看 `kind`：服务端 `dependency_cycle` 不区分
- * `blocks` / `relates` / `duplicates`，多算一类边比漏算安全。
+ * ⚠️ 环的判定按**所有**边算：服务端的传递检测只沿 `blocks` 边（依赖的唯一
+ * 语义，存量 `relates` / `duplicates` 由迁移改写成 `blocks`），客户端多算一类
+ * 边只是更保守，不会放进来一个服务端会拒的候选。
  */
-import type { PmTaskResponse } from "./pm-types";
+import type { PmTaskResponse, TaskStatus } from "./pm-types";
 
 export interface TaskTreeIndex {
   byId: Map<string, PmTaskResponse>;
@@ -109,6 +113,18 @@ export function ancestorIds(tree: TaskTreeIndex, id: string): string[] {
     cursor = tree.byId.get(cursor)?.parent_id ?? null;
   }
   return out;
+}
+
+/**
+ * 依赖是否已满足 —— 与服务端 `dispatch_blocked`（`store/sqlite/mod.rs`）**同一条
+ * 规则**：只有 `done` / `cancelled` 算满足，`submitted`（等人类验收）仍然挡路。
+ *
+ * 只有一种语义（阻塞），所以没有 `kind` 参数：`blocks` / `relates` 不再是选择，
+ * `kind` 只是历史字段（存量 `relates` 由服务端一次性迁移改写为 `blocks`）。
+ * 前端若开始按 `kind` 分支，就等于把这个漏洞重新装回来。
+ */
+export function dependencySatisfied(status: TaskStatus | undefined): boolean {
+  return status === "done" || status === "cancelled";
 }
 
 /** 已选项 + 它们各自的祖先 —— 选择面板打开时应当展开的节点集合。 */

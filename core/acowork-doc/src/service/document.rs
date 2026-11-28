@@ -74,9 +74,10 @@ pub struct DocStat {
     pub meta: DocMeta,
     /// Storage path **keyed by `dir_id`** (`dir-xxxx/纪要.md`, or `纪要.md`
     /// at the root) — the on-disk layout, not the agent's addressing space.
-    /// `研发/纪要.md` is rendered by the presentation layer
-    /// (`mcp::tools::PathCtx`), which owns `DirectoryService`; the document
-    /// service has no ancestor lookup and must not pretend to.
+    /// `研发/纪要.md` is rendered by `service::DocPathRenderer`, the one place
+    /// that owns the translation; the document service has no ancestor lookup
+    /// and must not pretend to. **Never publish this string** at a boundary
+    /// (R5) — it carries an internal id.
     pub path: String,
     /// Body size in bytes (UTF-8 encoded).
     pub size_bytes: u64,

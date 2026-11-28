@@ -3,13 +3,21 @@ import { create } from "zustand";
 import type { NavView } from "../lib/types";
 
 /**
- * Right panel tabs — keep in sync with AppLayout.PanelTab.
+ * Right panel tabs — THE definition. `RightNavBar` (which tiles to draw),
+ * `RightPanel` (which tab to render), `rightPanelDrawerState` (which peeks are
+ * tab-shaped) and `AppLayout` (the persisted active tab) all import this one
+ * type; a second copy of the union is how the rail and the panel drift apart.
  *
- * Five entries. The `tools` tab is gone: its Builtin Tools / MCP cards moved
- * into the `setup` panel (see `components/right-panel/agentSetupCards.ts`),
- * so there is no longer a rail entry that could become the active tab.
+ * The `tools` tab is gone: its Builtin Tools / MCP cards moved into the
+ * `setup` panel (see `components/right-panel/agentSetupCards.ts`), so there
+ * is no longer a rail entry that could become the active tab.
+ *
+ * `tasks` is the odd one out on purpose: it is the only tab whose data does
+ * NOT come from the selected agent's Runtime but from the PM service (the
+ * tasks dispatched to that agent), so it stays available while the agent is
+ * stopped — see `RightNavBar`'s `show` flags.
  */
-export type PanelTab = "debug" | "status" | "setup" | "memory" | "workspace";
+export type PanelTab = "debug" | "status" | "setup" | "memory" | "workspace" | "tasks";
 
 /** Harness page tabs — keep in sync with HarnessPage's tab list. */
 export type HarnessTabId = "providers" | "mcp" | "embedding" | "lsp";

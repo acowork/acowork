@@ -6,7 +6,9 @@
 use std::path::{Component, Path};
 
 use crate::error::{PmError, Result};
-use crate::types::{Priority, ReviewStatus, Task, TaskActivity, TaskId, TaskStatus};
+use crate::types::{
+    Dependency, DependencyKind, Priority, ReviewStatus, Task, TaskActivity, TaskId, TaskStatus,
+};
 
 /// 校验 ID 格式：`{prefix}{suffix}`，suffix 字符集 `[a-zA-Z0-9-]`，长度 3-64。
 pub fn validate_id_format(id: &str, prefix: &str, kind: &str) -> Result<()> {
@@ -100,6 +102,39 @@ pub fn seeded_activity(record: &Task) -> Vec<TaskActivity> {
     vec![activity]
 }
 
+/// `depends_on` 的规范化与**纯规则**校验：格式、种类、自引用、去重。
+///
+/// 这是"依赖是什么"的唯一实现处（与存储无关的那一半）；需要 IO 的那一半
+/// （目标必须存在、新边不能闭成环）在 `store::sqlite` 的
+/// `validate_dependency_graph`，两者由创建/更新两条写路径同时调用。
+///
+/// 三条规则，各有它防的事：
+/// 1. **只接受 [`DependencyKind::Blocks`]** —— 依赖就是阻塞。`relates` /
+///    `duplicates` 不参与任何闸门，收下它们等于收下一句"我声明了但没人管"，
+///    依赖缺口继续藏着。宁可 400，也不静默改写成 `blocks`。
+/// 2. **拒绝自引用** —— 最短的环。
+/// 3. **去重**（同一条边只留第一次出现）—— 重复边不改变语义，但会让
+///    `blocked_by` 把同一个前置报两次，读起来像两条独立缺口。
+pub fn normalize_dependencies(task_id: &TaskId, deps: Vec<Dependency>) -> Result<Vec<Dependency>> {
+    let mut out: Vec<Dependency> = Vec::with_capacity(deps.len());
+    for dep in deps {
+        parse_task_id(dep.task_id.as_str())?;
+        if dep.kind != DependencyKind::Blocks {
+            return Err(PmError::UnsupportedDependencyKind {
+                kind: dep.kind.wire_name().to_string(),
+            });
+        }
+        if &dep.task_id == task_id {
+            return Err(PmError::DependencyCycle(task_id.to_string()));
+        }
+        if out.iter().any(|d| d.task_id == dep.task_id) {
+            continue;
+        }
+        out.push(dep);
+    }
+    Ok(out)
+}
+
 /// 只由普通组件构成的相对路径。`contains("..")` 不够：`PathBuf::join`
 /// 遇到绝对路径会整体替换 base，所以根前缀也必须拒绝。
 pub fn safe_rel(path: &str) -> bool {
@@ -119,6 +154,68 @@ mod tests {
         assert!(parse_task_id("task.json").is_err());
         assert!(parse_task_id("t-a/b").is_err());
         assert!(parse_task_id("p-abc").is_err());
+    }
+
+    /// 依赖的唯一语义是阻塞：别的种类不是"弱依赖"，是漏洞，写入即拒。
+    #[test]
+    fn dependency_kind_is_blocks_only() {
+        let me = parse_task_id("t-me").unwrap();
+        let ok = normalize_dependencies(
+            &me,
+            vec![Dependency {
+                task_id: parse_task_id("t-a").unwrap(),
+                kind: DependencyKind::Blocks,
+            }],
+        )
+        .unwrap();
+        assert_eq!(ok.len(), 1);
+
+        for kind in [DependencyKind::Relates, DependencyKind::Duplicates] {
+            let err = normalize_dependencies(
+                &me,
+                vec![Dependency {
+                    task_id: parse_task_id("t-a").unwrap(),
+                    kind,
+                }],
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, PmError::UnsupportedDependencyKind { .. }),
+                "kind {kind:?} must be rejected, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_rejects_self_reference_and_duplicates() {
+        let me = parse_task_id("t-me").unwrap();
+        assert!(matches!(
+            normalize_dependencies(
+                &me,
+                vec![Dependency {
+                    task_id: me.clone(),
+                    kind: DependencyKind::Blocks,
+                }]
+            ),
+            Err(PmError::DependencyCycle(_))
+        ));
+
+        let a = parse_task_id("t-a").unwrap();
+        let deduped = normalize_dependencies(
+            &me,
+            vec![
+                Dependency {
+                    task_id: a.clone(),
+                    kind: DependencyKind::Blocks,
+                },
+                Dependency {
+                    task_id: a.clone(),
+                    kind: DependencyKind::Blocks,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(deduped.len(), 1, "the same edge twice is still one edge");
     }
 
     #[test]

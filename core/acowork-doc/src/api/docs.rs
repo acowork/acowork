@@ -22,6 +22,7 @@ use crate::api::{actor_from, ApiError, ApiResult, ApiState};
 use crate::error::DocError;
 use crate::path::{parse_import_file_name, validate_doc_id};
 use crate::service::acl::AclTarget;
+use crate::service::path_renderer::DocPathRenderer;
 use crate::service::document::{
     CreateDocumentInput, CreateFileInput, DocumentService, UpdateDocumentInput,
 };
@@ -75,7 +76,14 @@ pub async fn read_doc(
         .check(&actor, AclTarget::Doc(&doc_id), AclRole::View)
         .await
         .map_err(ApiError::from)?;
-    let read = state.docs.read(&doc_id).await.map_err(ApiError::from)?;
+    let mut read = state.docs.read(&doc_id).await.map_err(ApiError::from)?;
+    // `DocumentService::read` 给的 `path` 是存储布局（`dir-4d3d/纪要.md`），
+    // 属于基座内部实现，**不出边界**（R5）。边界上只有人读路径，且它与 MCP、
+    // refs 由同一个 `DocPathRenderer` 渲染。
+    read.path = DocPathRenderer::new(state.dirs.as_ref())
+        .humanize(&read.path)
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(DocReadDto::from(read)))
 }
 
@@ -176,23 +184,6 @@ pub async fn delete_doc(
         .map_err(ApiError::from)?;
     state.docs.delete(&doc_id).await.map_err(ApiError::from)?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// `GET /api/docs/:doc_id/path` — return the on-disk relative path.
-pub async fn doc_path(
-    state: ApiState,
-    headers: HeaderMap,
-    Path(doc_id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    validate_doc_id(&doc_id)?;
-    let actor = actor_from(&headers);
-    state
-        .acl
-        .check(&actor, AclTarget::Doc(&doc_id), AclRole::View)
-        .await
-        .map_err(ApiError::from)?;
-    let path = state.docs.path_of(&doc_id).await.map_err(ApiError::from)?;
-    Ok(Json(serde_json::json!({ "path": path })))
 }
 
 /// `GET /api/docs?dir_id=...` — list docs under a directory.

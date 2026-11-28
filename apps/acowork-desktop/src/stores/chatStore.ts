@@ -314,9 +314,9 @@ const WATCHDOG_INTERVAL_MS = 5_000;
  *  `connecting` / `reconnecting` older than this is promoted to
  *  `stale` and gets one `force_reconnect_mqtt`; the episode clock is
  *  then restarted so a still-stuck session retries every window.
- *  Exported so the input-area status banner (P0-7) can compute the
- *  "X seconds until auto-recovery" countdown UI without hardcoding 30s
- *  in two places. */
+ *  Exported so the title-bar connection pill (ConnectionStatusPill) can
+ *  compute the "X seconds until auto-recovery" countdown without
+ *  hardcoding 30s in two places. */
 export const STUCK_FORCE_RECONNECT_MS = 30_000;
 
 /** A `connecting` / `reconnecting` / `stale` status means a connection
@@ -4169,6 +4169,13 @@ export function convertConversationEntry(
         steps: (meta.steps as number) ?? (meta.raw_count as number) ?? 0,
         tools: Array.isArray(meta.tools) ? (meta.tools as string[]) : [],
         toolsTruncated: meta.tools_truncated === true,
+        // Forwarded artifact facts (`produced` / `doc`), verbatim: the banner
+        // derivation reads them exactly as it reads a live row's `toolData`.
+        // Only well-formed objects survive — a malformed element degrades to
+        // "that call produced nothing", never to a thrown renderer.
+        facts: Array.isArray(meta.facts)
+          ? (meta.facts.filter((f) => !!f && typeof f === "object") as Record<string, unknown>[])
+          : undefined,
       },
     };
   }
