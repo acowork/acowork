@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_config::{load_agent_config, save_agent_config};
 use crate::http::server::HttpState;
+use crate::usecases::instance_identity::{apply_name, validate_name};
 
 // ── Wire types ────────────────────────────────────────────────────────
 
@@ -107,10 +108,14 @@ async fn get_avatar_config(State(state): State<HttpState>, Path(id): Path<String
 
 /// `PUT /agents/{id}/avatar-config` — persist the user's pick.
 ///
-/// The single writer of the avatar/name fields in `agent_config.json`. The
-/// Gateway reverse-proxies this route and does not choose the value: it
-/// re-reads the instance's inventory (which the Node rebuilds from this
-/// same file) for its list view. One file, one writer, one projection.
+/// The single HTTP writer of `agent_config.json`; the `name` field it
+/// forwards is written by
+/// [`apply_name`](crate::usecases::instance_identity::apply_name) — the same
+/// use case the agent's own rename tool calls, so the file keeps one writer
+/// per field (ADR-111) whichever door the change came through. The Gateway
+/// reverse-proxies this route and does not choose the value: it re-reads the
+/// instance's inventory (which the Node rebuilds from this same file) for its
+/// list view. One file, one writer, one projection.
 async fn put_avatar_config(
     State(state): State<HttpState>,
     Path(id): Path<String>,
@@ -161,8 +166,11 @@ async fn put_avatar_config(
             cfg.avatar = None;
         }
     }
-    match normalize(&req.name) {
-        Field::Unchanged => {}
+    // `name` is NOT written here: it has one writer, the use case below
+    // (ADR-111). Validate it first so an invalid name still rejects the
+    // request as a whole, before anything reaches the disk.
+    let new_name = match normalize(&req.name) {
+        Field::Unchanged => None,
         Field::Clear => {
             return error(
                 StatusCode::BAD_REQUEST,
@@ -170,20 +178,11 @@ async fn put_avatar_config(
                 "name cannot be cleared: an agent always has a name".to_string(),
             );
         }
-        Field::Set(value) => {
-            if value.chars().count() > MAX_NAME_CHARS {
-                return error(
-                    StatusCode::BAD_REQUEST,
-                    "bad_request",
-                    format!(
-                        "name too long ({} > {MAX_NAME_CHARS} chars)",
-                        value.chars().count()
-                    ),
-                );
-            }
-            cfg.name = Some(value);
-        }
-    }
+        Field::Set(value) => match validate_name(&value) {
+            Ok(name) => Some(name),
+            Err(e) => return error(StatusCode::BAD_REQUEST, "bad_request", e.to_string()),
+        },
+    };
 
     if let Err(e) = save_agent_config(&state.work_dir, &cfg) {
         tracing::warn!(error = %e, "avatar-config: failed to persist agent_config.json");
@@ -194,19 +193,19 @@ async fn put_avatar_config(
         );
     }
 
-    // Push the new name into the live core: the file is the durable record,
-    // the core is what the next turn's `{{agent_name}}` reads. Without this
-    // a rename would take effect in the sidebar immediately and in the
-    // agent's own prompt only after a restart — the two-name drift again,
-    // just spread over time.
-    if let Some(name) = cfg.name.clone()
-        && let Some(core) = state
-            .agent_core
-            .read()
-            .ok()
-            .and_then(|slot| slot.as_ref().map(std::sync::Arc::clone))
+    if let Some(name) = new_name
+        && let Err(e) = apply_name(&state.work_dir, &state.agent_core, &name).await
     {
-        core.set_instance_name(name);
+        // `validate_name` already ran above, so this is a persist failure:
+        // the name did not change. A projection that merely did not complete
+        // is NOT an error here (`NameApplyOutcome::Pending`) — the name is
+        // in effect and the Node side converges on its next republish.
+        tracing::warn!(error = %e, "avatar-config: failed to persist agent_config.json");
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            format!("Failed to persist agent_config.json: {e}"),
+        );
     }
 
     match effective_config(&state) {
@@ -216,11 +215,6 @@ async fn put_avatar_config(
 }
 
 // ── Resolution ────────────────────────────────────────────────────────
-
-/// Reject absurd names at the trust boundary. Generous enough for any real
-/// name; the point is to stop an unbounded string from reaching the file
-/// and every list response.
-const MAX_NAME_CHARS: usize = 100;
 
 /// Tri-state for one incoming field: absent, explicitly cleared (`""`), or set.
 enum Field {

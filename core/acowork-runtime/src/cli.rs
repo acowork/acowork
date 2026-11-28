@@ -142,6 +142,17 @@ pub struct Cli {
     /// standalone mode can set it manually.
     #[arg(long, env = "ACOWORK_MQTT_PASSWORD")]
     pub mqtt_password: Option<String>,
+
+    /// ADR-124 §4.1: the Gateway-issued node token, injected by the Node at
+    /// spawn time (`--node-token`). Same token as `--mqtt-password`, but that
+    /// one only authenticates the MQTT CONNECT; this one authorizes the one
+    /// HTTP call back into the Node — the identity projection
+    /// (`POST /agents/{id}/identity/refresh`) issued after a rename.
+    ///
+    /// Secret: never logged, never put in a tool result, a conversation or an
+    /// error message. Absent = no projection target (standalone / dev).
+    #[arg(long, env = "ACOWORK_NODE_TOKEN")]
+    pub node_token: Option<String>,
 }
 
 impl Cli {

@@ -47,6 +47,23 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
 
     // ── ADR-040: gRPC path removed. Only MQTT transport remains. ─────
 
+    // ADR-124 §4.1: install the identity projection target. Present only
+    // when a Node spawned this Runtime (`--http-advertise-endpoint`), which
+    // is also the only case where the sidebar has a consumer to update;
+    // standalone / dev keeps it uninstalled and a rename reports
+    // `NotApplicable` instead of an invented failure. A missing token is kept
+    // as `None` on purpose — the rename then reports `Pending` with a
+    // diagnosable reason rather than silently claiming a projection.
+    if let Some(base) = &config.http_advertise_endpoint {
+        crate::usecases::instance_identity::install_notifier(
+            crate::usecases::instance_identity::IdentityNotifier::new(
+                base,
+                config.node_token.clone(),
+                &config.agent_instance_id,
+            ),
+        );
+    }
+
     // ── ADR-033: Start MQTT client + HTTP server ─────────────────────
     let mut mqtt_client: Option<crate::mqtt::RuntimeMqttClient> = None;
     let mut available_cache: Option<crate::mqtt::SharedAvailableCache> = None;

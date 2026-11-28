@@ -10,6 +10,7 @@ pub mod attachment;
 pub mod chat_usage;
 pub mod debug_service;
 pub mod git_query;
+pub mod instance_identity;
 pub mod mcp_recommendation;
 pub(crate) mod package_workspace;
 pub mod session_config;

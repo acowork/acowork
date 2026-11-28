@@ -98,6 +98,13 @@ pub struct RuntimeConfig {
     /// (`--mqtt-password`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mqtt_password: Option<String>,
+    /// ADR-124 §4.1: the node token for the Node-side HTTP surface
+    /// (`--node-token`). Used by one call only — the identity projection
+    /// after a rename (`POST /agents/{id}/identity/refresh`). A secret:
+    /// `skip_serializing` because it is a spawn-time input, never part of a
+    /// config this process writes out, and never logged.
+    #[serde(default, skip_serializing)]
+    pub node_token: Option<String>,
     /// Path to manifest.toml override
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_path: Option<String>,
@@ -266,6 +273,7 @@ impl Default for RuntimeConfig {
             node_id: None,
             mqtt_username: None,
             mqtt_password: None,
+            node_token: None,
             manifest_path: None,
             config_dir: None,
             dev_mode: false,
@@ -308,6 +316,7 @@ impl RuntimeConfig {
             node_id: cli.node_id.clone(),
             mqtt_username: cli.mqtt_username.clone(),
             mqtt_password: cli.mqtt_password.clone(),
+            node_token: cli.node_token.clone(),
             ..Default::default()
         }
     }

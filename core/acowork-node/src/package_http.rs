@@ -96,6 +96,10 @@ pub fn router(state: NodeHttpState) -> Router {
             get(list_avatar_assets),
         )
         .route("/agents/{id}/manifest/avatar", post(put_manifest_avatar))
+        // ADR-124 §4.1: republish this instance's identity inventory after a
+        // rename the Runtime performed in-process (same-level as the manifest
+        // write above, and for the same reason).
+        .route("/agents/{id}/identity/refresh", post(refresh_identity))
         // 10 MB of image data + multipart framing — mirrors the cap the
         // Gateway enforced on this route before the move.
         .route(
@@ -301,6 +305,38 @@ async fn put_manifest_avatar(
         "agent_id": info.agent_id,
         "avatar": manifest.avatar,
         "builtin_avatar": manifest.builtin_avatar,
+    }))
+    .into_response()
+}
+
+/// `POST /agents/{id}/identity/refresh` — rebuild and republish the
+/// instance's identity inventory from `agent_config.json`.
+///
+/// The Runtime is the only writer of that file, but the inventory the
+/// Gateway's list view shows is published from **this** process. A rename the
+/// Runtime performs in-process (its `self_evolve` tool, ADR-124 §4.1) would
+/// otherwise stay invisible until something else triggered a republish. The
+/// Runtime calls this right after the write; `republish_installed_info`
+/// rebuilds from the file (`build_installed_info_fresh`), so the new name is
+/// picked up with no restart on either side.
+///
+/// Node-token authorized — same boundary as every other node-local route.
+async fn refresh_identity(
+    State(state): State<NodeHttpState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(denied) = crate::proxy::authorize(&state, &headers, &id).await {
+        return denied;
+    }
+    let info = match installed_agent(&state, &id).await {
+        Ok(info) => info,
+        Err(resp) => return *resp,
+    };
+    crate::package::republish_installed_info(&state, &id).await;
+    Json(serde_json::json!({
+        "message": "Identity republished",
+        "instance_id": info.instance_id,
     }))
     .into_response()
 }
@@ -705,6 +741,15 @@ avatar = \"assets/avatar.png\"
             .unwrap()
     }
 
+    fn post_req(uri: &str, token: Option<&str>) -> axum::http::Request<axum::body::Body> {
+        let builder = axum::http::Request::builder().method("POST").uri(uri);
+        let builder = match token {
+            Some(token) => builder.header("X-ACowork-Node-Token", token),
+            None => builder,
+        };
+        builder.body(axum::body::Body::empty()).unwrap()
+    }
+
     /// The asset routes MUST win over the `/agents/{id}/{*rest}` Runtime
     /// reverse proxy, which answers `503 agent not running` when no
     /// Runtime process exists. Merging both routers in one test proves
@@ -729,6 +774,46 @@ avatar = \"assets/avatar.png\"
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The identity refresh the Runtime calls after an in-process rename
+    /// (ADR-124 §4.1): node-token authorized (fail closed without it), 404 for
+    /// an instance this node does not host, `200` for a hosted one.
+    #[tokio::test]
+    async fn identity_refresh_is_authorized_and_reports_the_instance() {
+        let dir = fixture_package();
+        let state = state_with_package(&dir);
+        let app = router(state);
+        let id = "3f2a0c1e-0000-4000-8000-000000000001";
+        let uri = format!("/agents/{id}/identity/refresh");
+
+        // §6.8 boundary: no token, no republish.
+        let resp = app
+            .clone()
+            .oneshot(post_req(&uri, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = app
+            .clone()
+            .oneshot(post_req(&uri, Some(TEST_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // An instance this node does not host is a 404, never a silent ok —
+        // the Runtime's `Pending` reason must be able to tell them apart.
+        let resp = app
+            .oneshot(post_req(
+                "/agents/00000000-0000-4000-8000-000000000000/identity/refresh",
+                Some(TEST_TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

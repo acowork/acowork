@@ -4642,6 +4642,121 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
+    /// `PUT /agents/{id}/avatar-config` renames through the single writer
+    /// (`usecases::instance_identity::apply_name`) and, with no Node in the
+    /// picture (`--http-advertise-endpoint` absent — this process never
+    /// installs a projection target), reports the rename as a plain success:
+    /// `NotApplicable`, nothing logged as failed, nothing to converge.
+    #[tokio::test]
+    async fn put_avatar_config_rename_is_fail_visible_not_applicable_standalone() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-avatar-config");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        // `effective_config` resolves the manifest for the fallbacks.
+        std::fs::write(
+            temp_dir.join("manifest.toml"),
+            "agent_id = \"com.test.agent\"
+name = \"Original\"
+version = \"1.0.0\"
+description = \"test\"
+author = \"test\"
+runtime_version = \"0.1.0\"
+",
+        )
+        .unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            TEST_INSTANCE_ID.to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(None)), // no SessionManager
+            std::sync::Arc::new(std::sync::RwLock::new(None)),   // no AgentCore
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let route = format!("{base}/agents/{TEST_INSTANCE_ID}/avatar-config");
+        let client = reqwest::Client::new();
+
+        // Rename (the value is trimmed by the use case).
+        let resp = client
+            .put(&route)
+            .json(&serde_json::json!({ "name": "  Nova  " }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["name"], "Nova");
+
+        // The fact source and the route's own read agree, immediately.
+        let cfg = crate::agent_config::load_agent_config(&temp_dir)
+            .unwrap()
+            .expect("agent_config.json must exist after a rename");
+        assert_eq!(cfg.name.as_deref(), Some("Nova"));
+        let body: serde_json::Value = reqwest::get(&route).await.unwrap().json().await.unwrap();
+        assert_eq!(body["name"], "Nova");
+
+        // An unusable name still rejects the whole request and writes nothing.
+        for bad in ["   ", "bad
+name"] {
+            let resp = client
+                .put(&route)
+                .json(&serde_json::json!({ "name": bad }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST, "name {bad:?}");
+        }
+        let cfg = crate::agent_config::load_agent_config(&temp_dir).unwrap().unwrap();
+        assert_eq!(cfg.name.as_deref(), Some("Nova"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
     #[tokio::test]
     async fn test_http_server_sessions_with_data() {
         let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-sessions");

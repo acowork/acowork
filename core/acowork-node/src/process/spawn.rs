@@ -165,6 +165,14 @@ pub async fn spawn_agent_process(
         cmd.arg("--mqtt-username")
             .arg(format!("agent:{instance_id}"))
             .arg("--mqtt-password")
+            .arg(token)
+            // ADR-124 §4.1: the same token authorizes the Runtime's one HTTP
+            // call back into this Node — the identity projection it issues
+            // after a rename (`POST /agents/{id}/identity/refresh`). Without
+            // it the Runtime can write its own name but never publish it, and
+            // the list view keeps the old one. Secret: the Runtime keeps it
+            // out of logs, tool results and error messages.
+            .arg("--node-token")
             .arg(token);
     }
 
