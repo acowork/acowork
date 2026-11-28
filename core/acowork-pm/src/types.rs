@@ -233,14 +233,31 @@ pub enum AttachmentKind {
 }
 
 /// 依赖关系种类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **`depends_on` 只有一种语义：阻塞。** 一个叫"依赖"的字段上摆三个值、其中
+/// 两个不参与任何闸门（`blocks` 之外的两个在派发扫描与 claim 闸门里都读不到），
+/// 不是选择，是陷阱：调用方以为"我已经声明了依赖"，闸门却没接上。这条已经
+/// 真实发生过 —— 一批任务把 S1/S2/S3 写成 `relates`，审批通过后立刻开跑，
+/// 而它们的前置还在 `pending`。同一次事故里 Desktop 的编辑对话框还把每一条
+/// 依赖硬编码成 `relates` 保存，于是任何一次编辑都会把 `blocks` 降级。
+///
+/// 所以：**写入路径只接受 [`DependencyKind::Blocks`]**
+/// （`store::rules::normalize_dependencies`），其余两个变体只为读得懂存量
+/// JSON 而保留 —— 存量边由 `PmMaintenance::migrate_dependency_kinds` 一次性
+/// 改写为 `blocks`，写回之后它们不再出现。soft link（"只是有点关系"）若将来
+/// 真需要，是另一个字段、另一层的事，不能和闸门共用一个数组。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyKind {
-    /// 强依赖：被依赖任务未完成时，本任务不可 claim
+    /// 唯一可写入的语义：被依赖任务未完成（`done` / `cancelled` 之外）时，
+    /// 本任务既不派发也不可 claim。
+    #[default]
     Blocks,
-    /// 弱关联：仅展示，不阻塞
+    /// **遗留值，只读**：早期声称"仅展示，不阻塞"。不参与任何闸门，正因如此
+    /// 它是漏依赖的入口；写入被拒，存量由迁移改写为 `blocks`。
     Relates,
-    /// 重复：被依赖任务为本任务的副本
+    /// **遗留值，只读**：早期"被依赖任务为本任务的副本"。同样不参与任何闸门，
+    /// 处理方式与 [`DependencyKind::Relates`] 相同。
     Duplicates,
 }
 
@@ -528,10 +545,26 @@ pub enum Priority {
     Urgent,
 }
 
+impl DependencyKind {
+    /// serde 表示的同一串（`blocks` / `relates` / `duplicates`）。错误信息里必须
+    /// 用**调用方写的那串**，否则它看到 `Relates` 会以为自己写错了拼写。
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            DependencyKind::Blocks => "blocks",
+            DependencyKind::Relates => "relates",
+            DependencyKind::Duplicates => "duplicates",
+        }
+    }
+}
+
 /// 依赖声明。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dependency {
     pub task_id: TaskId,
+    /// 语义只有一个（阻塞）。`#[serde(default)]` 让**省略 `kind` 就等于
+    /// `blocks`** —— MCP schema 从第一天起就是这么写的（`default: "blocks"`），
+    /// 但 Rust 侧没有缺省值，省略 kind 其实会反序列化失败。两边现在说同一句话。
+    #[serde(default)]
     pub kind: DependencyKind,
 }
 
@@ -970,6 +1003,36 @@ mod tests {
         )
         .expect("body with kind=user");
         assert_eq!(with_user.kind, MemberKind::User);
+    }
+
+    /// 依赖只有一种语义：**说不说 kind，都是 `blocks`**。
+    ///
+    /// MCP schema 从第一天起就写着 `default: "blocks"`，而 Rust 侧既没有
+    /// `serde(default)` 也没有 `Default` 实现 —— 省略 `kind` 其实会**解析失败**，
+    /// 两边说的不是同一句话。这条把承诺钉在类型上。
+    #[test]
+    fn dependency_kind_defaults_to_blocks() {
+        let omitted: Dependency = serde_json::from_str(r#"{"task_id":"t-abc123"}"#)
+            .expect("a dependency body without `kind` must parse");
+        assert_eq!(omitted.kind, DependencyKind::Blocks);
+        assert_eq!(omitted.kind.wire_name(), "blocks");
+    }
+
+    /// 存量 `relates` / `duplicates` 必须**读得懂**：迁移是在启动时跑的，而一行
+    /// 读不出来的 `props` 会让 `load_task` 直接失败 —— 那等于迁移把卡锁死了。
+    /// 写入侧拒绝它们（`store::rules::normalize_dependencies`），读侧宽容。
+    #[test]
+    fn legacy_dependency_kinds_still_deserialize() {
+        for (json, expected) in [
+            (r#"{"task_id":"t-abc123","kind":"relates"}"#, DependencyKind::Relates),
+            (
+                r#"{"task_id":"t-abc123","kind":"duplicates"}"#,
+                DependencyKind::Duplicates,
+            ),
+        ] {
+            let dep: Dependency = serde_json::from_str(json).expect("legacy kind must parse");
+            assert_eq!(dep.kind, expected);
+        }
     }
 
     #[test]

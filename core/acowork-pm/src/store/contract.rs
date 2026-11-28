@@ -19,6 +19,14 @@ pub trait PmMaintenance: Send + Sync {
     /// One-shot `start_at` backfill on legacy pending tasks; returns rows changed.
     async fn migrate_null_start_at(&self) -> Result<usize>;
 
+    /// One-shot rewrite of every stored dependency to the only kind the gates
+    /// read: `blocks`. `relates` / `duplicates` never participated in the
+    /// dispatch scan or the claim gate, so a task carrying them was "declared
+    /// dependent" and still ran — the failure this migration closes. Returns
+    /// the number of tasks whose dependency list changed; idempotent (a second
+    /// run rewrites nothing). See `types::DependencyKind`.
+    async fn migrate_dependency_kinds(&self) -> Result<usize>;
+
     /// Flush pending writes before the process exits.
     async fn shutdown(&self) -> Result<()>;
 

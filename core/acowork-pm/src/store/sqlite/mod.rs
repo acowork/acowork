@@ -349,6 +349,64 @@ fn load_task_from(conn: &Connection, id: &TaskId) -> Result<Option<Task>> {
     json.map(|j| Ok(serde_json::from_str(&j)?)).transpose()
 }
 
+/// 依赖图校验里需要 IO 的那一半：**目标必须存在**，且新边不能闭成环。
+///
+/// 纯规则那一半在 `store::rules::normalize_dependencies`（格式 / 种类 / 自引用 /
+/// 去重）。两条写路径（create / update）都必须过这一关，否则依赖就是一句没人
+/// 校验的话 —— 这正是这批卡出事的方式。
+///
+/// 为什么目标存在是一条硬规则：`dispatch_blocked` 对悬挂引用是 **fail-closed**
+/// （永远拦着），所以放一条指向已删除任务的边进来，等于给这张卡挂了一把打不开
+/// 的锁，而且报错里只有"被某个任务拦着"，看不出是幽灵。
+fn validate_dependency_graph(
+    conn: &Connection,
+    task_id: &TaskId,
+    deps: &[crate::types::Dependency],
+) -> Result<()> {
+    for dep in deps {
+        if load_task_from(conn, &dep.task_id)?.is_none() {
+            return Err(PmError::DependencyTargetNotFound(
+                dep.task_id.to_string(),
+            ));
+        }
+        // 环：新边 dep → 我，而 dep 已经（传递地）依赖我。
+        if dependency_reaches(conn, &dep.task_id, task_id)? {
+            return Err(PmError::DependencyCycle(task_id.to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// 依赖图（`blocks` 边）上，`from` 能否**传递地**到达 `target`。
+///
+/// 旧实现只有"不能依赖自己"这一条自引用检查 —— 那是最短的环，不是全部的环。
+/// A→B、B→C、C→A 三条边过去能被收下，结果是三张卡互相拦死，谁都派不出去，
+/// 而服务端自认为校验通过了。这里沿 `blocks` 边做一次 DFS（依赖的唯一语义），
+/// `visited` 保证**已经存在**的环也能终止而不是把扫描器卡死。
+fn dependency_reaches(conn: &Connection, from: &TaskId, target: &TaskId) -> Result<bool> {
+    let mut visited: std::collections::HashSet<TaskId> = std::collections::HashSet::new();
+    let mut stack: Vec<TaskId> = vec![from.clone()];
+    while let Some(current) = stack.pop() {
+        if &current == target {
+            return Ok(true);
+        }
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        let Some(task) = load_task_from(conn, &current)? else {
+            continue;
+        };
+        for dep in task
+            .depends_on
+            .iter()
+            .filter(|d| d.kind == DependencyKind::Blocks)
+        {
+            stack.push(dep.task_id.clone());
+        }
+    }
+    Ok(false)
+}
+
 fn load_project_from(conn: &Connection, id: &ProjectId) -> Result<Option<Project>> {
     let json: Option<String> = conn
         .query_row(
@@ -506,6 +564,53 @@ impl PmMaintenance for SqlitePmStore {
             }
             tx.commit().map_err(db_err)?;
             Ok(rows.len())
+        })
+    }
+
+    /// 存量依赖对齐：把每一条 `relates` / `duplicates` 边改写为 `blocks`。
+    ///
+    /// 只改数据、不动 schema，所以不参与 `SCHEMA_VERSION`；靠"第二次跑无事可做"
+    /// 保证幂等（与 `migrate_null_start_at` 同一形态）。返回**被改写的任务数**，
+    /// 不是边数 —— 运维读日志时要的是"有多少张卡受影响"。
+    ///
+    /// 不写 activity：一次迁移可能命中上百张卡，逐卡留痕只会把真正的事件淹掉。
+    /// 汇总条数进服务日志（`server.rs`），审计从这里看。
+    async fn migrate_dependency_kinds(&self) -> Result<usize> {
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction().map_err(db_err)?;
+            let mut stmt = tx
+                .prepare("SELECT id, props FROM tasks")
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(db_err)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(db_err)?;
+            drop(stmt);
+            let mut rewritten = 0usize;
+            for (id, json) in &rows {
+                let mut task: Task = serde_json::from_str(json)?;
+                let mut changed = false;
+                for dep in &mut task.depends_on {
+                    if dep.kind != DependencyKind::Blocks {
+                        dep.kind = DependencyKind::Blocks;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    continue;
+                }
+                tx.execute(
+                    "UPDATE tasks SET props = ?2 WHERE id = ?1",
+                    params![id, serde_json::to_string(&task)?],
+                )
+                .map_err(db_err)?;
+                rewritten += 1;
+            }
+            tx.commit().map_err(db_err)?;
+            Ok(rewritten)
         })
     }
 

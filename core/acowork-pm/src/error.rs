@@ -95,6 +95,19 @@ pub enum PmError {
     #[error("dependency cycle detected via task {0}")]
     DependencyCycle(String),
 
+    /// `depends_on` 只有一种语义（阻塞）。这条错误的存在是为了**不静默**：
+    /// 调用方写了 `relates` / `duplicates` 时若被悄悄改写成 `blocks`，它会继续
+    /// 以为那条边"不拦事"，依赖缺口就又被藏起来了。
+    #[error(
+        "dependency kind `{kind}` is not accepted: depends_on only carries blocking dependencies —          use `blocks` (omit `kind` and you get `blocks`)"
+    )]
+    UnsupportedDependencyKind { kind: String },
+
+    /// 指向一个不存在的任务。`dispatch_blocked` 对悬挂引用是 fail-closed
+    /// （永远拦着），所以放它进来等于给这张卡挂一把打不开的锁。
+    #[error("dependency target `{0}` does not exist")]
+    DependencyTargetNotFound(String),
+
     #[error("dependency not satisfied: task {task_id} is blocked by {blocker}")]
     DependencyNotSatisfied { task_id: String, blocker: String },
 
@@ -222,6 +235,11 @@ impl PmError {
             PmError::DependencyNotSatisfied { .. } => 409,
             PmError::ReviewNotApproved { .. } => 409,
 
+            // 依赖的种类与目标都是**请求形状**：调用方改参数就能过，不是权限
+            // 也不是冲突，所以 400 / 404，不是 409。
+            PmError::UnsupportedDependencyKind { .. } => 400,
+            PmError::DependencyTargetNotFound(_) => 404,
+
             PmError::Unauthenticated(_) => 401,
 
             PmError::DirectoryUnavailable(_) => 503,
@@ -258,6 +276,8 @@ impl PmError {
             PmError::Conflict(_) => "conflict",
             PmError::DependencyCycle(_) => "dependency_cycle",
             PmError::DependencyNotSatisfied { .. } => "dependency_not_satisfied",
+            PmError::UnsupportedDependencyKind { .. } => "unsupported_dependency_kind",
+            PmError::DependencyTargetNotFound(_) => "dependency_target_not_found",
             PmError::AttachmentTooLarge { .. } => "attachment_too_large",
             PmError::AttachmentMimeRejected(_) => "attachment_mime_rejected",
             PmError::TooManyAttachments(_) => "too_many_attachments",
@@ -428,6 +448,18 @@ mod tests {
                 "dependency_not_satisfied",
             ),
             (
+                PmError::UnsupportedDependencyKind {
+                    kind: "relates".into(),
+                },
+                400,
+                "unsupported_dependency_kind",
+            ),
+            (
+                PmError::DependencyTargetNotFound("t-missing".into()),
+                404,
+                "dependency_target_not_found",
+            ),
+            (
                 PmError::MemberAlreadyExists("inst-1".into()),
                 409,
                 "member_already_exists",
@@ -497,7 +529,7 @@ mod tests {
         // author_not_project_member /
         // member_already_exists / member_has_open_tasks；加 cascade 冲突的
         // conflict）
-        assert_eq!(seen_codes.len(), 31);
+        assert_eq!(seen_codes.len(), 33);
     }
 
     /// `IntoResponse` 生成的 JSON body 包含 code 与 message。
@@ -548,6 +580,10 @@ mod tests {
                 task_id: "a".into(),
                 blocker: "b".into(),
             },
+            PmError::UnsupportedDependencyKind {
+                kind: "relates".into(),
+            },
+            PmError::DependencyTargetNotFound("x".into()),
             PmError::MemberAlreadyExists("x".into()),
             PmError::MemberHasOpenTasks {
                 instance_id: "x".into(),

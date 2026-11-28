@@ -92,6 +92,17 @@ impl PmService {
             Err(e) => tracing::warn!(error = %e, "PM start_at backfill failed"),
         }
 
+        // 一次性把存量依赖改写为 `blocks`：`relates` / `duplicates` 从来不参与
+        // 派发扫描与 claim 闸门，带着它们的任务"声明了依赖"却照跑。写入侧已经
+        // 只接受 `blocks`，这一步是存量数据的对齐。幂等，第二次跑无事可做。
+        match store.migrate_dependency_kinds().await {
+            Ok(n) if n > 0 => {
+                tracing::info!(count = n, "PM rewrote legacy dependency kinds to `blocks`")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "PM dependency-kind migration failed"),
+        }
+
         Ok(Self {
             config,
             store,

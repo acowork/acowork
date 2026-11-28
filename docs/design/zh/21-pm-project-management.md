@@ -158,7 +158,7 @@ mcp_http_path = "/api/pm/mcp"            # MCP HTTP 端点公开路径（含 /ap
   "claimed_at": null,                  // Agent 自领时间
   "submitted_at": null,                // Agent 提交结果时间
   "depends_on": [                      // 跨树 / 跨项目依赖（显式存储）
-    { "task_id": "t-002", "kind": "blocks" }   // blocks | relates | duplicates
+    { "task_id": "t-002", "kind": "blocks" }   // 只有 blocks：依赖 = 阻塞
   ],
   "attachments": [                     // 附件元数据；文件本体在同级 attachments/{att_id}/
     {
@@ -197,10 +197,25 @@ mcp_http_path = "/api/pm/mcp"            # MCP HTTP 端点公开路径（含 /ap
 
 ### 3.5 依赖图（`depends_on`）
 
-- **存储**：任务 `task.json` 内显式声明 `depends_on: [{ task_id, kind }]`。
+- **语义只有一个：阻塞。** `kind` 唯一可写入的值是 `blocks`；省略 `kind` 即 `blocks`。
+  早期的 `relates` / `duplicates` 不参与任何闸门（派发扫描与 claim 都不读），结果是
+  "声明了依赖却照跑" —— 一批任务把前置写成 `relates`，审批一过就开工、前置还在
+  `pending`。这两个值现在**只读**（存量为兼容反序列化保留），写入返回 400
+  `unsupported_dependency_kind`，存量边由启动时的 `migrate_dependency_kinds`
+  一次性改写为 `blocks`。若将来需要"只是有点关系"的软关联，那是**另一个字段**，
+  不能和闸门共用一个数组。
+- **存储**：任务 `props` 内显式声明 `depends_on: [{ task_id, kind }]`。
 - **不存派生字段**：API 响应可附带 `is_blocked` / `blocked_by` 方便前端渲染，**不写回存储**，避免双写。
-- **创建/编辑校验**：DFS 检测循环依赖，深度上限 10。
-- **未满足依赖时**：任务可正常创建/编辑，但 `pm_claim_task` 返回 409 `DependencyNotSatisfied`；前端根据 `is_blocked` 灰显。
+- **创建/编辑校验**（写路径 `store::rules::normalize_dependencies` +
+  `sqlite::validate_dependency_graph`）：种类只接受 `blocks`；拒绝自引用；拒绝
+  指向不存在任务的边（`dispatch_blocked` 对悬挂引用 fail-closed，放进来等于给这张
+  卡挂一把打不开的锁）；沿 `blocks` 边做**传递**环检测（只查自引用不够：A→B→C→A
+  三张卡会互相拦死而校验自认为通过）。
+- **未满足依赖时**：任务可正常创建/编辑，但**两个动作都被拦**——派发扫描不选它
+  （`start_at` 到了也不派），`pm_claim_task` 返回 409 `DependencyNotSatisfied`；
+  前端根据 `is_blocked` 灰显，依赖 chip 上直接标"还在拦 / 已满足"。
+  **`start_at` 只决定唤醒时刻，它不能单独让任务跑起来**：可执行的充要条件是
+  `review_status` 已批准 ∧ `start_at` 已到 ∧ 全部 `blocks` 前置已 `done`/`cancelled`。
 - **跨项目依赖**：允许，需在 API 响应中附带 `blocker_project_id` 字段方便前端跳转。
 
 ### 3.6 附件存储

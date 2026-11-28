@@ -140,7 +140,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_create_task",
-      "description": "Create a task. Set parent_task_id to create a child task. Use depends_on to declare dependencies (other tasks must exist). Tasks created by an agent enter review_status=pending and CANNOT be claimed until a human approves them (pm_claim_task returns 409 review_not_approved); check `review_status` on `pm_get_task` to see whether approval landed.",
+      "description": "Create a task. Set parent_task_id to create a child task. Use depends_on to declare BLOCKING dependencies (other tasks must exist; `kind` is always `blocks` — a soft link is not expressible and will be rejected, because a declared-but-unenforced dependency is how work starts before its prerequisites). Tasks created by an agent enter review_status=pending and CANNOT be claimed until a human approves them (pm_claim_task returns 409 review_not_approved); check `review_status` on `pm_get_task` to see whether approval landed.",
       "inputSchema": {
         "type": "object",
         "required": ["project_id", "title"],
@@ -171,12 +171,18 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           },
           "depends_on": {
             "type": "array",
+            "description": "Blocking dependencies. A task whose `blocks` prerequisites are not done/cancelled is neither dispatched (the scanner skips it) nor claimable (409 dependency_not_satisfied) — `start_at` alone never makes a task runnable. `kind` has exactly one accepted value (`blocks`); `relates`/`duplicates` are legacy read-only values and are rejected on write.",
             "items": {
               "type": "object",
               "required": ["task_id"],
               "properties": {
                 "task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" },
-                "kind": { "type": "string", "enum": ["blocks", "relates", "duplicates"], "default": "blocks" }
+                "kind": {
+                  "type": "string",
+                  "enum": ["blocks"],
+                  "default": "blocks",
+                  "description": "Only `blocks` exists: a dependency means it blocks. Omit it and you get `blocks`."
+                }
               }
             }
           }
@@ -219,13 +225,18 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           },
           "depends_on": {
             "type": "array",
-            "description": "Replaces the task's dependency list. Referenced tasks must already exist.",
+            "description": "Replaces the task's dependency list. Referenced tasks must already exist (a dangling edge is refused, not silently kept: it would block the task forever) and the new edges must not close a cycle in the dependency graph. Dependencies are blocking — see pm_create_task.",
             "items": {
               "type": "object",
               "required": ["task_id"],
               "properties": {
                 "task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" },
-                "kind": { "type": "string", "enum": ["blocks", "relates", "duplicates"], "default": "blocks" }
+                "kind": {
+                  "type": "string",
+                  "enum": ["blocks"],
+                  "default": "blocks",
+                  "description": "Only `blocks` exists: a dependency means it blocks. Omit it and you get `blocks`."
+                }
               }
             }
           },
