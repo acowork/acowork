@@ -36,7 +36,6 @@ use serde::{Deserialize, Serialize};
 use crate::api::{actor_from, ApiResult, ApiState};
 use crate::error::DocError;
 use crate::mcp::tools::{resolve_doc_ref, resolve_entry};
-use crate::service::{DirectoryService, DocumentService};
 use crate::state::DocState;
 use crate::types::DocId;
 
@@ -288,19 +287,12 @@ async fn resolve_one(
     }
 }
 
-/// Human-readable path of a document (`研发/纪要.md`), rendered from the
-/// same raw `{dir_id}/{name}.md` layout the MCP `PathCtx` translates. Kept
-/// local to this endpoint: the MCP module owns its memoised variant because
-/// it renders paths in bulk; a validation call resolves at most `MAX_REFS`
-/// docs and one upward chain per doc is not a cost worth a cache.
+/// 人读路径（`研发/纪要.md`）—— 交给 [`DocPathRenderer`]，与 REST / MCP 同源。
+///
+/// path 在 refs 的应答里是**展示字段**（打开靠 `doc_id`），所以祖先链断掉时
+/// 降级成 `None` 而不是让整批失败：一条 ref 的展示路径不该拖垮其余条目。
 async fn human_path(state: &DocState, doc_id: &str) -> Result<String, DocError> {
-    use crate::types::ROOT_DIR_ID;
-    let raw = state.docs.path_of(doc_id).await?;
-    let (dir_id, file) = raw.rsplit_once('/').unwrap_or((ROOT_DIR_ID, raw.as_str()));
-    let dir = state.dirs.path_of(dir_id).await?;
-    Ok(if dir.is_empty() {
-        file.to_string()
-    } else {
-        format!("{dir}/{file}")
-    })
+    crate::service::path_renderer::DocPathRenderer::new(state.dirs.as_ref())
+        .doc_path(state.docs.as_ref(), doc_id)
+        .await
 }

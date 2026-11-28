@@ -71,7 +71,6 @@ pub fn doc_router(state: DocState) -> Router {
         .route("/docs/{doc_id}", delete(c::delete_doc))
         .route("/docs/{doc_id}/title", patch(c::rename_doc))
         .route("/docs/{doc_id}/move", post(c::move_doc))
-        .route("/docs/{doc_id}/path", get(c::doc_path))
         .route("/docs/{doc_id}/file", get(c::doc_file).put(c::save_doc_file).layer(
             axum::extract::DefaultBodyLimit::max(crate::limit::UPLOAD_CEILING),
         ))

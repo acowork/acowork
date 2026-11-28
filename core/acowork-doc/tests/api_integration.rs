@@ -209,12 +209,12 @@ async fn dir_tree_and_cross_dir_move() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let (status, body) = srv.get(&format!("/docs/{doc}/path")).await;
+    // 边界的 `path` 是人读路径（P1）：`项目B/纪要.md`，且**不含**内部 dir_id。
+    let (status, body) = srv.get(&format!("/docs/{doc}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(
-        body["path"].as_str().unwrap().starts_with(&proj_b),
-        "doc should now live under B: {body}"
-    );
+    let path = body["path"].as_str().unwrap();
+    assert_eq!(path, "项目B/纪要.md", "doc should now live under B: {body}");
+    assert!(!path.contains(&proj_b), "path 泄漏了内部 dir_id: {path}");
 
     // Move to a non-existent directory fails cleanly (404) and the source
     // document remains readable — no partial state.

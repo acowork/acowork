@@ -11,8 +11,9 @@
 //! - [`refs_validate_outcome_shapes_are_pinned`]：`/refs/validate` 三种状态的键集与顺序；
 //! - [`mcp_stat_path_is_human_readable`]：MCP `doc_stat` 的 path 形状。
 //!
-//! 其中 `DocRead.path` 当前是**内部 `dir_id` 形状**（`dir-xxxx/x.md`）。P1 会把它翻成
-//! 人读路径 —— 这条断言就是 P1 的 allowed-diff：它必须红，且必须在 diff 里显式改成新形状。
+//! `DocRead.path` 在 P1 从**内部 `dir_id` 形状**（`dir-xxxx/x.md`）翻成人读路径
+//! （`研发/纪要.md`）—— 那条断言就是 P1 的 allowed-diff：它先红，再在 diff 里显式
+//! 改成新形状。注释里标 `P1 翻转` 的地方，就是「有意变更」的唯一登记处。
 //! 用注释标了 `P1 翻转` 的地方，就是「有意变更」的唯一登记处。
 //!
 //! ## 2. 地址不变量（addressing invariants）
@@ -224,7 +225,42 @@ async fn rest_document_response_shape_is_pinned() {
         vec!["created_at", "deleted", "doc_id", "name", "updated_at", "version"],
         "DocMeta 键集（`acl`/`creator`/`ext`/`import` 为 skip_serializing_if 缺省）"
     );
-    assert_eq!(body["path"], format!("{dir}/纪要.md"), "P1 翻转：内部 dir_id 形状");
+    // P1 翻转：`path` 是**人读路径**，与 MCP / refs 由同一个 `DocPathRenderer`
+    // 渲染。这里曾经断言 `{dir_id}/纪要.md` —— 那是把基座的内部布局直接出了边界。
+    assert_eq!(body["path"], "研发/纪要.md", "P1 翻转：人读路径");
+    // R5 扩到整个 body：`dir_id` 只允许出现在请求里，不允许出现在应答里。
+    assert!(
+        !body.to_string().contains(&dir),
+        "GET /docs/{{id}} 泄漏了内部 dir_id：{body}"
+    );
+}
+
+/// 死接口保持死：`GET /docs/{id}/path` 已删除（它返回内部 `dir_id/name.md`，
+/// 零调用者）。路径的唯一出口是 `GET /docs/{id}` 的 `path` 字段 —— 重新加回一条
+/// 会泄漏内部 id 的路由，必须是一处显式的契约变更，而不是随手补个方便接口。
+#[tokio::test(flavor = "multi_thread")]
+async fn removed_doc_path_route_stays_removed() {
+    let srv = spawn().await;
+    let doc_id = srv.mkdoc(ROOT_DIR_ID, "纪要", "内容").await;
+    let (status, _) = srv.get(&format!("/docs/{doc_id}/path")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "GET /docs/{{id}}/path 不应该存在");
+}
+
+/// `GET /tree?dir_id=` 的 `path` 也是人读形状（P1 之前是节点自己的 `dir_id`）。
+///
+/// 树是桌面最常刷新的边界：`path` 一旦是内部 id，它就会顺着 store 流到面包屑、
+/// 搜索结果、标签页身份里 —— 泄漏一次，之后每一处都在复制那个形状。
+#[tokio::test(flavor = "multi_thread")]
+async fn tree_node_path_is_human_readable() {
+    let srv = spawn().await;
+    let dir = srv.mkdir(ROOT_DIR_ID, "研发").await;
+    let (status, body) = srv.get(&format!("/tree?dir_id={dir}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["path"], "研发", "TreeNode.path 必须是祖先名字拼出的路径");
+    // `dir_id` 是树契约的一部分（客户端靠它列子目录），但 `name` / `path` 不是 id 的
+    // 藏身处：这两个字段曾经一起退化成 `dir-xxxx`。
+    assert_eq!(body["name"], "研发", "TreeNode.name 必须是目录名，不是 dir_id");
+    assert_eq!(body["dirs"].as_array().unwrap().len(), 0);
 }
 
 /// `/refs/validate` 三种状态的键集 + 输入顺序。PM 的 `doc_refs` 提交直接依赖这个形状。

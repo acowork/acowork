@@ -21,6 +21,7 @@ use crate::limit;
 use acowork_core::mcp_page::{page_limit, paginate, text_chunk, text_limit};
 use crate::path::validate_request_id;
 use crate::service::directory::{CreateDirectoryInput, DirectoryService};
+use crate::service::path_renderer::DocPathRenderer;
 use crate::service::document::{
     AppendDocumentInput, CreateDocumentInput, DocumentService, UpdateDocumentInput,
 };
@@ -229,55 +230,10 @@ async fn resolve_dir_or_root(dirs: &dyn DirectoryService, path: &str) -> Result<
     resolve_dir(dirs, path).await
 }
 
-/// Internal `dir_id` → human-readable directory path (`""` for the root).
-///
-/// The service layer's `DocumentService::path_of` is keyed by `dir_id` (that
-/// is the on-disk layout), so it cannot render names on its own — the MCP
-/// layer owns `DirectoryService` and does the translation.
-///
-/// Cost is O(depth) per directory, not O(directories): `DirectoryService::
-/// path_of` walks up the `parent` chain. The memo is per call, so a search
-/// that renders 100 hits in 3 directories walks each chain once — and no
-/// cross-request cache means no invalidation hook to forget on mkdir /
-/// rename / delete.
-struct PathCtx<'a> {
-    dirs: &'a dyn DirectoryService,
-    memo: std::collections::HashMap<String, String>,
-}
-
-impl<'a> PathCtx<'a> {
-    fn new(dirs: &'a dyn DirectoryService) -> Self {
-        let mut memo = std::collections::HashMap::new();
-        memo.insert(ROOT_DIR_ID.to_string(), String::new());
-        Self { dirs, memo }
-    }
-
-    async fn dir(&mut self, dir_id: &str) -> Result<&str> {
-        if !self.memo.contains_key(dir_id) {
-            let path = self.dirs.path_of(dir_id).await?;
-            self.memo.insert(dir_id.to_string(), path);
-        }
-        Ok(self.memo.get(dir_id).map(String::as_str).unwrap_or_default())
-    }
-
-    /// Translate a service-rendered `{dir_id}/{name}.md` path into the path
-    /// the agent sees (`研发/纪要.md`).
-    async fn humanize(&mut self, raw: &str) -> Result<String> {
-        let (dir_id, file) = raw.rsplit_once('/').unwrap_or((ROOT_DIR_ID, raw));
-        let dir = self.dir(dir_id).await?.to_string();
-        Ok(if dir.is_empty() {
-            file.to_string()
-        } else {
-            format!("{dir}/{file}")
-        })
-    }
-
-    /// Public, human-readable path of a document (`研发/纪要.md`).
-    async fn doc(&mut self, docs: &dyn DocumentService, doc_id: &str) -> Result<String> {
-        let raw = docs.path_of(doc_id).await?;
-        self.humanize(&raw).await
-    }
-}
+/// 人读路径统一由 [`DocPathRenderer`] 渲染（REST / MCP / refs 共用一份实现）。
+/// 记住它是**每次调用**记忆化的：一个 `doc_search` 渲染 100 条命中分布在 3 个
+/// 目录时，只走 3 条祖先链；没有跨请求缓存，也就没有 mkdir / rename / delete
+/// 之后必须失效的那笔账。
 
 // ── 只读工具 ─────────────────────────────────────────────────────────────
 
@@ -377,7 +333,7 @@ async fn doc_read(state: &DocState, args: Value) -> Result<Value> {
     let (_dir, doc_id) =
         resolve_doc_ref(state.dirs.as_ref(), state.docs.as_ref(), &a.reference).await?;
     let read = state.docs.read(&doc_id).await?;
-    let mut paths = PathCtx::new(state.dirs.as_ref());
+    let mut paths = DocPathRenderer::new(state.dirs.as_ref());
     let path = paths.humanize(&read.path).await?;
     let mut v = doc_to_value(read.meta, path)?;
     let limit = text_limit(a.limit);
@@ -406,7 +362,7 @@ async fn doc_stat(state: &DocState, args: Value) -> Result<Value> {
     let (_dir, doc_id) =
         resolve_doc_ref(state.dirs.as_ref(), state.docs.as_ref(), &a.reference).await?;
     let st = state.docs.stat(&doc_id).await?;
-    let mut paths = PathCtx::new(state.dirs.as_ref());
+    let mut paths = DocPathRenderer::new(state.dirs.as_ref());
     let path = paths.humanize(&st.path).await?;
     let mut v = doc_to_value(st.meta, path)?;
     v["size_bytes"] = Value::from(st.size_bytes);
@@ -459,7 +415,7 @@ async fn doc_search(state: &DocState, args: Value) -> Result<Value> {
     //
     // A hit whose directory is gone (deleted after indexing) keeps the raw
     // value: one unaddressable hit must not fail the search.
-    let mut paths = PathCtx::new(state.dirs.as_ref());
+    let mut paths = DocPathRenderer::new(state.dirs.as_ref());
     let mut items: Vec<Value> = Vec::with_capacity(hits.len());
     for h in hits {
         let path = paths.humanize(&h.path).await.unwrap_or_else(|_| h.path.clone());
@@ -626,8 +582,8 @@ async fn doc_write(state: &DocState, actor: &str, args: Value) -> Result<Value> 
                     creator: Some(actor.to_string()),
                 })
                 .await?;
-            let path = PathCtx::new(state.dirs.as_ref())
-                .doc(state.docs.as_ref(), &meta.doc_id)
+            let path = DocPathRenderer::new(state.dirs.as_ref())
+                .doc_path(state.docs.as_ref(), &meta.doc_id)
                 .await?;
             Ok(json!({
                 "status": "applied",
@@ -685,8 +641,8 @@ async fn doc_write(state: &DocState, actor: &str, args: Value) -> Result<Value> 
                             )
                             .await?
                     };
-                    let path = PathCtx::new(state.dirs.as_ref())
-                        .doc(state.docs.as_ref(), &updated.doc_id)
+                    let path = DocPathRenderer::new(state.dirs.as_ref())
+                        .doc_path(state.docs.as_ref(), &updated.doc_id)
                         .await?;
                     Ok(json!({
                         "status": "applied",
@@ -813,8 +769,8 @@ async fn doc_move(state: &DocState, actor: &str, args: Value) -> Result<Value> {
         .docs
         .move_doc(&src.doc_id, &dst_dir, Some(&dst_name), a.overwrite)
         .await?;
-    let path = PathCtx::new(state.dirs.as_ref())
-        .doc(state.docs.as_ref(), &meta.doc_id)
+    let path = DocPathRenderer::new(state.dirs.as_ref())
+        .doc_path(state.docs.as_ref(), &meta.doc_id)
         .await?;
     Ok(json!({
         "doc_id": meta.doc_id,
@@ -839,8 +795,8 @@ async fn doc_remove(state: &DocState, actor: &str, args: Value) -> Result<Value>
         resolve_target(state.dirs.as_ref(), state.docs.as_ref(), &a.reference).await?;
     let meta = meta.ok_or_else(|| DocError::DocNotFound(a.reference.clone()))?;
     gate_structural(state, actor, meta.creator.as_deref(), AclTarget::Doc(&meta.doc_id)).await?;
-    let path = PathCtx::new(state.dirs.as_ref())
-        .doc(state.docs.as_ref(), &meta.doc_id)
+    let path = DocPathRenderer::new(state.dirs.as_ref())
+        .doc_path(state.docs.as_ref(), &meta.doc_id)
         .await?;
     state.docs.delete(&meta.doc_id).await?;
     Ok(json!({ "removed": true, "doc_id": meta.doc_id, "path": path }))
@@ -1882,8 +1838,8 @@ async fn doc_restore(state: &DocState, actor: &str, args: Value) -> Result<Value
     // No `unwrap_or_default()` here: an empty `path` reads as "restored at the
     // library root", which is a claim about where the document is, not a
     // missing decoration. Every other call site propagates the resolver error.
-    let path = PathCtx::new(state.dirs.as_ref())
-        .doc(state.docs.as_ref(), &meta.doc_id)
+    let path = DocPathRenderer::new(state.dirs.as_ref())
+        .doc_path(state.docs.as_ref(), &meta.doc_id)
         .await?;
     Ok(json!({
         "restored": true,

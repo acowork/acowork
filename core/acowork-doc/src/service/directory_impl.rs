@@ -140,22 +140,22 @@ impl DirectoryService for LibraryDirectoryService {
     async fn list_tree(&self, dir_id: &str) -> Result<TreeNode> {
         validate_dir_id(dir_id)?;
         let idx = self.store.load(dir_id).await?;
-        let path = if dir_id == ROOT_DIR_ID {
-            String::new()
+        // `TreeNode.path` 是对外字段，所以它必须是**人读路径**（root → `""`，
+        // 其余 `研发/会议`），而不是这个节点自己的 `dir_id`：内部标识出边界
+        // 就是把存储布局变成半个公开契约（R5）。渲染规则只有 `path_of` 一处。
+        let path = self.path_of(dir_id).await?;
+        // 自己这一层的元数据在**父**目录的索引里，不在自己的（自己的索引只装子项）。
+        // 曾经这里在自己的 `dirs` 里找自己，永远找不到，于是 `name` 退化成 `dir_id`
+        // —— 一个对外字段长期在吐内部标识。名字与路径同源（祖先链的末段），
+        // 所以一次 `path_of` 同时给出两者。
+        let name = if dir_id == ROOT_DIR_ID {
+            ROOT_DIR_ID.to_string()
         } else {
-            dir_id.to_string()
+            path.rsplit('/').next_back().unwrap_or(dir_id).to_string()
         };
         Ok(TreeNode {
             dir_id: dir_id.to_string(),
-            name: if dir_id == ROOT_DIR_ID {
-                ROOT_DIR_ID.to_string()
-            } else {
-                idx.dirs
-                    .iter()
-                    .find(|d| d.dir_id == dir_id)
-                    .map(|d| d.name.clone())
-                    .unwrap_or_else(|| dir_id.to_string())
-            },
+            name,
             path,
             files: idx.files.into_iter().filter(|f| !f.deleted).collect(),
             dirs: idx.dirs.into_iter().filter(|d| !d.deleted).collect(),
@@ -637,6 +637,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(dirs.path_of(&b.dir_id).await.unwrap(), "研发/会议");
+    }
+
+    /// `TreeNode.path` 是对外字段：必须是祖先名字拼出的路径，而不是节点自己的
+    /// `dir_id`（R5）。根节点是 `""`，一层目录是 `研发`。
+    #[tokio::test]
+    async fn list_tree_renders_the_human_path_of_the_listed_dir() {
+        let (_tmp, dirs, _docs) = setup().await;
+        let root = dirs.list_tree(ROOT_DIR_ID).await.unwrap();
+        assert_eq!(root.path, "");
+        let a = dirs
+            .create(CreateDirectoryInput {
+                parent_dir_id: ROOT_DIR_ID.into(),
+                name: "研发".into(),
+                creator: None,
+                icon: None,
+                description: None,
+            })
+            .await
+            .unwrap();
+        let node = dirs.list_tree(&a.dir_id).await.unwrap();
+        assert_eq!(node.path, "研发");
+        assert_ne!(node.path, a.dir_id, "TreeNode.path 泄漏了内部 dir_id");
     }
 
     /// A directory whose parent chain does not reach the root is a corrupt
