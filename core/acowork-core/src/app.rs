@@ -428,21 +428,12 @@ pub fn validate_package_spec(pkg: &AppPackageSpec, binary: &str) -> Result<(), S
 
 /// Current host platform token used in `package.platforms` comparisons.
 pub fn current_platform_token() -> String {
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
-    // Normalize to the design-doc vocabulary (windows-x86_64, linux-x86_64,
-    // macos-aarch64 / macos-x86_64).
-    let os = match os {
-        "macos" => "macos",
-        "windows" => "windows",
-        other => other,
-    };
-    let arch = match arch {
-        "x86_64" => "x86_64",
-        "aarch64" => "aarch64",
-        other => other,
-    };
-    format!("{os}-{arch}")
+    // `std::env::consts` already speaks the design-doc vocabulary
+    // (`windows-x86_64`, `linux-x86_64`, `macos-aarch64`/`macos-x86_64`), so
+    // there is nothing to normalise. Two identity `match`es used to sit here;
+    // they were dead code that read as if a mapping existed — add one back the
+    // day a real aliasing appears (e.g. a platform reporting `darwin`).
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 /// Default package entry relative to the package root.
@@ -913,6 +904,21 @@ extensions = ["docx", "doc"]
 
         let bad = text.replace("extensions = [\"docx\", \"doc\"]", "extensions = [\".docx\"]");
         assert!(AppManifest::from_toml(&bad).is_err());
+    }
+
+    /// 主机平台 token 直接取自 `std::env::consts`，没有任何重映射 ——
+    /// manifest 的 `platforms` 字段按这个字面量做包含比较，所以「悄悄改一个
+    /// 名字」会让某台机器上的应用再也装不上，而错误信息只会说「平台不支持」。
+    #[test]
+    fn platform_token_is_os_dash_arch_verbatim() {
+        let token = current_platform_token();
+        assert_eq!(
+            token,
+            format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            "token 必须与设计文档词汇同源，不做重映射"
+        );
+        assert_eq!(token, current_platform_token(), "必须可重复");
+        assert!(!token.is_empty() && !token.contains(' '));
     }
 
     #[test]
