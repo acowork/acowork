@@ -17,13 +17,14 @@
  * 两者都来自 `lib/taskTree`：本文件只负责画，规则都在那里，也只在那里测。
  */
 import { useMemo, useState } from "react";
-import { X as XIcon } from "lucide-react";
+import { Check as CheckIcon, Lock as LockIcon, X as XIcon } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { PmTaskResponse } from "../../lib/pm-types";
 import {
   buildTaskTree,
+  dependencySatisfied,
   dependentClosureIds,
   expandedForSelection,
   subtreeIds,
@@ -267,12 +268,32 @@ export function DependencyPicker({
       {selected.length > 0 && (
         <ul data-testid="dependency-chips" className="flex flex-wrap gap-1">
           {selected.map((id) => {
-            const title = tree.byId.get(id)?.title ?? id;
+            const dep = tree.byId.get(id);
+            const title = dep?.title ?? id;
+            // 依赖的唯一语义是"阻塞"，所以 chip 上的状态只有两种：还在挡路 /
+            // 已经满足。规则来自 `dependencySatisfied`（与服务端同一条），
+            // 这里只负责画 —— 用户不用点开每一项去猜它到底还拦不拦。
+            const satisfied = dependencySatisfied(dep?.status);
+            const stateLabel = satisfied
+              ? t("pm.task.dependencySatisfied")
+              : t("pm.task.dependencyUnsatisfied");
             return (
               <li
                 key={id}
+                data-dependency-state={satisfied ? "satisfied" : "blocking"}
                 className="inline-flex items-center gap-1 rounded bg-surface-hover px-1.5 py-0.5 text-10 font-medium text-text-secondary"
               >
+                {satisfied ? (
+                  <CheckIcon
+                    aria-label={stateLabel}
+                    className="h-2.5 w-2.5 shrink-0 text-ok"
+                  />
+                ) : (
+                  <LockIcon
+                    aria-label={stateLabel}
+                    className="h-2.5 w-2.5 shrink-0 text-warning"
+                  />
+                )}
                 <span className="max-w-40 truncate">{title}</span>
                 <button
                   type="button"

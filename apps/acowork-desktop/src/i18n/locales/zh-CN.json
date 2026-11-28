@@ -2470,6 +2470,8 @@
       "change": "更换",
       "addDependency": "添加依赖",
       "dependencyCycle": "它依赖此任务",
+      "dependencySatisfied": "依赖已完成",
+      "dependencyUnsatisfied": "依赖未完成，派发被拦",
       "created": "创建于",
       "updated": "更新于",
       "status": "状态",

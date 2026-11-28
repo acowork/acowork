@@ -2459,6 +2459,8 @@
       "change": "Change",
       "addDependency": "Add dependency",
       "dependencyCycle": "waits for this task",
+      "dependencySatisfied": "Dependency done",
+      "dependencyUnsatisfied": "Dependency unfinished — blocks dispatch",
       "created": "Created",
       "updated": "Updated",
       "status": "Status",

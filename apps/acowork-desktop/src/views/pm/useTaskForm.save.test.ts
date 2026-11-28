@@ -164,6 +164,35 @@ describe("useTaskForm save path", () => {
     );
   });
 
+  // 回归：对话框曾经把每条依赖硬编码成 `kind: "relates"` 保存，于是任何一张
+  // 卡只要被这个 dialog 保存过一次，它的**全部** blocks 依赖就当场降级成不参与
+  // 任何闸门的 relates —— Q1 验收门那 8 条真依赖会一夜之间失效。这里同时钉住
+  // 两件事：blocks 边保存后仍是 blocks；历史遗留的 relates 边在保存时被修回 blocks。
+  it("saves dependencies as blocking — a dialog save must never downgrade them", async () => {
+    const initial = row({
+      depends_on: [
+        { task_id: "t-blocks", kind: "blocks" },
+        { task_id: "t-legacy", kind: "relates" },
+      ],
+    });
+    const { result } = renderHook(() => useTaskForm({ projectId: "p-1", initial }));
+
+    act(() => result.current.setTitle("改过的标题"));
+    await act(async () => {
+      await result.current.save();
+    });
+
+    expect(updateTask).toHaveBeenCalledWith(
+      "t-1",
+      expect.objectContaining({
+        depends_on: [
+          { task_id: "t-blocks", kind: "blocks" },
+          { task_id: "t-legacy", kind: "blocks" },
+        ],
+      }),
+    );
+  });
+
   it("joins the run that is already on the wire instead of creating a second row", async () => {
     // Two clicks inside one frame both pass the `disabled` check (that state
     // only lands on the next render), so the guard has to live in the save

@@ -192,6 +192,30 @@ describe("依赖：会成环的候选画出来但点不动", () => {
     expect(screen.getByLabelText("common.remove 登录模块")).toBeTruthy();
   });
 
+  // 依赖只有一种语义（阻塞）。chip 上必须直接看出"这一条现在还拦不拦"：
+  // 之前的 chip 只有一个标题，用户无法判断依赖到底生效了没有 —— 而依赖被
+  // 降级成 relates 时同样看不出来，这个 bug 就是这样藏了一整天。
+  it("states on every chip whether that dependency still blocks dispatch", () => {
+    const tasks = [
+      ...fixture(),
+      task({ id: "done-dep", title: "已完成的前置", status: "done" }),
+      task({ id: "open-dep", title: "在跑的前置", status: "in_progress" }),
+    ];
+    render(
+      <DependencyPicker tasks={tasks} selfId="c" selected={["done-dep", "open-dep"]} onToggle={() => {}} />,
+    );
+    const chips = Array.from(screen.getByTestId("dependency-chips").children) as HTMLElement[];
+    const stateOf = (title: string) =>
+      chips
+        .find((chip) => chip.textContent?.includes(title))
+        ?.getAttribute("data-dependency-state");
+    // 与服务端 dispatch_blocked 同一条规则：done / cancelled 才是满足
+    expect(stateOf("已完成的前置")).toBe("satisfied");
+    expect(stateOf("在跑的前置")).toBe("blocking");
+    expect(screen.getByLabelText("pm.task.dependencySatisfied")).toBeTruthy();
+    expect(screen.getByLabelText("pm.task.dependencyUnsatisfied")).toBeTruthy();
+  });
+
   it("toggles a bare task on and off from the tree", () => {
     const onToggle = vi.fn();
     render(

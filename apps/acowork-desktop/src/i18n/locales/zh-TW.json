@@ -2002,6 +2002,8 @@
       "change": "更換",
       "addDependency": "新增依賴",
       "dependencyCycle": "它依賴此任務",
+      "dependencySatisfied": "依賴已完成",
+      "dependencyUnsatisfied": "依賴未完成，派發被攔",
       "created": "建立於",
       "updated": "更新於",
       "status": "狀態",

@@ -2012,6 +2012,8 @@
       "change": "변경",
       "addDependency": "의존성 추가",
       "dependencyCycle": "이 작업에 의존함",
+      "dependencySatisfied": "선행 작업 완료",
+      "dependencyUnsatisfied": "선행 작업 미완료 — 배포 차단",
       "created": "생성일",
       "updated": "수정일",
       "status": "상태",

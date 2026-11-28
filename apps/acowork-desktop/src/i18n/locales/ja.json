@@ -2011,6 +2011,8 @@
       "change": "変更",
       "addDependency": "依存関係を追加",
       "dependencyCycle": "このタスクに依存しています",
+      "dependencySatisfied": "依存先は完了済み",
+      "dependencyUnsatisfied": "依存先が未完了のため配送されません",
       "created": "作成",
       "updated": "更新",
       "status": "ステータス",
