@@ -125,6 +125,19 @@ describe("deliverables derivation across the two transcript shapes", () => {
     expect((stubBanner?.metadata?.files as unknown[])).toHaveLength(1);
   });
 
+  it("merges a raw trailing run with a collapsed run of the same turn", () => {
+    // The newest page deliberately leaves its trailing run raw (a pending
+    // authorization must stay answerable), so one turn routinely mixes both
+    // shapes. Dedupe is by coordinates/doc id, so the banner is still one row
+    // per artifact — not two.
+    const raw = liveResult(docFact);
+    const dupDoc = { ...docFact, tool_call_id: "c9" };
+    const out = withDerivedDeliverables([user(), stub([fileFact]), raw, liveResult(dupDoc), assistant()]);
+    const banner = out.find((m) => m.metadata?.type === DELIVERABLES_META_TYPE);
+    expect((banner?.metadata?.docs as unknown[])).toHaveLength(1);
+    expect((banner?.metadata?.files as unknown[])).toHaveLength(2);
+  });
+
   it("keeps the banner when the page splits one run into two stub parts", () => {
     // A page boundary may cut a run in two: two stubs, each with its own
     // facts. Dedupe is by coordinates, so the banner is the same as unsplit.

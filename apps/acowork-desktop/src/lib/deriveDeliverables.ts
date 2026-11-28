@@ -59,51 +59,13 @@ import {
   DELIVERABLES_META_TYPE,
   isDeliverablesRow,
   isImageDeliverable,
-  parseProducedFiles,
   type DeliverableFile,
 } from "./deliverableFiles";
-import { dedupeDocs, docFromMetadata, parseDocToolResult, type DeliverableDoc } from "./deliverableDocs";
+import { dedupeDocs, type DeliverableDoc } from "./deliverableDocs";
+import { turnArtifactFacts } from "./artifactFacts";
 
 const MAX_IMAGES = 8;
 const MAX_OTHER_FILES = 8;
-
-/** What one transcript row contributes to its turn's banner. */
-interface RowFacts {
-  files: DeliverableFile[];
-  docs: DeliverableDoc[];
-}
-
-/**
- * The artifact facts one row carries.
- *
- * Two shapes, one meaning — and that is the whole point: a row is either a raw
- * `tool_result` (live, or a raw page: facts on `toolData`) or an `explore_stub`
- * (a history page's projection: the same facts forwarded on
- * `exploreStub.facts`). Both feed the same parsers below, so a turn
- * reconstructs identically whether it was streamed or reloaded.
- *
- * This module decides what to DO with the facts (the display policy); the row
- * shape only decides where to read them.
- */
-function rowFacts(msg: ChatMessage): RowFacts | null {
-  if (msg.type === "tool_result") {
-    const doc = parseDocToolResult(msg);
-    return { files: parseProducedFiles(msg.toolData), docs: doc ? [doc] : [] };
-  }
-  if (msg.type === "explore_stub") {
-    const facts = msg.exploreStub?.facts;
-    if (!facts || facts.length === 0) return null;
-    const files: DeliverableFile[] = [];
-    const docs: DeliverableDoc[] = [];
-    for (const fact of facts) {
-      files.push(...parseProducedFiles(fact));
-      const doc = docFromMetadata(fact);
-      if (doc) docs.push(doc);
-    }
-    return { files, docs };
-  }
-  return null;
-}
 
 /** Apply the frontend display policy to raw produced facts: created-only,
  *  deduped by coordinates, capped independently for images and other files. */
@@ -170,11 +132,12 @@ interface TurnBanner {
 function resolveTurnBanner(turn: readonly ChatMessage[]): TurnBanner {
   // One fold over the turn's rows, whatever shape they arrive in: live
   // `tool_result` rows and projected `explore_stub` rows both contribute their
-  // artifact facts here, so the banner is a function of the turn's content and
-  // of nothing else. The legacy persisted row (pre-ADR-119-revision sessions)
-  // carries files only; docs are still derived and attached to it.
-  const facts = turn.map(rowFacts).filter((f): f is RowFacts => f !== null);
-  const docs = dedupeDocs(facts.flatMap((f) => f.docs));
+  // artifact facts here (the row-shape adapter is `artifactFacts.ts`), so the
+  // banner is a function of the turn's content and of nothing else. The legacy
+  // persisted row (pre-ADR-119-revision sessions) carries files only; docs are
+  // still derived and attached to it.
+  const facts = turnArtifactFacts(turn);
+  const docs = dedupeDocs(facts.docs);
   const legacyIdx = turn.findIndex((m) => isDeliverablesRow(m));
   const last = turn[turn.length - 1];
 
@@ -190,7 +153,7 @@ function resolveTurnBanner(turn: readonly ChatMessage[]): TurnBanner {
     return { row, legacyIdx, sig: `legacy:${legacy.id}:${JSON.stringify(docs)}` };
   }
 
-  const files = applyFilePolicy(facts.flatMap((f) => f.files));
+  const files = applyFilePolicy(facts.files);
   if (files.length === 0 && docs.length === 0) {
     return { row: null, legacyIdx: -1, sig: "none" };
   }

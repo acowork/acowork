@@ -14,7 +14,9 @@
  */
 import { describe, it, expect } from "vitest";
 import { convertConversationEntry } from "./chatStore";
-import type { ConversationEntry } from "../lib/types";
+import { withDerivedDeliverables } from "../lib/deriveDeliverables";
+import { DELIVERABLES_META_TYPE } from "../lib/deliverableFiles";
+import type { ConversationEntry, ChatMessage } from "../lib/types";
 
 const AGENT = "com.test.Agent";
 
@@ -77,5 +79,33 @@ describe("explore_stub conversion — artifact facts", () => {
     const facts = msg?.exploreStub?.facts;
     expect(facts).toHaveLength(1);
     expect(facts?.[0].doc).toEqual(doc);
+  });
+
+  it("closes the chain: a wire stub row ends up as a rendered banner", () => {
+    // The two halves are tested separately (this file: wire → ChatMessage;
+    // deriveDeliverables.transport: ChatMessage → banner). This case exists so a
+    // rename on either side of that seam cannot leave both halves green while
+    // the product shows nothing — the exact shape of the bug being fixed.
+    const rows: ChatMessage[] = [
+      { id: "u1", type: "user", content: "写个纪要", timestamp: 1 },
+      convertConversationEntry(
+        stubEntry({
+          start: 1,
+          end: 6,
+          raw_count: 5,
+          steps: 3,
+          tools: ["bash"],
+          facts: [{ tool_name: "x", tool_call_id: "c1", doc }, { tool_name: "y", produced }],
+        }),
+        AGENT,
+      ) as ChatMessage,
+      { id: "a1", type: "assistant", content: "好了", timestamp: 3 },
+    ];
+    const banner = withDerivedDeliverables(rows).find(
+      (m) => m.metadata?.type === DELIVERABLES_META_TYPE,
+    );
+    expect(banner, "a reloaded turn must keep its deliverables row").toBeTruthy();
+    expect((banner?.metadata?.files as unknown[])).toHaveLength(1);
+    expect((banner?.metadata?.docs as unknown[])).toHaveLength(1);
   });
 });
