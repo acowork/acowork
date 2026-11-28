@@ -55,7 +55,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // as `None` on purpose — the rename then reports `Pending` with a
     // diagnosable reason rather than silently claiming a projection.
     if let Some(base) = &config.http_advertise_endpoint {
-        crate::usecases::instance_identity::install_notifier(
+        crate::usecases::instance_identity::install_node_projection(
             crate::usecases::instance_identity::IdentityNotifier::new(
                 base,
                 config.node_token.clone(),

@@ -585,6 +585,37 @@ pub fn save_agent_config(work_dir: &Path, cfg: &AgentConfig) -> Result<(), Strin
     Ok(())
 }
 
+/// Read-modify-write `agent_config.json` — the way to change it.
+///
+/// This owns the two ways a writer can destroy fields it never meant to touch:
+///
+/// - **lost update** — a snapshot taken before someone else's write, written
+///   back afterwards, silently reverting their field;
+/// - **the worse one** — a *failed* read treated as "no config" and written
+///   back as defaults, i.e. the user's whole config replaced by a blank one.
+///
+/// Both doors (the `avatar-config` route and the identity use case, ADR-111
+/// "one field, one writer") change the config through here, so both treat an
+/// unreadable file the same way: report it, change nothing. `mutate` runs
+/// *before* the write, which is also what keeps a rejected value from
+/// reaching the disk.
+///
+/// `mutate`'s error is the caller's own type; the read/serialize failures are
+/// converted into it through `From<String>` (for the identity use case:
+/// `IdentityError::Persist`).
+pub fn update_agent_config<T, E>(
+    work_dir: &Path,
+    mutate: impl FnOnce(&mut AgentConfig) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<String>,
+{
+    let mut cfg = load_agent_config(work_dir)?.unwrap_or_default();
+    let out = mutate(&mut cfg)?;
+    save_agent_config(work_dir, &cfg)?;
+    Ok(out)
+}
+
 // ── Per-agent NEW-session defaults (ADR-110) ───────────────────────────
 
 /// The per-agent defaults a **new** session is initialised from (ADR-110).

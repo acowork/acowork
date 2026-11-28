@@ -38,9 +38,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::agent_config::{load_agent_config, save_agent_config};
+use crate::agent_config::{load_agent_config, update_agent_config};
 use crate::http::server::HttpState;
-use crate::usecases::instance_identity::{apply_name, validate_name};
+use crate::usecases::instance_identity::{
+    IdentityError, apply_name, node_projection, validate_name,
+};
 
 // ── Wire types ────────────────────────────────────────────────────────
 
@@ -125,50 +127,53 @@ async fn put_avatar_config(
         return instance_mismatch(&state, &id);
     }
 
-    let mut cfg = load_agent_config(&state.work_dir)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e))
-        .unwrap_or_default()
-        .unwrap_or_default();
-
-    // `avatar` and `builtin_avatar` are mutually exclusive — selecting one
-    // clears the other, otherwise a stale lower-priority value would
-    // resurrect as soon as the newer one is cleared.
-    match normalize(&req.avatar) {
-        Field::Unchanged => {}
-        Field::Clear => cfg.avatar = None,
-        Field::Set(value) => {
-            if !has_avatar_extension(&value) {
-                return error(
-                    StatusCode::BAD_REQUEST,
-                    "bad_request",
-                    format!(
+    // The avatar fields, through the same read-modify-write the name uses.
+    // A config that cannot be read is an **error**, not an empty config: the
+    // old `unwrap_or_default().unwrap_or_default()` here wrote defaults back
+    // over a file it had failed to parse, blanking the user's temperature,
+    // context window and name. (Two writers of one document must also agree on
+    // how they treat a damaged one.)
+    let written = update_agent_config(&state.work_dir, |cfg| -> Result<(), IdentityError> {
+        // `avatar` and `builtin_avatar` are mutually exclusive — selecting one
+        // clears the other, otherwise a stale lower-priority value would
+        // resurrect as soon as the newer one is cleared.
+        match normalize(&req.avatar) {
+            Field::Unchanged => {}
+            Field::Clear => cfg.avatar = None,
+            Field::Set(value) => {
+                if !has_avatar_extension(&value) {
+                    return Err(IdentityError::Invalid(format!(
                         "Invalid avatar path '{value}': only {} are allowed",
                         AVATAR_EXTENSIONS.join(", ")
-                    ),
-                );
+                    )));
+                }
+                cfg.avatar = Some(value);
+                cfg.builtin_avatar = None;
             }
-            cfg.avatar = Some(value);
-            cfg.builtin_avatar = None;
         }
-    }
-    match normalize(&req.builtin_avatar) {
-        Field::Unchanged => {}
-        Field::Clear => cfg.builtin_avatar = None,
-        Field::Set(value) => {
-            if !is_plausible_builtin_avatar_id(&value) {
-                return error(
-                    StatusCode::BAD_REQUEST,
-                    "bad_request",
-                    format!("Invalid builtin_avatar '{value}': expected 'icon-NN' or 1-99"),
-                );
+        match normalize(&req.builtin_avatar) {
+            Field::Unchanged => {}
+            Field::Clear => cfg.builtin_avatar = None,
+            Field::Set(value) => {
+                if !is_plausible_builtin_avatar_id(&value) {
+                    return Err(IdentityError::Invalid(format!(
+                        "Invalid builtin_avatar '{value}': expected 'icon-NN' or 1-99"
+                    )));
+                }
+                cfg.builtin_avatar = Some(value);
+                cfg.avatar = None;
             }
-            cfg.builtin_avatar = Some(value);
-            cfg.avatar = None;
         }
+        Ok(())
+    });
+    if let Err(e) = written {
+        return identity_error_response(e);
     }
+
     // `name` is NOT written here: it has one writer, the use case below
-    // (ADR-111). Validate it first so an invalid name still rejects the
-    // request as a whole, before anything reaches the disk.
+    // (ADR-111). Validating it up front (rather than letting `apply_name`
+    // reject it) is deliberate: it keeps a request carrying both a bad name
+    // and a good avatar from applying the avatar and then failing.
     let new_name = match normalize(&req.name) {
         Field::Unchanged => None,
         Field::Clear => {
@@ -184,33 +189,36 @@ async fn put_avatar_config(
         },
     };
 
-    if let Err(e) = save_agent_config(&state.work_dir, &cfg) {
-        tracing::warn!(error = %e, "avatar-config: failed to persist agent_config.json");
-        return error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            format!("Failed to persist agent_config.json: {e}"),
-        );
-    }
-
     if let Some(name) = new_name
-        && let Err(e) = apply_name(&state.work_dir, &state.agent_core, &name).await
+        && let Err(e) =
+            apply_name(&state.work_dir, &state.agent_core, node_projection(), &name).await
     {
         // `validate_name` already ran above, so this is a persist failure:
         // the name did not change. A projection that merely did not complete
-        // is NOT an error here (`NameApplyOutcome::Pending`) — the name is
-        // in effect and the Node side converges on its next republish.
-        tracing::warn!(error = %e, "avatar-config: failed to persist agent_config.json");
-        return error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            format!("Failed to persist agent_config.json: {e}"),
-        );
+        // is NOT an error here (`NameApplyOutcome::Pending`) — the name is in
+        // effect, and this door's Node proxy hook converges it anyway.
+        return identity_error_response(e);
     }
 
     match effective_config(&state) {
         Ok(cfg) => Json(cfg).into_response(),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e),
+    }
+}
+
+/// One classification for both writers of `agent_config.json`: a bad value is
+/// the caller's fault (`400`), an unreadable/unwritable file is ours (`500`).
+fn identity_error_response(e: IdentityError) -> Response {
+    match e {
+        IdentityError::Invalid(message) => error(StatusCode::BAD_REQUEST, "bad_request", message),
+        IdentityError::Persist(message) => {
+            tracing::warn!(error = %message, "avatar-config: failed to persist agent_config.json");
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                format!("Failed to persist agent_config.json: {message}"),
+            )
+        }
     }
 }
 

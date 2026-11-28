@@ -32,17 +32,25 @@
 //! # Why `Pending` converges
 //!
 //! `build_installed_info_fresh` (the Node) **re-reads** `agent_config.json`
-//! on every republish, so any later republish trigger carries the rename
-//! over with no retry bookkeeping of ours: the `PUT avatar-config` reverse
-//! proxy hook, the Node's startup disk scan, and the next `identity/refresh`
-//! all get there. `Pending` is therefore a state that drains itself, not a
-//! queue that needs draining.
+//! on every republish (`read_identity`), so any later republish trigger
+//! carries the rename over with no retry bookkeeping of ours:
+//!
+//! - the Node republishes its whole inventory on **every MQTT (re)connect**
+//!   (ADR-055 §6.5, `control::` — which is also when a `Pending` caused by a
+//!   dropped connection ends up carried);
+//! - the `PUT avatar-config` reverse proxy hook;
+//! - the next `identity/refresh` from any later rename.
+//!
+//! `Pending` is therefore a state that drains itself, not a queue that needs
+//! draining. This is the premise the whole fail-visible trade rests on: keep
+//! the rename (the fact is right) and let the projection catch up, because
+//! catching up is free.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use crate::agent_config::{load_agent_config, save_agent_config};
+use crate::agent_config::update_agent_config;
 use crate::http::SharedAgentCore;
 
 /// Reject absurd names at the trust boundary. Generous enough for any real
@@ -98,24 +106,40 @@ impl NameApplyOutcome {
     }
 }
 
-/// Why a rename did not even reach the fact source.
+/// Why an identity write did not land. No partial state exists when this is
+/// returned: validation runs before the write, and a failed read aborts it, so
+/// the config on disk is untouched.
+///
+/// Shared by both doors, because the *avatar* fields live in the same
+/// document: `PUT /avatar-config` writes `avatar`, `builtin_avatar` and `name`
+/// through the same read-modify-write, so it classifies its failures the same
+/// way (`Invalid` → `400`, `Persist` → `500`) instead of inventing a second
+/// scheme for the same file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NameApplyError {
-    /// The value is not a usable name — the caller's fault (HTTP `400`).
-    InvalidName(String),
-    /// `agent_config.json` could not be written; nothing changed (HTTP `500`).
+pub enum IdentityError {
+    /// The value is not usable — the caller's fault (HTTP `400`).
+    Invalid(String),
+    /// `agent_config.json` could not be read or written; nothing changed
+    /// (HTTP `500`).
     Persist(String),
 }
 
-impl std::fmt::Display for NameApplyError {
+impl From<String> for IdentityError {
+    /// The read/serialize errors of `update_agent_config` arrive as strings.
+    fn from(message: String) -> Self {
+        Self::Persist(message)
+    }
+}
+
+impl std::fmt::Display for IdentityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidName(m) | Self::Persist(m) => f.write_str(m),
+            Self::Invalid(m) | Self::Persist(m) => f.write_str(m),
         }
     }
 }
 
-impl std::error::Error for NameApplyError {}
+impl std::error::Error for IdentityError {}
 
 // ── Validation ────────────────────────────────────────────────────────
 
@@ -123,20 +147,20 @@ impl std::error::Error for NameApplyError {}
 ///
 /// Control characters are rejected because a name is not free text: it is
 /// interpolated into `{{agent_name}}`, a sidebar row and log lines.
-pub fn validate_name(raw: &str) -> Result<String, NameApplyError> {
+pub fn validate_name(raw: &str) -> Result<String, IdentityError> {
     let name = raw.trim();
     if name.is_empty() {
-        return Err(NameApplyError::InvalidName(
+        return Err(IdentityError::Invalid(
             "name cannot be empty: an agent always has a name".to_string(),
         ));
     }
     if name.chars().any(char::is_control) {
-        return Err(NameApplyError::InvalidName(
+        return Err(IdentityError::Invalid(
             "name must not contain control characters".to_string(),
         ));
     }
     if name.chars().count() > MAX_NAME_CHARS {
-        return Err(NameApplyError::InvalidName(format!(
+        return Err(IdentityError::Invalid(format!(
             "name too long ({} > {MAX_NAME_CHARS} chars)",
             name.chars().count()
         )));
@@ -208,6 +232,11 @@ impl IdentityNotifier {
             Ok(())
         } else if status == 401 || status == 403 {
             Err(format!("node rejected the node token (HTTP {status})"))
+        } else if status == 502 {
+            // The Node got this far and could not publish the inventory (see
+            // `package::republish_installed_info`) — a different thing for a
+            // human to fix than a wrong token or a dead node.
+            Err("node could not publish the identity inventory (HTTP 502)".to_string())
         } else {
             Err(format!("node answered HTTP {status}"))
         }
@@ -235,22 +264,36 @@ impl IdentityNotifier {
     }
 }
 
-/// The process's one projection target, installed at boot by
+/// The process's projection target, installed once at boot by
 /// `startup::agent_init`.
 ///
-/// A process-global rather than a field on `HttpState`: the HTTP state is
-/// built before these spawn-time values are read, and threading one more
-/// argument through `RuntimeHttpServer::start` + its ~27 test call sites to
-/// carry a process-constant buys nothing. `None` (standalone / dev / every
-/// test that does not install one) **is** the `NotApplicable` case.
-static NOTIFIER: Mutex<Option<IdentityNotifier>> = Mutex::new(None);
+/// A process constant, not a mutable global: it is written before the HTTP
+/// server binds — so no request can observe a "not installed yet" window,
+/// which would make "no Node" and "not yet" indistinguishable — and is
+/// read-only afterwards. It is not a field on `HttpState` because these values
+/// arrive as spawn-time flags that state has no other carrier for, and
+/// threading one more argument through `RuntimeHttpServer::start` plus its ~27
+/// test call sites to carry a constant buys nothing.
+///
+/// Reads go through [`node_projection`] and are passed to [`apply_name`] as an
+/// **argument**, so the use case never reaches for process state itself: the
+/// dependency is in the signature, and a test hands over its own fake or
+/// `None` without touching this.
+static NODE: OnceLock<IdentityNotifier> = OnceLock::new();
 
-/// Install the projection target. Called once at boot when the Node spawned
-/// this Runtime (`--http-advertise-endpoint` present).
-pub fn install_notifier(notifier: IdentityNotifier) {
-    if let Ok(mut slot) = NOTIFIER.lock() {
-        *slot = Some(notifier);
-    }
+/// Install the projection target — once, at boot, before the HTTP server binds.
+pub fn install_node_projection(node: IdentityNotifier) {
+    debug_assert!(
+        NODE.get().is_none(),
+        "the node projection is installed once, at boot"
+    );
+    let _ = NODE.set(node);
+}
+
+/// This process's projection target; `None` = no Node spawned it (standalone /
+/// dev / tests), which is [`NameApplyOutcome::NotApplicable`].
+pub fn node_projection() -> Option<&'static IdentityNotifier> {
+    NODE.get()
 }
 
 // ── The write path ────────────────────────────────────────────────────
@@ -261,30 +304,25 @@ pub fn install_notifier(notifier: IdentityNotifier) {
 /// The two callers are `PUT /agents/{id}/avatar-config` (user rename) and
 /// the `self_evolve` `rename` action (agent rename). One field, one writer
 /// (ADR-111) — both routes land here, and nothing else writes `name`.
+///
+/// `node` is the projection target ([`node_projection`] in production, a fake
+/// or `None` in tests) — an argument rather than a read of process state, so
+/// there is exactly one entry point and no hidden boot-order contract.
 pub async fn apply_name(
     work_dir: &Path,
     core_slot: &SharedAgentCore,
+    node: Option<&IdentityNotifier>,
     name: &str,
-) -> Result<NameApplyOutcome, NameApplyError> {
-    let notifier = NOTIFIER.lock().ok().and_then(|slot| slot.clone());
-    apply_name_with(notifier, work_dir, core_slot, name).await
-}
-
-/// [`apply_name`] with the projection target passed in — the seam that lets
-/// the three outcomes be tested without mutating a process-global.
-pub(crate) async fn apply_name_with(
-    notifier: Option<IdentityNotifier>,
-    work_dir: &Path,
-    core_slot: &SharedAgentCore,
-    name: &str,
-) -> Result<NameApplyOutcome, NameApplyError> {
+) -> Result<NameApplyOutcome, IdentityError> {
     let name = validate_name(name)?;
 
-    let mut config = load_agent_config(work_dir)
-        .map_err(NameApplyError::Persist)?
-        .unwrap_or_default();
-    config.name = Some(name.clone());
-    save_agent_config(work_dir, &config).map_err(NameApplyError::Persist)?;
+    // The fact source, through the one read-modify-write primitive: a corrupt
+    // or unreadable file is *reported*, never read as "no config" and written
+    // back as defaults, which would blank every other field.
+    update_agent_config(work_dir, |config| -> Result<(), IdentityError> {
+        config.name = Some(name.clone());
+        Ok(())
+    })?;
 
     // Push the new name into the live core: the file is the durable record,
     // the core is what the next turn's `{{agent_name}}` reads. Without this a
@@ -299,7 +337,7 @@ pub(crate) async fn apply_name_with(
     }
 
     // From here on the rename has happened; every path returns `Ok`.
-    let Some(notifier) = notifier else {
+    let Some(notifier) = node else {
         // No consumer exists — say nothing. (No `warn!` on this branch, and no
         // audit line: `NotApplicable` is a complete success.)
         return Ok(NameApplyOutcome::NotApplicable);
@@ -343,7 +381,9 @@ mod tests {
     }
 
     fn stored_name(work_dir: &Path) -> Option<String> {
-        load_agent_config(work_dir).unwrap().and_then(|c| c.name)
+        crate::agent_config::load_agent_config(work_dir)
+            .unwrap()
+            .and_then(|c| c.name)
     }
 
     fn no_core() -> SharedAgentCore {
@@ -379,15 +419,15 @@ mod tests {
         assert_eq!(validate_name("  Nova  ").unwrap(), "Nova");
         assert!(matches!(
             validate_name("   "),
-            Err(NameApplyError::InvalidName(_))
+            Err(IdentityError::Invalid(_))
         ));
         assert!(matches!(
             validate_name("bad\nname"),
-            Err(NameApplyError::InvalidName(_))
+            Err(IdentityError::Invalid(_))
         ));
         assert!(matches!(
             validate_name(&"x".repeat(MAX_NAME_CHARS + 1)),
-            Err(NameApplyError::InvalidName(_))
+            Err(IdentityError::Invalid(_))
         ));
         assert!(validate_name(&"x".repeat(MAX_NAME_CHARS)).is_ok());
     }
@@ -398,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn rename_standalone_is_fail_visible_not_applicable() {
         let work_dir = temp_work_dir("standalone");
-        let outcome = apply_name_with(None, &work_dir, &no_core(), "  Nova  ")
+        let outcome = apply_name(&work_dir, &no_core(), None, "  Nova  ")
             .await
             .unwrap();
 
@@ -412,6 +452,25 @@ mod tests {
         assert!(!work_dir.join("config/self_change_log.jsonl").exists());
     }
 
+    /// A config that cannot be parsed is a `Persist` error — never "no config",
+    /// written back as defaults. That second behaviour destroyed every other
+    /// field of the file, and it is the reason both doors share
+    /// `agent_config::update_agent_config`.
+    #[tokio::test]
+    async fn rename_on_corrupt_config_reports_and_leaves_it_alone() {
+        let work_dir = temp_work_dir("corrupt");
+        std::fs::create_dir_all(work_dir.join("config")).unwrap();
+        std::fs::write(work_dir.join("config/agent_config.json"), b"{ not json").unwrap();
+
+        let err = apply_name(&work_dir, &no_core(), None, "Nova")
+            .await
+            .expect_err("a corrupt config must not be silently replaced");
+
+        assert!(matches!(err, IdentityError::Persist(_)), "got {err:?}");
+        let on_disk = std::fs::read_to_string(work_dir.join("config/agent_config.json")).unwrap();
+        assert_eq!(on_disk, "{ not json", "the file must be left untouched");
+    }
+
     /// Node present + token → `Projected`, and the Node really was called.
     #[tokio::test]
     async fn rename_with_node_and_token_is_projected() {
@@ -419,7 +478,7 @@ mod tests {
         let work_dir = temp_work_dir("projected");
         let notifier = IdentityNotifier::new(base, Some("test-token".into()), "inst-1");
 
-        let outcome = apply_name_with(Some(notifier), &work_dir, &no_core(), "Nova")
+        let outcome = apply_name(&work_dir, &no_core(), Some(&notifier), "Nova")
             .await
             .unwrap();
 
@@ -436,7 +495,7 @@ mod tests {
         let work_dir = temp_work_dir("pending-token");
         let notifier = IdentityNotifier::new("http://127.0.0.1:1", None, "inst-1");
 
-        let outcome = apply_name_with(Some(notifier), &work_dir, &no_core(), "Nova")
+        let outcome = apply_name(&work_dir, &no_core(), Some(&notifier), "Nova")
             .await
             .expect("a deferred projection must not fail the rename");
 
@@ -460,7 +519,7 @@ mod tests {
         let secret = "super-secret-node-token";
         let notifier = IdentityNotifier::new(base, Some(secret.into()), "inst-1");
 
-        let outcome = apply_name_with(Some(notifier), &work_dir, &no_core(), "Nova")
+        let outcome = apply_name(&work_dir, &no_core(), Some(&notifier), "Nova")
             .await
             .unwrap();
 

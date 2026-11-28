@@ -296,8 +296,12 @@ async fn put_manifest_avatar(
 
     // ADR-009 §5 / ADR-055 §6.5: the retained inventory carries the
     // manifest, so a rewrite must refresh it — otherwise the Gateway
-    // keeps showing the old avatar until the node reconnects.
-    crate::package::republish_installed_info(&state, &id).await;
+    // keeps showing the old avatar until the node reconnects. Best effort:
+    // the file write already succeeded, so a failed republish is logged and
+    // healed by the next one rather than turned into an error for the user.
+    if let Err(e) = crate::package::republish_installed_info(&state, &id).await {
+        tracing::warn!(instance_id = %id, error = %e, "Failed to republish installed info");
+    }
 
     Json(serde_json::json!({
         "message": "Manifest avatar updated",
@@ -321,6 +325,10 @@ async fn put_manifest_avatar(
 /// picked up with no restart on either side.
 ///
 /// Node-token authorized — same boundary as every other node-local route.
+///
+/// **A failed publish is a 502, never a 200.** This route exists precisely so
+/// the Runtime can tell "the sidebar will show the new name" from "it will
+/// not", so it may only answer success when the inventory really went out.
 async fn refresh_identity(
     State(state): State<NodeHttpState>,
     AxumPath(id): AxumPath<String>,
@@ -333,7 +341,9 @@ async fn refresh_identity(
         Ok(info) => info,
         Err(resp) => return *resp,
     };
-    crate::package::republish_installed_info(&state, &id).await;
+    if let Err(e) = crate::package::republish_installed_info(&state, &id).await {
+        return error(StatusCode::BAD_GATEWAY, &e);
+    }
     Json(serde_json::json!({
         "message": "Identity republished",
         "instance_id": info.instance_id,
@@ -797,12 +807,24 @@ avatar = \"assets/avatar.png\"
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
+        // Authorized, reachable, and yet nothing can be published: this test
+        // process has no MQTT dispatcher installed, which is exactly the
+        // failure mode that used to be reported as 200 (and, one layer up, as
+        // `Projected`). The route must not claim it published.
         let resp = app
             .clone()
             .oneshot(post_req(&uri, Some(TEST_TOKEN)))
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("dispatcher is not installed"),
+            "the Runtime's `Pending` reason must be diagnosable, got: {body}"
+        );
 
         // An instance this node does not host is a 404, never a silent ok —
         // the Runtime's `Pending` reason must be able to tell them apart.

@@ -2292,13 +2292,15 @@ pub(crate) mod dispatcher {
                         crate::error::NodeError::Mqtt(format!("Node publish '{topic}': {e}"))
                     })
             }
-            None => {
-                tracing::warn!(
-                    topic = %topic,
-                    "Node event dispatcher not installed — dropping publish"
-                );
-                Ok(())
-            }
+            // A publish with no dispatcher is a message that did NOT leave
+            // this process. Reporting it as `Ok` is how "the inventory was
+            // refreshed" became a lie one layer above (the identity-refresh
+            // route answered 200 while nothing was published, and the Runtime
+            // then reported `Projected`). Callers that want to ignore it may
+            // — but they cannot do so by accident any more.
+            None => Err(crate::error::NodeError::Mqtt(format!(
+                "node MQTT dispatcher is not installed — cannot publish '{topic}'"
+            ))),
         }
     }
 }

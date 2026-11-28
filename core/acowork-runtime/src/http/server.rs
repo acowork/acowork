@@ -4754,6 +4754,27 @@ name"] {
         let cfg = crate::agent_config::load_agent_config(&temp_dir).unwrap().unwrap();
         assert_eq!(cfg.name.as_deref(), Some("Nova"));
 
+        // A config this process cannot parse is reported as a 500 and **left
+        // alone**. The route used to read it as "no config" and write defaults
+        // back, blanking every field it had failed to see — including the name
+        // it had just set.
+        std::fs::write(temp_dir.join("config/agent_config.json"), b"{ not json").unwrap();
+        let resp = client
+            .put(&route)
+            .json(&serde_json::json!({ "avatar": "assets/avatar.png" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "an unreadable config must be reported, not overwritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.join("config/agent_config.json")).unwrap(),
+            "{ not json"
+        );
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 

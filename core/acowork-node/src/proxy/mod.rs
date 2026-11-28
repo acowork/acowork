@@ -177,8 +177,13 @@ async fn proxy_agent(
             // from the instance's `agent_config.json`). Refresh it: the
             // inventory is the only source for a stopped agent, and every
             // human-facing surface reads it.
-            if status.is_success() && refreshes_inventory(&method, &rest) {
-                crate::package::republish_installed_info(&state, &id).await;
+            if status.is_success() && refreshes_inventory(&method, &rest)
+                && let Err(e) = crate::package::republish_installed_info(&state, &id).await
+            {
+                // The Runtime already answered the user; a failed republish
+                // here is not the user's problem (the Runtime's own identity
+                // projection is what reports it), but it must not vanish.
+                tracing::warn!(instance_id = %id, error = %e, "Failed to republish installed info after avatar-config");
             }
             let resp_headers = response.headers().clone();
             let body = response.bytes().await.unwrap_or_default();

@@ -121,27 +121,36 @@ pub fn build_installed_info_fresh(installed: &InstalledAgent) -> Option<Installe
 /// it, otherwise the Gateway (and a Gateway restart) keeps reading the
 /// pre-write value until this node reconnects.
 ///
-/// Called from the two write paths this node can see: its own
-/// `PUT /manifest/avatar` and the `PUT /avatar-config` it reverse
-/// proxies to the Runtime.
-pub async fn republish_installed_info(state: &NodeHttpState, instance_id: &str) {
+/// Called from the three write paths this node can see: its own
+/// `PUT /manifest/avatar`, the `PUT /avatar-config` it reverse proxies to the
+/// Runtime, and the Runtime's `POST /agents/{id}/identity/refresh`.
+///
+/// Returns **why** nothing was published instead of logging and returning
+/// `()`: the identity-refresh route answers the Runtime with this, and a
+/// `Projected` outcome must never be reported over a publish that did not
+/// happen (a broker that is down, or a node whose dispatcher was never
+/// installed, used to look exactly like success from the caller's side).
+pub async fn republish_installed_info(
+    state: &NodeHttpState,
+    instance_id: &str,
+) -> Result<(), String> {
     let entry = {
         let node = state.node.read().await;
         node.installed_agents.get(instance_id).cloned()
     };
     let Some(entry) = entry else {
-        tracing::debug!(instance_id, "Not installed here — nothing to republish");
-        return;
+        return Err(format!("instance '{instance_id}' is not installed on this node"));
     };
     let Some(info) = build_installed_info_fresh(&entry) else {
-        tracing::warn!(instance_id, "Cannot rebuild installed info — skipping republish");
-        return;
+        return Err(format!(
+            "cannot rebuild the installed info of '{instance_id}' (manifest unreadable)"
+        ));
     };
     let node_id = state.identity.read().await.node_id.clone();
     let topic = acowork_core::node::node_agent_installed_topic(&node_id, instance_id);
-    if let Err(e) = crate::control::dispatcher::publish_installed_info(topic, info).await {
-        tracing::warn!(instance_id, error = %e, "Failed to republish installed info");
-    }
+    crate::control::dispatcher::publish_installed_info(topic, info)
+        .await
+        .map_err(|e| format!("cannot publish the installed info of '{instance_id}': {e}"))
 }
 
 /// Scan the packages directory and rebuild the local install table
