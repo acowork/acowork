@@ -115,7 +115,7 @@ async fn app_proxy_handler(
     } else {
         match authenticated_user(&state, &id, &headers) {
             Ok(user) => Some(user),
-            Err(response) => return response,
+            Err(response) => return *response,
         }
     };
 
@@ -214,22 +214,27 @@ fn normalize_ui_path(rest: &str, declared: &str) -> String {
     }
 }
 
+/// 失败时返回的是**已经构造好的**拒绝响应（`Response` 是 128 字节的大值），
+/// 所以错误侧装箱：这条路径只在一次未授权调用上分配一次，而 `Ok` 侧零成本，
+/// 换掉的是每个调用点都要多传一个 `&mut` 出参或拆成两个函数。
 fn authenticated_user(
     state: &AppState,
     app_id: &str,
     headers: &HeaderMap,
-) -> Result<String, Response> {
+) -> Result<String, Box<Response>> {
     let ticket = headers
         .get(SESSION_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .or_else(|| read_session_cookie(headers));
     let Some(ticket) = ticket else {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({ "error": "missing app session" })),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({ "error": "missing app session" })),
+            )
+                .into_response(),
+        ));
     };
     match verify_session_ticket(
         &state.app_session_secret,
@@ -238,14 +243,16 @@ fn authenticated_user(
         now_unix(),
     ) {
         Ok((_, user)) => Ok(user),
-        Err(e) => Err((
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({
-                "error": "invalid app session",
-                "reason": format!("{e:?}"),
-            })),
-        )
-            .into_response()),
+        Err(e) => Err(Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({
+                    "error": "invalid app session",
+                    "reason": format!("{e:?}"),
+                })),
+            )
+                .into_response(),
+        )),
     }
 }
 
@@ -331,12 +338,12 @@ fn build_forwarded_headers(
     if let Ok(v) = HeaderValue::from_str(app_id) {
         out.insert("x-app-id", v);
     }
-    if let Some(user) = user {
-        if let Ok(v) = HeaderValue::from_str(user) {
-            out.insert("x-app-user", v.clone());
-            // PM / Doc already read `X-Actor` as the trusted REST actor.
-            out.insert("x-actor", v);
-        }
+    if let Some(user) = user
+        && let Ok(v) = HeaderValue::from_str(user)
+    {
+        out.insert("x-app-user", v.clone());
+        // PM / Doc already read `X-Actor` as the trusted REST actor.
+        out.insert("x-actor", v);
     }
     out.insert("x-actor-admin", HeaderValue::from_static("false"));
     out.insert("x-app-session-verified", HeaderValue::from_static("true"));

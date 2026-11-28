@@ -92,10 +92,14 @@ pub(crate) fn terminate_tree(child: &mut Child) {
 /// Builder-chain form of [`group_leader`], for the sites that construct the
 /// command inline (`Command::new(x).args(..).grouped().spawn()`) rather than
 /// holding a mutable variable.
+// 这个文件被 `#[path]` 逐个 E2E 二进制 include —— 每个二进制只用其中一部分，
+// 所以「本二进制没用到」是正常状态，不是死代码。
+#[allow(dead_code)]
 pub(crate) trait Grouped {
     fn grouped(&mut self) -> &mut Self;
 }
 
+#[allow(dead_code)]
 impl Grouped for Command {
     fn grouped(&mut self) -> &mut Self {
         group_leader(self);

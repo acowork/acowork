@@ -368,6 +368,10 @@ async fn learn_and_persist_local_node_id(
 ///
 /// `data_dir` holds the own-machine node anchor (`local_node.json`) —
 /// see the section comment above.
+///
+/// 这些参数是启动现场的事实（端口、注册表、令牌、路径上限），没有一组是
+/// 「同一件事的字段」：把它们包成结构体只会让调用方先拼一个只用一次的壳。
+#[allow(clippy::too_many_arguments)]
 pub async fn ensure_local_node(
     mqtt_port: u16,
     packages_dir: &str,

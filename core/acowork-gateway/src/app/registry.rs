@@ -68,9 +68,8 @@ pub fn app_status(gw: &GatewayState, manifest: &AppManifest) -> &'static str {
 /// The Gateway-facing MCP URL for one app, built from the advertise host so
 /// remote Nodes can reach it through the Gateway (never the app port).
 pub fn app_mcp_url(gw: &GatewayState, manifest: &AppManifest) -> Option<String> {
-    if resolve_app_port(gw, manifest).is_none() {
-        return None;
-    }
+    // 端口解析不出来就没有 URL —— `?` 直接把「没有」传出去，不再手写一遍。
+    resolve_app_port(gw, manifest)?;
     Some(format!(
         "http://{}:{}{}",
         gw.advertise_host, gw.http_port, manifest.mcp.gateway_path
@@ -209,7 +208,7 @@ mod binary_tests {
         // the sibling path. Whether it exists depends on the test host; we
         // only assert the error message shape when missing.
         match resolve_app_binary(&dir, &manifest) {
-            Ok(p) => assert!(p.as_os_str().len() > 0),
+            Ok(p) => assert!(!p.as_os_str().is_empty()),
             Err(e) => assert!(e.contains("not found"), "{e}"),
         }
         let _ = std::fs::remove_dir_all(&dir);

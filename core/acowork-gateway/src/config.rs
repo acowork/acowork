@@ -271,20 +271,12 @@ fn default_disk_alarm_cooldown_secs() -> u64 {
 }
 
 /// Hosted-application packaging / install configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppsConfig {
     /// When true, unsigned `.app` packages are accepted with a warning.
     /// Default is false — installing an app starts a local process.
     #[serde(default)]
     pub allow_unsigned: bool,
-}
-
-impl Default for AppsConfig {
-    fn default() -> Self {
-        Self {
-            allow_unsigned: false,
-        }
-    }
 }
 
 /// Cloud relay client configuration (design doc 24 §8.2, Gateway side).

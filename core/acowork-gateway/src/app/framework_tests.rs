@@ -39,8 +39,10 @@ fn test_state(port: u16) -> AppState {
     let mut gw = GatewayState::new(&dir.to_string_lossy());
     // Mirror a running Gateway's config snapshot: enable/disable must persist
     // into this temp dir, never into a `./data` folder under the CWD.
-    let mut cfg = crate::config::GatewayConfig::default();
-    cfg.data_dir = dir.to_string_lossy().to_string();
+    let cfg = crate::config::GatewayConfig {
+        data_dir: dir.to_string_lossy().to_string(),
+        ..Default::default()
+    };
     gw.config = Some(cfg);
     gw.user_verifier = Some(crate::http::test_support::verifier());
     gw.internal_service_token = Some(SERVICE_TOKEN.to_string());
@@ -292,18 +294,18 @@ async fn platform_api_enforces_declared_capabilities() {
 fn app_proxy_channel_for_ui_fonts_api_and_junk() {
     use crate::app::proxy::channel_for;
 
-    assert_eq!(channel_for("ui", "/ui").map(|(c, p)| (c, p)), Some(("ui", "/ui/".to_string())));
+    assert_eq!(channel_for("ui", "/ui"), Some(("ui", "/ui/".to_string())));
     assert_eq!(
-        channel_for("ui/app.css", "/ui").map(|(c, p)| (c, p)),
+        channel_for("ui/app.css", "/ui"),
         Some(("ui", "/ui/app.css".to_string()))
     );
     assert_eq!(
-        channel_for("fonts/宋体", "/ui").map(|(c, p)| (c, p)),
+        channel_for("fonts/宋体", "/ui"),
         Some(("ui", "fonts/宋体".to_string()))
     );
     assert_eq!(channel_for("fonts", "/ui").map(|(c, _)| c), Some("ui"));
     assert_eq!(
-        channel_for("api/projects", "/ui").map(|(c, p)| (c, p)),
+        channel_for("api/projects", "/ui"),
         Some(("api", "projects".to_string()))
     );
     assert!(channel_for("secrets", "/ui").is_none());
