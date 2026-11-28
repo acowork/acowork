@@ -138,48 +138,90 @@ async fn resolve_dir(dirs: &dyn DirectoryService, path: &str) -> Result<String> 
     Ok(current)
 }
 
-/// 文档引用：`doc_id`（`doc-` 前缀）或 path（`"纪要.md"` / `"研发/纪要.md"`）
-/// → `(dir_id, doc_id)`。
+/// 一个已解析的文档库条目：目录 + 元数据。
+pub(crate) struct ResolvedEntry {
+    /// 所在目录。注意 `doc_id` 形式的引用把它填成 doc_id 本身（无目录可归），
+    /// 调用方目前都忽略这个字段；需要目录的真实语义请用 path 形式。
+    pub dir_id: String,
+    pub meta: crate::types::DocMeta,
+}
+
+/// 文档库地址解析：`doc_id`（`doc-` 前缀）或库内路径（末段等于
+/// `DocMeta::file_name()`，例如 `纪要.md` / `研发/设计方案.pdf`）。
 ///
-/// `pub(crate)`: the REST validation endpoint (design 32 §3 / plan §7 G4,
-/// `api/refs.rs`) answers "does this ref resolve" with this exact resolution
-/// — one address grammar, one implementation, so the PM side can never be
-/// handed a ref that a later `doc_read` would reject.
-pub(crate) async fn resolve_doc_ref(
+/// **这是唯一一份地址实现。** MCP 工具（`doc_read` / `doc_stat` / `doc_write` …）、
+/// `/refs/validate`（PM 的 `doc_refs`）、`/refs/resolve`（桌面链接）全部经由它，
+/// 所以「一条 ref 能被 A 认出、被 B 拒绝」这类分裂不可能发生。
+///
+/// 地址层不认识内容类型：库里有 pdf / docx / pptx 条目，它们和 markdown 一样可被
+/// 寻址。「只能读文本」是读正文那份业务的闸门（[`resolve_doc_ref`]），不是地址事实。
+pub(crate) async fn resolve_entry(
     dirs: &dyn DirectoryService,
     docs: &dyn DocumentService,
     reference: &str,
-) -> Result<(String, String)> {
+) -> Result<ResolvedEntry> {
     let reference = reference.trim();
     if reference.is_empty() {
         return Err(DocError::BadRequest("ref must not be empty".into()));
     }
     if reference.starts_with("doc-") {
         let meta = docs.read(reference).await?.meta;
-        return Ok((meta.doc_id.clone(), meta.doc_id));
+        return Ok(ResolvedEntry {
+            dir_id: meta.doc_id.clone(),
+            meta,
+        });
     }
-    // path：最后一段是文件名（.md），前面是目录链
+    // path：最后一段是该条目的磁盘文件名，前面是目录链
     let (dir_path, file) = match reference.rsplit_once('/') {
         Some((d, f)) => (d, f),
         None => ("", reference),
     };
-    let stem = file
-        .strip_suffix(".md")
-        .ok_or_else(|| {
-            DocError::BadRequest(format!(
-                "document path must end in .md, got: {reference}"
-            ))
-        })?;
-    if stem.is_empty() || stem.contains('/') {
+    // 地址的合法性判断放在解析之前：`研发/设计`（没有扩展名）从来不是合法地址，
+    // 它必须报 invalid 而不是 not_found —— 否则调用方会去库里找一个「名字没写全」
+    // 的文档，而那个地址从未存在过。
+    let (stem, _ext) = file.rsplit_once('.').ok_or_else(|| {
+        DocError::BadRequest(format!(
+            "document path must end in the entry's file name (e.g. x.md / x.pdf), got: {reference}"
+        ))
+    })?;
+    if stem.is_empty() || stem.contains('/') || file.ends_with('.') {
         return Err(DocError::BadRequest(format!("invalid document path: {reference}")));
     }
     let dir_id = resolve_dir(dirs, dir_path).await?;
     let metas = docs.list(&dir_id).await?;
+    // 按 `file_name()` 匹配 —— 与磁盘上的名字同源。扩展名大小写不敏感（用户/AI 写
+    // `.PDF` 不该失败），名字主体保持精确（同目录内 name 唯一）。
     let meta = metas
         .iter()
-        .find(|m| m.name == stem)
+        .find(|m| m.file_name().eq_ignore_ascii_case(file))
         .ok_or_else(|| DocError::DocNotFound(reference.to_string()))?;
-    Ok((dir_id, meta.doc_id.clone()))
+    Ok(ResolvedEntry {
+        dir_id,
+        meta: meta.clone(),
+    })
+}
+
+/// 文档引用 → `(dir_id, doc_id)`，**额外要求条目是 Markdown 文档**。
+///
+/// 这是「读正文」这一侧的闸门：`doc_read` / `doc_stat` 返回的是文本与文本统计，
+/// 导入的 pdf/docx 条目没有 Markdown 正文（字节走 `GET /docs/{id}/file`）。把这条
+/// 策略留在消费方，地址层就仍然是内容类型无关的 —— 这正是 P0 要修的错位。
+pub(crate) async fn resolve_doc_ref(
+    dirs: &dyn DirectoryService,
+    docs: &dyn DocumentService,
+    reference: &str,
+) -> Result<(String, String)> {
+    let entry = resolve_entry(dirs, docs, reference).await?;
+    if entry.meta.is_file() {
+        return Err(DocError::BadRequest(format!(
+            "{} is an imported {} file, not a Markdown document — its bytes are served by \
+             GET /docs/{}/file",
+            entry.meta.file_name(),
+            entry.meta.ext.as_deref().unwrap_or("binary"),
+            entry.meta.doc_id
+        )));
+    }
+    Ok((entry.dir_id, entry.meta.doc_id))
 }
 
 /// 目录 path 缺省解析（`""` → root）。

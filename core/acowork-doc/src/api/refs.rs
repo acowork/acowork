@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{actor_from, ApiResult, ApiState};
 use crate::error::DocError;
-use crate::mcp::tools::resolve_doc_ref;
+use crate::mcp::tools::{resolve_doc_ref, resolve_entry};
 use crate::service::{DirectoryService, DocumentService};
 use crate::state::DocState;
 use crate::types::DocId;
@@ -76,18 +76,24 @@ pub struct ValidateRefsResponse {
     pub all_found: bool,
 }
 
+/// 一次调用能解析的 ref 上限。两条 ref 路由共用 —— 上限是传输/磁盘成本的策略，
+/// 不是某一条路由的语义，所以它只有一处。
+fn ensure_ref_budget(count: usize) -> ApiResult<()> {
+    if count > MAX_REFS {
+        return Err(crate::api::ApiError(DocError::BadRequest(format!(
+            "too many refs: {count} (max {MAX_REFS})"
+        ))));
+    }
+    Ok(())
+}
+
 /// `POST /refs/validate` — resolve a batch of doc references.
 pub async fn validate_refs(
     state: ApiState,
     headers: HeaderMap,
     Json(body): Json<ValidateRefsBody>,
 ) -> ApiResult<Json<ValidateRefsResponse>> {
-    if body.refs.len() > MAX_REFS {
-        return Err(crate::api::ApiError(DocError::BadRequest(format!(
-            "too many refs: {} (max {MAX_REFS})",
-            body.refs.len()
-        ))));
-    }
+    ensure_ref_budget(body.refs.len())?;
     let actor = actor_from(&headers);
     let mut results = Vec::with_capacity(body.refs.len());
     let mut all_found = true;
@@ -155,6 +161,128 @@ async fn validate_one(
             status: "invalid".into(),
             doc_id: None,
             path: None,
+            reason: Some(e.to_string()),
+        },
+    }
+}
+
+// ── POST /refs/resolve — 地址解析（链接/打开侧）────────────────────────
+
+/// Per-ref result of `/refs/resolve`: the entry the ref points at, or why it does not.
+///
+/// Deliberately a different shape from [`RefOutcome`]: a resolver has to hand the
+/// caller enough to **open** the entry (`doc_id` + human path + `ext`), while a
+/// validator only answers "does it land". Sharing one struct would push
+/// always-null fields into PM's contract.
+#[derive(Debug, Serialize)]
+pub struct ResolveOutcome {
+    pub r#ref: String,
+    /// `found` | `not_found` | `denied` | `invalid`
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<DocId>,
+    /// Human-readable library path (`研发/设计.pdf`) — never an internal `dir_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Original extension of an imported file; **always present** on `found`
+    /// (`null` = a Markdown document). The opener dispatches on it, so an absent
+    /// field and "markdown" must not be the same thing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ext: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResolveRefsResponse {
+    pub results: Vec<ResolveOutcome>,
+    /// `true` when every ref landed — the caller's fast path for "nothing to
+    /// toast". A single miss is not an error: the caller decides per row.
+    pub all_found: bool,
+}
+
+/// `POST /refs/resolve` — resolve a batch of doc references to entries.
+///
+/// Same address grammar and the same implementation as `/refs/validate`
+/// (`resolve_entry`), **without** PM's markdown gate: a link may point at any
+/// entry the library holds (pdf / docx / xlsx / pptx / image). See the P0 section
+/// of the doc-domain consolidation design.
+pub async fn resolve_refs(
+    state: ApiState,
+    headers: HeaderMap,
+    Json(body): Json<ValidateRefsBody>,
+) -> ApiResult<Json<ResolveRefsResponse>> {
+    ensure_ref_budget(body.refs.len())?;
+    let actor = actor_from(&headers);
+    let mut results = Vec::with_capacity(body.refs.len());
+    let mut all_found = true;
+    for reference in body.refs {
+        let outcome = resolve_one(&state, &actor, reference).await;
+        all_found &= outcome.status == "found";
+        results.push(outcome);
+    }
+    Ok(Json(ResolveRefsResponse { results, all_found }))
+}
+
+async fn resolve_one(
+    state: &DocState,
+    actor: &crate::service::acl::ActorCtx,
+    reference: String,
+) -> ResolveOutcome {
+    let trimmed = reference.trim().to_string();
+    match resolve_entry(state.dirs.as_ref(), state.docs.as_ref(), &trimmed).await {
+        Ok(entry) => {
+            if !state.acl.can_view_doc(actor, &entry.meta.doc_id).await {
+                // Existence is not disclosed to a caller that may not view it —
+                // the same three-state answer `/refs/validate` gives.
+                return ResolveOutcome {
+                    r#ref: trimmed,
+                    status: "denied".into(),
+                    doc_id: None,
+                    path: None,
+                    name: None,
+                    ext: None,
+                    reason: Some("document exists but the caller may not view it".into()),
+                };
+            }
+            let path = human_path(state, &entry.meta.doc_id).await.ok();
+            ResolveOutcome {
+                r#ref: trimmed,
+                status: "found".into(),
+                doc_id: Some(entry.meta.doc_id.clone()),
+                path,
+                name: Some(entry.meta.name.clone()),
+                ext: Some(entry.meta.ext.clone()),
+                reason: None,
+            }
+        }
+        Err(DocError::DocNotFound(_)) | Err(DocError::DirNotFound(_)) => ResolveOutcome {
+            r#ref: trimmed,
+            status: "not_found".into(),
+            doc_id: None,
+            path: None,
+            name: None,
+            ext: None,
+            reason: None,
+        },
+        Err(DocError::BadRequest(m)) => ResolveOutcome {
+            r#ref: trimmed,
+            status: "invalid".into(),
+            doc_id: None,
+            path: None,
+            name: None,
+            ext: None,
+            reason: Some(m),
+        },
+        Err(e) => ResolveOutcome {
+            r#ref: trimmed,
+            status: "invalid".into(),
+            doc_id: None,
+            path: None,
+            name: None,
+            ext: None,
             reason: Some(e.to_string()),
         },
     }

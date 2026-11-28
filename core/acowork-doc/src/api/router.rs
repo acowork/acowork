@@ -107,6 +107,13 @@ pub fn doc_router(state: DocState) -> Router {
             acowork_core::doc_layout::DOC_REFS_VALIDATE_ROUTE,
             post(rf::validate_refs),
         )
+        // Addressing (link/open side): same resolver, no markdown gate — a
+        // library entry may be a pdf/docx/pptx, and a link must be able to
+        // reach it. P0 of the doc-domain consolidation design.
+        .route(
+            acowork_core::doc_layout::DOC_REFS_RESOLVE_ROUTE,
+            post(rf::resolve_refs),
+        )
         // ── permissions (design §9) ───────────────────────────────────
         .route("/permissions/{kind}/{id}", get(p::get_permissions))
         .route("/permissions/{kind}/{id}", put(p::put_permissions))

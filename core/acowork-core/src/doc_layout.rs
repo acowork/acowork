@@ -55,6 +55,24 @@ pub const DOC_REFS_VALIDATE_ROUTE: &str = "/refs/validate";
 /// route with the Gateway's own `/api/doc` prefix in front of it.
 pub const DOC_REFS_VALIDATE_GATEWAY_PATH: &str = "/api/doc/refs/validate";
 
+/// `POST /refs/resolve` — 地址解析（不是校验）：一条 ref → 它指向的条目描述
+/// （`doc_id` / 人读 path / `name` / `ext`），或者 `denied` / `not_found` / `invalid`。
+///
+/// 与 [`DOC_REFS_VALIDATE_ROUTE`] 共用**同一份**解析实现（`resolve_entry`），差别只在
+/// 策略：`validate` 是 PM 的 `doc_refs` 提交闸门，额外要求条目是 Markdown 文档；
+/// `resolve` 是链接/打开侧的寻址，认文档库里的**每一种**条目（pdf / docx / pptx …）。
+///
+/// 分成两条路由而不是一条加参数，是因为「策略」属于各自的消费方：把 PM 的
+/// markdown 闸门变成全局约束，正是这次收敛要修的那类错位（技术方案 P0）。
+///
+/// 与 validate 一样**没有 `/api` 前缀**：doc 路由裸挂，Gateway 只剥自己的
+/// `/api/doc`。公开形态见 [`DOC_REFS_RESOLVE_GATEWAY_PATH`]。
+pub const DOC_REFS_RESOLVE_ROUTE: &str = "/refs/resolve";
+
+/// The same endpoint as seen through the Gateway's doc reverse proxy:
+/// `POST /api/doc/refs/resolve`.
+pub const DOC_REFS_RESOLVE_GATEWAY_PATH: &str = "/api/doc/refs/resolve";
+
 /// The document directory of one project, as a Doc path
 /// (`项目管理/p-1a2b3c/`-style, **without** a trailing slash so it can be
 /// joined with `/`).
@@ -174,6 +192,25 @@ mod tests {
             !DOC_REFS_VALIDATE_ROUTE.starts_with("/api"),
             "the doc router mounts REST routes without an `/api` prefix: {}",
             DOC_REFS_VALIDATE_ROUTE
+        );
+    }
+
+    /// `/refs/resolve` is the addressing endpoint; `/refs/validate` is PM's
+    /// submission gate on top of it. Two routes, one resolver — the strings must
+    /// stay distinct, otherwise the two policies collapse into one.
+    #[test]
+    fn refs_resolve_is_a_separate_route_from_refs_validate() {
+        assert_eq!(DOC_REFS_RESOLVE_ROUTE, "/refs/resolve");
+        assert_ne!(DOC_REFS_RESOLVE_ROUTE, DOC_REFS_VALIDATE_ROUTE);
+        assert!(
+            !DOC_REFS_RESOLVE_ROUTE.starts_with("/api"),
+            "the doc router mounts REST routes without an `/api` prefix: {}",
+            DOC_REFS_RESOLVE_ROUTE
+        );
+        assert_eq!(
+            DOC_REFS_RESOLVE_GATEWAY_PATH,
+            format!("/api/doc{DOC_REFS_RESOLVE_ROUTE}"),
+            "the Gateway strips exactly `/api/doc`; the rest reaches the doc service verbatim"
         );
     }
 
