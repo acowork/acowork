@@ -15,6 +15,7 @@
 - **事实不进模型上下文。** restorer 重建模型消息只取 `content` / `tool_call_id` / `tool_name`，`metadata.produced` 对 LLM 输入零影响——它是给前端的事实注解，不是推理材料。
 - **实时通道同步携带事实。** `record_complete` 事件新增 `metadata_json`（proto 加性字段），镜像该条 JSONL 行的 metadata；桌面端把它合进 `toolData`，使**实时投影与还原投影一致**——banner 在回合内即可推导，无需额外 HTTP 回源（旧机制靠"只持久化不下发"的系统行制造 count 分歧触发刷新，已随系统行退役）。
 - **前端统一推导。** [deriveDeliverables.ts](../../../apps/acowork-desktop/src/lib/deriveDeliverables.ts) 一个纯函数，输入一个回合的全部 `tool_result`，输出该回合的交付物：文件/图片读 `metadata.produced`（`created` 过滤、去重、每类上限 8、图片在前），doc 读 MCP 结果信封。展示时机/位置/取舍全在前端。
+- **两种行形状，一段推导（2026-12 补）。** 历史页走 `groups=stub` 投影，一段 explore run 折成一条 `explore_stub`，承载事实的 `tool_result` 行随之消失。折叠因此**原样转发**这些行的产物事实（[artifact_facts.rs](../../../core/acowork-runtime/src/agent/artifact_facts.rs)：按 `FACT_KEYS` 白名单取键、逐字转发、只做投影不落盘、不认工具名），前端在上面的同一段推导里读 `exploreStub.facts`。不转发的话，同一个回合在 live 与重新加载的历史页里会重建成两个样子——历史页干脆没有交付物行。
 - **新增交付物类别：doc 服务在线文档。** `doc_write`/`doc_move` 成功（`status=applied`）的结果信封由 [deliverableDocs.ts](../../../apps/acowork-desktop/src/lib/deliverableDocs.ts) 解析为 doc 卡片（按 doc_id 去重保留最后一次），点击在文件 tab 打开**只读** Markdown 预览（`fileEditorStore.openDocPreview`，按 doc_id 走 Gateway doc 代理，复用 `DocMarkdownView`）。doc 识别是独立适配器，不污染文件交付物的工具无关路径。
 - **文件类型图标。** 文件胶囊改用工作区同款 SetiIcon（复用 `fileIcons.getFileIcon`），不再统一 FileText。
 

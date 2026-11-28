@@ -4635,6 +4635,19 @@ pub fn collapse_explore_runs(
         if tools_truncated {
             meta["tools_truncated"] = serde_json::json!(true);
         }
+        // Forward the run's artifact facts (files/images, online documents).
+        // The banner built from them is the CLIENT's business (ADR-119); the
+        // fold's only duty here is not to lose data it happened to read: the
+        // fact-carrying rows are about to be replaced by this one. Recomputing
+        // on every read (never persisted) keeps the stored `tool_result`
+        // metadata the single author of the fact. An empty run adds no key, so
+        // a plain run costs exactly what it cost before.
+        let facts = crate::agent::artifact_facts::fold_run(
+            run.iter().map(|(_, e)| e.metadata.as_ref()),
+        );
+        if !facts.is_empty() {
+            meta["facts"] = serde_json::json!(facts);
+        }
         let stub = ConversationEntry {
             id: run[0].1.id.clone(),
             ts: run[0].1.ts.clone(),
@@ -10059,6 +10072,86 @@ mod tests {
         );
         assert!(meta.get("tools_truncated").is_none());
         assert_eq!(stub.id, run_first_id, "stub carries the run's first row id");
+    }
+
+    #[test]
+    fn collapse_explore_runs_forwards_the_run_artifact_facts() {
+        // The turn-end deliverables banner is derived by the CLIENT from the
+        // producing tool_result rows. Folding them away must not fold the facts
+        // away too: a history page would then show no banner at all while the
+        // live turn showed one, i.e. the same turn reconstructed differently
+        // from the same transcript.
+        //
+        // Forwarded verbatim (minus the pairing keys), one element per
+        // fact-carrying row, in log order — the transport does not interpret
+        // them (ADR-119: display policy is the client's).
+        let doc = serde_json::json!({
+            "doc_id": "doc-abc",
+            "path": "研发/纪要.md",
+            "name": "纪要",
+            "version": 2
+        });
+        let produced = serde_json::json!([{
+            "workspace_id": "ws-1",
+            "rel_path": "out/report.md",
+            "mime": "text/markdown",
+            "bytes": 42,
+            "created": true
+        }]);
+        let entries = indexed(vec![
+            stub_entry("user", "go", None),
+            stub_entry("tool_call", "{}", Some(serde_json::json!({"tool_name": "mcp_x__doc_write", "tool_call_id": "c1"}))),
+            stub_entry(
+                "tool_result",
+                "ok",
+                Some(serde_json::json!({
+                    "tool_name": "mcp_x__doc_write",
+                    "tool_call_id": "c1",
+                    "doc": doc,
+                })),
+            ),
+            // A call that produced nothing carries no fact: it must not add an
+            // element (the row payload stays as light as the fold promised).
+            stub_entry("tool_call", "{}", Some(serde_json::json!({"tool_name": "bash", "tool_call_id": "c2"}))),
+            stub_entry("tool_result", "done", Some(serde_json::json!({"tool_name": "bash", "tool_call_id": "c2"}))),
+            stub_entry(
+                "tool_result",
+                "written",
+                Some(serde_json::json!({
+                    "tool_name": "file_write",
+                    "tool_call_id": "c3",
+                    "produced": produced,
+                })),
+            ),
+            stub_entry("assistant", "answer", None),
+        ]);
+
+        let out = collapse_explore_runs(entries, false);
+        let meta = out[1].metadata.as_ref().unwrap();
+        let facts = meta["facts"].as_array().expect("stub must carry the run's facts");
+        assert_eq!(facts.len(), 2, "one element per fact-carrying row: {facts:?}");
+        assert_eq!(facts[0]["doc"], doc);
+        assert_eq!(facts[1]["produced"], produced);
+        // The pairing keys are the detail read's business, not the banner's;
+        // forwarding metadata verbatim would make every element carry them.
+        assert!(facts[0].get("tool_name").is_none(), "{facts:?}");
+        assert!(facts[0].get("tool_call_id").is_none(), "{facts:?}");
+    }
+
+    #[test]
+    fn a_run_without_artifact_facts_carries_no_facts_key() {
+        // Absence, not an empty array: a page of plain tool calls must cost
+        // exactly what it cost before this key existed, and a client can tell
+        // "nothing produced" from "an older Runtime did not forward anything"
+        // by the key being absent.
+        let entries = indexed(vec![
+            stub_entry("tool_call", "{}", Some(serde_json::json!({"tool_name": "bash", "tool_call_id": "c1"}))),
+            stub_entry("tool_result", "done", Some(serde_json::json!({"tool_name": "bash", "tool_call_id": "c1"}))),
+            stub_entry("assistant", "answer", None),
+        ]);
+        let out = collapse_explore_runs(entries, false);
+        let meta = out[0].metadata.as_ref().unwrap();
+        assert!(meta.get("facts").is_none(), "no facts key on a bare run: {meta}");
     }
 
     #[test]

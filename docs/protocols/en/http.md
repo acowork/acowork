@@ -614,7 +614,9 @@ pagination; the raw coordinate is its address.**
 Projection: a contiguous run of
 `thought` / `tool_call` / `tool_result` rows (never an internal row) collapses
 into **one** `kind="explore_stub"` record with empty `content` and metadata
-`{ "start": 1, "end": 4, "raw_count": 3, "steps": 2, "tools": ["bash"], "tools_truncated": false }`,
+`{ "start": 1, "end": 4, "raw_count": 3, "steps": 2, "tools": ["bash"], "tools_truncated": false,
+   "facts": [{ "doc": { "doc_id": "doc-abc", "path": "研发/纪要.md", "name": "纪要", "version": 2 } },
+             { "produced": [{ "workspace_id": "ws-1", "rel_path": "out/report.md", "mime": "text/markdown", "bytes": 42, "created": true }] }] }`,
 where `start` / `end` are the run's **data-index coordinates** (same dimension
 as `offset`; `end` exclusive). `raw_count` is the segment's coordinate width
 (`end - start`, i.e. raw rows); `steps` is how many entries it **renders** (one
@@ -647,6 +649,27 @@ returned verbatim. Both reasons are correctness, not cosmetics:
 
 Once a bubble follows the run it is no longer trailing and collapses on the next
 read, so the cost is bounded to one run on the newest page.
+
+`facts` (**optional**; the key is absent when nothing in the run produced
+anything) is a verbatim forwarding of the metadata of the rows in this run that
+carry **artifact facts** — one element per row, in log order. Which keys those
+are is the registry `core/acowork-runtime/src/agent/artifact_facts.rs::FACT_KEYS`
+(today: `produced` for file/image coordinates, `doc` for an online document).
+The pairing keys `tool_name` / `tool_call_id` are not forwarded, and no
+unregistered key is. **The transport does not interpret the content**: dedupe,
+caps, the `created` filter and the rendered shape are all the client's decision
+(ADR-119).
+
+Why forward them at all: the turn-end deliverables row is client business logic
+and these facts are its input. Folding the fact-carrying rows into a stub
+without forwarding them makes one turn reconstruct as two different
+conversations — the live turn keeps its deliverables row, the reloaded history
+page has none. `facts` is **not persisted**: it is recomputed by
+`collapse_explore_runs` on every window read, so the stored `tool_result`
+metadata stays the single source of truth, an existing session gains the fact
+the first time it is read, and nothing needs migrating. A Runtime that predates
+the key sends no `facts` — that means "not known", never "nothing produced", and
+a client should degrade to showing nothing.
 
 `GET /sessions/{sid}/messages/detail?start=&end=`: reads the raw rows behind one
 stub by its advertised coordinates. `tool_result` content is **not** truncated

@@ -1021,10 +1021,14 @@ run_deliverables_coupling_redline() {
     echo "Checking ADR-119 deliverables decoupling red line..."
     local root="$SCRIPT_DIR/.."
     local rust_mod="$root/core/acowork-runtime/src/agent/turn_deliverables.rs"
+    # The artifact-fact registry (the transcript projection's forward list) is
+    # the same kind of surface: it names metadata KEYS and must never learn the
+    # tool that stamped them, or the projection becomes tool-aware.
+    local rust_facts="$root/core/acowork-runtime/src/agent/artifact_facts.rs"
     local ts_lib="$root/apps/acowork-desktop/src/lib/deliverableFiles.ts"
     local ts_row="$root/apps/acowork-desktop/src/components/chat/ChatDeliverablesRow.tsx"
     local f
-    for f in "$rust_mod" "$ts_lib" "$ts_row"; do
+    for f in "$rust_mod" "$rust_facts" "$ts_lib" "$ts_row"; do
         if [ ! -f "$f" ]; then
             echo "ERROR: the ADR-119 red line points at a file that no longer exists:"
             echo "  $f"
@@ -1054,7 +1058,7 @@ run_deliverables_coupling_redline() {
         $0 ~ /^[[:space:]]*(\/\/|\/\*|\*|\{\/\*)/ { next }
         $0 ~ /(playwright|[Ss]creenshot|browser|chromium|mcp_[a-z0-9]+__)/ { print FILENAME ":" FNR ":" $0; next }
         $0 ~ /(tool_?[Nn]ame|function\.name)[[:space:]]*(==|!=|===|!==)/ { print FILENAME ":" FNR ":" $0 }
-    ' "$rust_mod" "$ts_lib" "$ts_row" 2>/dev/null || true)
+    ' "$rust_mod" "$rust_facts" "$ts_lib" "$ts_row" 2>/dev/null || true)
     if [ -n "$offenders" ]; then
         echo "ERROR: the deliverables code path branches on what produced a file (ADR-119):"
         echo "$offenders"
@@ -1064,9 +1068,9 @@ run_deliverables_coupling_redline() {
         exit 1
     fi
 
-    if grep -qE '^[[:space:]]*use[[:space:]]+crate::tools::builtin' "$rust_mod" 2>/dev/null; then
-        echo "ERROR: turn_deliverables.rs imports a concrete tool module (ADR-119):"
-        grep -nE '^[[:space:]]*use[[:space:]]+crate::tools::builtin' "$rust_mod"
+    if grep -qE '^[[:space:]]*use[[:space:]]+crate::tools::builtin' "$rust_mod" "$rust_facts" 2>/dev/null; then
+        echo "ERROR: the deliverables code path imports a concrete tool module (ADR-119):"
+        grep -nE '^[[:space:]]*use[[:space:]]+crate::tools::builtin' "$rust_mod" "$rust_facts"
         echo "The module owns the rules, not the tool set; a tool-side dependency"
         echo "turns \"any MCP that returns an image\" back into \"that one MCP\"."
         exit 1
