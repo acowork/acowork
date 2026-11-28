@@ -1,6 +1,6 @@
 #!/bin/bash
 # CI script for ACowork.AI
-# Usage: ./dev/ci.sh [redlines|versions|check|clippy|test|integration|smoke|all]
+# Usage: ./dev/ci.sh [redlines|versions|check|clippy|test|integration|smoke|cov|all]
 
 set -e
 
@@ -1269,6 +1269,76 @@ run_desktop_agent_literal_redline() {
     fi
 }
 
+# ── doc 域地址收敛红线（P-1：R1 / R3）───────────────────────────────────
+#
+# 技术方案：项目管理/p-66e68d1a/技术方案/doc域分层收敛-数据模型-中间件-业务.md
+#
+# 两条门保护同一件事：**文档库条目的「命名」与「寻址」各只有一个真相**。多一处
+# 手拼路径，改名 / 扩展名 / 路径渲染之间就会多出第二个真相，而它们只在某种组合下
+# 才互相矛盾 —— 这种缺陷 review 读不出来，grep 能。
+#
+# R3（命名）：全 core 只允许写入实现 `service/document_impl.rs` 手拼 `{}.md`，且必须
+# 是已知的 3 处（create / rename / 落盘）。白名单只会变小：P2 把它们换成
+# `DocMeta::file_name()` 之后，这条门收紧到"一处都不许"。
+run_doc_addressing_redline() {
+    echo "Checking doc addressing red line (P-1 R3: single naming rule)..."
+    local core="$SCRIPT_DIR/../core"
+    local writer="acowork-doc/src/service/document_impl.rs"
+    local hits count offenders
+    hits=$(grep -rnE 'format!\("\{\}\.md"' --include='*.rs' "$core"/*/src || true)
+    if [ -z "$hits" ]; then
+        echo "ERROR: the doc addressing red line matched nothing at all — not even in"
+        echo "       $writer. The pattern moved or was rewritten."
+        echo "       Repoint this gate; a guard over a vanished pattern passes vacuously."
+        exit 1
+    fi
+    offenders=$(printf '%s\n' "$hits" | grep -v "/$writer:" | grep -v '^$' || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: hand-built \"{}.md\" outside the single writer (P-1 R3):"
+        echo "$offenders"
+        echo "       A document's file name comes from DocMeta::file_name(); see the P-1"
+        echo "       section of the doc-module consolidation design."
+        exit 1
+    fi
+    count=$(printf '%s\n' "$hits" | grep -c . || true)
+    if [ "$count" -ne 3 ]; then
+        echo "ERROR: expected exactly 3 hand-built \"{}.md\" sites in $writer, found $count:"
+        echo "$hits"
+        echo "       The allowlist only shrinks: P2 replaces all three with"
+        echo "       DocMeta::file_name() and this gate then forbids the pattern outright."
+        exit 1
+    fi
+    echo "Doc addressing red line: OK (3 known sites, writer module only)"
+}
+
+# R1（边界）：桌面上唯一的 doc URL 构造者是 `lib/doc-api.ts`。`/api/doc/mcp` 出现在
+# `lib/hostedMcpTools.ts` 的 MCP 挂载表里 —— 那是端点声明，不是 URL 拼接，白名单放行。
+run_doc_url_boundary_redline() {
+    echo "Checking desktop doc-URL boundary red line (P-1 R1)..."
+    local desk="$SCRIPT_DIR/../apps/acowork-desktop/src"
+    local offenders pending
+    offenders=$(grep -rn '/api/doc' --include='*.ts' --include='*.tsx' "$desk" \
+        | grep -v '\.test\.' \
+        | grep -vE ':[0-9]+:[[:space:]]*(\*|//|/\*)' \
+        | grep -vE '/(doc-api|hostedMcpTools)\.ts:' || true)
+    # P2 摘除：文档库字节源当前寄生在 workspaceFileBlob.ts 的 `__doc__` 哨兵里。
+    # 打印出来而不是静默放行 —— 一条被忘记的白名单等于没有这条门。
+    pending=$(printf '%s\n' "$offenders" | grep -E '/workspaceFileBlob\.ts:' || true)
+    offenders=$(printf '%s\n' "$offenders" | grep -vE '/workspaceFileBlob\.ts:' || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: a doc-library URL is being built outside lib/doc-api.ts (P-1 R1):"
+        echo "$offenders"
+        echo "       lib/doc-api.ts is the single URL constructor — add an exported function"
+        echo "       there instead of pasting a path."
+        exit 1
+    fi
+    if [ -n "$pending" ]; then
+        echo "NOTE: whitelisted until P2 (move the __doc__ byte source into lib/docFileBlob.ts):"
+        echo "$pending"
+    fi
+    echo "Desktop doc-URL boundary red line: OK"
+}
+
 run_all_redlines() {
     run_node_redline
     run_mqtt_redline
@@ -1298,6 +1368,9 @@ run_all_redlines() {
     run_site_bot_term_redline
     run_package_ext_redline
     run_desktop_agent_literal_redline
+    # doc 域地址收敛（技术方案 P-1）：命名唯一 + 边界唯一。
+    run_doc_addressing_redline
+    run_doc_url_boundary_redline
 }
 
 run_clippy() {
@@ -1378,6 +1451,28 @@ run_smoke() {
     python3 -u "$SCRIPT_DIR/e2e_frontend_smoke/smoke_test.py"
 }
 
+# 覆盖率（技术方案 P-1 门 4）：只对本次收敛的两个 crate 出摘要，门限落在"改动面"与
+# 两个解析器上，不给全仓一个数字 —— 全仓阈值只会诱导写没有断言的测试来凑行数。
+#
+# 工具是 cargo-llvm-cov（需要 `rustup component add llvm-tools-preview`）：
+#   cargo install cargo-llvm-cov --locked
+run_cov() {
+    if ! cargo llvm-cov --version >/dev/null 2>&1; then
+        echo "ERROR: cargo-llvm-cov is not installed, so coverage cannot be measured."
+        echo "       Coverage that is not measured is not a gate. Install it with:"
+        echo "         rustup component add llvm-tools-preview"
+        echo "         cargo install cargo-llvm-cov --locked"
+        exit 1
+    fi
+    echo "=== Coverage summary: acowork-doc + acowork-pm (doc-domain consolidation) ==="
+    cargo llvm-cov -p acowork-doc -p acowork-pm --summary-only
+    echo
+    echo "Gate (see the doc-module consolidation design, P-1):"
+    echo "  - changed lines ............ >= 90%"
+    echo "  - acowork-doc addressing .... 100% branch on resolve_entry_ref / path_of"
+    echo "  - desktop pure logic ....... linkResolver + openDocEntry dispatch (vitest, --coverage)"
+}
+
 case "$MODE" in
     # The greps only. Seconds, no toolchain, no network — this is what a PR
     # gate can afford to run first, on every push.
@@ -1404,6 +1499,9 @@ case "$MODE" in
     smoke)
         run_smoke
         ;;
+    cov)
+        run_cov
+        ;;
     all)
         run_all_redlines
         run_version_gate
@@ -1415,7 +1513,7 @@ case "$MODE" in
         ;;
     *)
         echo "Unknown mode: $MODE"
-        echo "Usage: $0 [redlines|versions|check|clippy|test|integration|smoke|all]"
+        echo "Usage: $0 [redlines|versions|check|clippy|test|integration|smoke|cov|all]"
         exit 1
         ;;
 esac
