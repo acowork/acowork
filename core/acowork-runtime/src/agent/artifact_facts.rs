@@ -58,8 +58,10 @@ pub const FACT_KEYS: &[&str] = &[
 
 /// The pairing keys every tool row carries. They belong to the detail read
 /// (`/messages/detail`, paired by `tool_call_id`), never to a turn's artifacts —
-/// forwarding them would add N copies of a key nobody reads.
-const PAIRING_KEYS: &[&str] = &["tool_name", "tool_call_id"];
+/// forwarding them would add N copies of a key nobody reads. They are named
+/// here only so a test can assert the registry never swallows one (the table is
+/// the entry point for new fact kinds; this is the invariant it must keep).
+pub const PAIRING_KEYS: &[&str] = &["tool_name", "tool_call_id"];
 
 /// The artifact facts carried by ONE row's metadata, or `None`.
 ///
@@ -76,14 +78,6 @@ pub fn fact_row(metadata: &Value) -> Option<Value> {
             }
             _ => {}
         }
-    }
-    if out.is_empty() {
-        return None;
-    }
-    // Defensive: a key that is both registered and a pairing key would be a
-    // table bug; drop it rather than ship two meanings for one name.
-    for key in PAIRING_KEYS {
-        out.remove(*key);
     }
     if out.is_empty() {
         return None;
@@ -160,6 +154,21 @@ mod tests {
     fn a_run_that_produced_nothing_folds_to_empty() {
         let rows = [Some(json!({"tool_name": "bash", "tool_call_id": "c1"}))];
         assert!(fold_run(rows.iter().map(|r| r.as_ref())).is_empty());
+    }
+
+    #[test]
+    fn the_registry_never_swallows_a_pairing_key() {
+        // `fact_row` copies registered keys blindly, so "FACT_KEYS must not
+        // contain a pairing key" is an invariant of the TABLE, not something the
+        // function should paper over at runtime: a registered pairing key would
+        // ship two meanings for one name, and a client reading `tool_call_id`
+        // as a fact is a bug no defensive `remove` would fix.
+        for key in FACT_KEYS {
+            assert!(
+                !PAIRING_KEYS.contains(key),
+                "FACT_KEYS lists the pairing key {key}; the two sets must be disjoint"
+            );
+        }
     }
 
     #[test]
