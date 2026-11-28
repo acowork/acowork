@@ -42,6 +42,28 @@ The library structure is the file system of the doc service — restructure it t
   a rewritten one loses both.
 - Publish the resulting map with `doc_write` so humans can see the target structure.
 
+## Ownership and ACL facts that decide what you may touch
+
+- **`doc_mkdir` stamps you as the creator, and only the creator may later rename or
+  prune that directory.** So never create `项目管理` or a project's top directory "on
+  behalf of" the PM: you would take governance of a tree another agent is responsible
+  for, and its own restructuring would then be refused. A nested directory *inside* the
+  project tree (`周报/` and the like) is allowed and normal — the parent's ACL is public
+  by default — but you would be the only one able to reorganize it later, so weigh it.
+- **The PM's tree is read-and-propose for you.** `项目管理/{project_id}/` holds PRD,
+  risk register, sprint plan, retrospectives, weekly reports, meeting minutes; the PM
+  publishes the exact path as `doc_path`, so it is never derived from a title. Changing
+  a body you did not author returns `pending_review` + `request_id` (a proposal, not a
+  failure). `doc_move`, `doc_remove` and `doc_rmdir` on a PM node return `forbidden` —
+  do not retry a different path, do not write a near-duplicate instead; ask the human or
+  `intent_send` the PM agent.
+- **The directory name is not the user-facing name.** Each project README's H1 is what
+  `doc_search` matches and what a human reads; renaming a directory to make it prettier
+  breaks every recorded path for no visible gain.
+- **The deliverable vocabulary under `项目管理/**` is closed** — the platform design
+  lists the file names. A new kind of deliverable is a design change, not a naming
+  decision taken while writing a file.
+
 ## Execution Steps
 
 1. **Load inventory and conventions**

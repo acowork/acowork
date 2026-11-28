@@ -1411,6 +1411,30 @@ EOF
     echo "Desktop doc layering red line: OK"
 }
 
+# Every bot's `prompts/rules.md` must carry the output-budget rule (PM
+# t-7db412be). The rule lives in the prompt because the runtime cannot know
+# what "too long" means for a giveable answer; what CI can know is that the
+# prompt is still there. A ninth bot added without it is verbose from day one
+# and nothing fails — this is the one line that makes "every bot" true tomorrow.
+# Judge is the phrase, not rules.md's own byte count: the file is a document,
+# the budget is about what the agent writes.
+run_output_budget_redline() {
+    echo "Checking per-bot output-budget rule red line..."
+    local missing="" d
+    for d in "$SCRIPT_DIR"/../bots/*/; do
+        # `bots/bot-packages/` is a directory of artifacts, not a bot source.
+        [ -f "$d/manifest.toml" ] || continue
+        grep -qF "## Output Budget" "$d/prompts/rules.md" 2>/dev/null \
+            || missing="$missing $(basename "$d")"
+    done
+    if [ -n "$missing" ]; then
+        echo "ERROR: no output-budget rule in prompts/rules.md of:$missing"
+        echo "       Copy the 'Output Budget' section from any sibling bot."
+        exit 1
+    fi
+    echo "output-budget rule presence: OK"
+}
+
 run_all_redlines() {
     run_node_redline
     run_mqtt_redline
@@ -1440,6 +1464,7 @@ run_all_redlines() {
     run_site_bot_term_redline
     run_package_ext_redline
     run_desktop_agent_literal_redline
+    run_output_budget_redline
     # doc 域地址收敛（技术方案 P-1）：命名唯一 + 边界唯一。
     run_doc_addressing_redline
     run_doc_url_boundary_redline
