@@ -18,6 +18,7 @@ import type {
   DirMeta,
   DocMeta,
   DocRead,
+  DocResolveResult,
   DocTreeNode,
   MoveDocInput,
   PermissionsView,
@@ -189,6 +190,22 @@ export function createDoc(input: CreateDocInput): Promise<DocMeta> {
 /** `GET /api/docs/:doc_id` — 读全文 */
 export function getDoc(docId: string): Promise<DocRead> {
   return request<DocRead>(`/docs/${encodeURIComponent(docId)}`);
+}
+
+/**
+ * `POST /refs/resolve` — 库内地址（`doc-…` 或 `研发/纪要.pdf`）→ 条目。
+ *
+ * 与 `/refs/validate` 的区别是**没有 Markdown 闸门**：链接可以指向库里任何条目
+ * （pdf / docx / xlsx / pptx / 图片），校验只回答「PM 的交付物引用是否落地」。
+ * 两条路由共用服务端的同一个 `resolve_entry`，所以地址语法不会漂移。
+ *
+ * 结果与输入一一对应、顺序不变 —— 调用方按位置对齐自己的输入。
+ */
+export function resolveDocEntries(refs: string[]): Promise<DocResolveResult[]> {
+  return request<{ results: DocResolveResult[]; all_found: boolean }>("/refs/resolve", {
+    method: "POST",
+    body: JSON.stringify({ refs }),
+  }).then((r) => r.results);
 }
 
 /**

@@ -2113,7 +2113,11 @@ export function FileEditorPanel({ width }: { width: number }) {
                             <DocFilePreview entry={activeFile.docEntry} />
                         </div>
                     ) : (
-                        <DocMarkdownView content={activeFile.content} />
+                        <DocMarkdownView
+                            content={activeFile.content}
+                            // 正文里的相对链接以这篇文档所在目录为基准。
+                            basePath={activeFile.docEntry?.path}
+                        />
                     )
                 ) : waitForVisualApp ? (
                     <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">

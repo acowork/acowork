@@ -126,6 +126,30 @@ export interface DocRead {
   path: string;
 }
 
+/**
+ * `POST /refs/resolve` 的单条结果（链接 / 打开侧的地址解析）。
+ *
+ * 与 PM 的 `refs/validate` 故意不是一个形状：`found` 必须带上足以**打开**的
+ * 东西（`doc_id` + 人读路径 + `ext`），而校验只需要回答「落没落地」。
+ *
+ * `status` 是判别字段：
+ *   - `found`    —— 其余字段有效；`ext` **恒常存在**，`null` = Markdown 文档；
+ *   - `not_found` / `invalid` —— 地址在库里没有 / 地址本身不合法；
+ *   - `denied`   —— 条目存在但调用方无权查看。存在性不通过这个字段泄漏。
+ */
+export interface DocResolveResult {
+  /** 提交时的原字符串（trim 后），用于与输入对齐 */
+  ref: string;
+  status: "found" | "not_found" | "denied" | "invalid";
+  doc_id?: string;
+  /** 人读库内路径，如 `研发/设计.pdf`；绝不含内部 `dir_id` */
+  path?: string;
+  name?: string;
+  /** 导入文件的扩展名（小写、不带点）；`null` = Markdown 文档 */
+  ext?: string | null;
+  reason?: string;
+}
+
 /** `GET /api/tree?dir_id=` — 某目录的直接子项（非递归） */
 export interface DocTreeNode {
   dir_id: string;

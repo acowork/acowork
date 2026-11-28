@@ -1452,7 +1452,8 @@
       "pointPrompt": "{{path}} 坐标 ({{x}}, {{y}})",
       "regionPrompt": "{{path}} 区域 ({{x}}, {{y}}) – ({{x2}}, {{y2}})，{{width}}×{{height}}"
     },
-    "markdownLinkNotFound": "所有工作区都未找到文件:{{href}}",
+    "markdownLinkNotFound": "文件不存在:工作区和文档库都没有 {{href}}",
+    "markdownLinkDenied": "没有权限打开该文档:{{href}}",
     "markdownImageClickHint": "点击打开预览",
     "loadingUrl": "正在加载页面...",
     "urlLoadError": "此页面无法加载",

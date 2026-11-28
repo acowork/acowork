@@ -422,7 +422,7 @@ export function DocEditor() {
 
       {/* ── 编辑 / 分栏 / 预览 ─────────────────────────────── */}
       {mode === "preview" ? (
-        <DocMarkdownView content={content} />
+        <DocMarkdownView content={content} basePath={doc.path} />
       ) : (
         <div className="flex h-full min-h-0 flex-1">
           {/* 左：编辑引擎（rich=Tiptap 懒加载 / source=Monaco） */}
@@ -480,7 +480,7 @@ export function DocEditor() {
             <>
               <SplitHandle onMouseDown={preview.onHandleMouseDown} ariaLabel={t("doc.split")} />
               <div className="min-h-0 min-w-0 shrink-0" style={{ width: preview.width }}>
-                <DocMarkdownView content={content} />
+                <DocMarkdownView content={content} basePath={doc.path} />
               </div>
             </>
           )}

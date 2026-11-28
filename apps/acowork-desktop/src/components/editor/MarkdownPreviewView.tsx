@@ -13,8 +13,10 @@ import { useFileTreeStore, treeKey } from "../../stores/fileTree";
 import { cn } from "../../lib/utils";
 import {
     PASSTHROUGH_SCHEMES,
+    classifyMarkdownLink,
     resolveAssetAcrossWorkspaces,
     openFirstResolved,
+    openDocLinkOrNotify,
     notifyLinkNotFound,
     type ResolvedAsset,
 } from "./markdownLinkResolver";
@@ -243,9 +245,17 @@ export function MarkdownPreviewView({ file }: MarkdownPreviewViewProps) {
             // Local file path. Always take over navigation so the
             // webview never falls back to `tauri://…` for non-URL hrefs
             // (which is what was triggering the spurious "restart").
+            //
+            // Second stage: the doc library. A preview pane that only knew about
+            // workspace files reported every library link (the shape agents use
+            // for their deliverables — `项目管理/p-x/评审/y.pdf`) as "not found",
+            // which reads as "clicking does nothing". The decision and its
+            // wording live in `markdownLinkResolver`, shared with the chat
+            // surface, so the two cannot drift.
             e.preventDefault();
+            const path = classifyMarkdownLink(href).path ?? href;
             void openResolved(href).then((opened) => {
-                if (!opened) notifyLinkNotFound(href);
+                if (!opened) void openDocLinkOrNotify(path);
             });
         },
         [openResolved],

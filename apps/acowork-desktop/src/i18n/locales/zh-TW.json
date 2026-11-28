@@ -1154,7 +1154,8 @@
       "pointPrompt": "{{path}} 座標 ({{x}}, {{y}})",
       "regionPrompt": "{{path}} 區域 ({{x}}, {{y}}) – ({{x2}}, {{y2}})，{{width}}×{{height}}"
     },
-    "markdownLinkNotFound": "所有工作區都未找到檔案:{{href}}",
+    "markdownLinkNotFound": "檔案不存在:工作區和文件庫都沒有 {{href}}",
+    "markdownLinkDenied": "沒有權限開啟該文件:{{href}}",
     "markdownImageClickHint": "點擊開啟預覽",
     "loadingUrl": "正在載入頁面...",
     "urlLoadError": "此頁面無法載入",

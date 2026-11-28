@@ -37,12 +37,21 @@ import { log } from "../../lib/logger";
 import { showToast } from "../common/ToastProvider";
 import { pickOpenActionForPath } from "./filePreview";
 import i18n from "../../i18n";
+import {
+    ABSOLUTE_PATH,
+    PASSTHROUGH_SCHEMES,
+    classifyMarkdownLink,
+    docLinkRefs,
+    parseChatLinkHref,
+    resolveDocLink,
+} from "../../lib/linkResolver";
+import type { ChatLinkTarget } from "../../lib/linkResolver";
 
-/** URL schemes that should be passed through to the webview as-is. */
-export const PASSTHROUGH_SCHEMES = /^(https?:|data:|asset:|blob:|mailto:|tel:)/i;
-
-/** Absolute path prefixes (POSIX `/...` or Windows `C:\...` / `C:/...`). */
-export const ABSOLUTE_PATH = /^([/\\]|[A-Za-z]:[/\\])/;
+// The href grammar (scheme / anchor / `#L42` / drive-path normalisation) has one
+// implementation, in `lib/linkResolver.ts`, because every markdown surface has to
+// agree on it. Re-exported here so existing callers keep their import path.
+export { ABSOLUTE_PATH, PASSTHROUGH_SCHEMES, classifyMarkdownLink, parseChatLinkHref };
+export type { ChatLinkTarget };
 
 /**
  * Resolve a markdown image/link `src` (relative or rooted) against one
@@ -293,13 +302,68 @@ export async function openFirstResolved(
 
 /**
  * Fire a toast informing the user that the clicked link/image target
- * could not be found in any of the agent's workspaces.
+ * could not be found — in any workspace **and** in the doc library.
+ *
+ * The two stages are one answer on purpose: the user clicked a link that names
+ * nothing reachable, and telling them "not in a workspace" when the library was
+ * also searched would send them looking in the wrong place.
  */
 export function notifyLinkNotFound(href: string): void {
     showToast({
         type: "warning",
         message: i18n.t("fileEditor.markdownLinkNotFound", { href }),
     });
+}
+
+/**
+ * Fire the permission toast for a link that lands on a doc-library entry the
+ * caller may not view.
+ *
+ * A separate message from "not found" because they are different facts: the
+ * entry exists, the link is correct, and the fix is to ask for access — not to
+ * hunt for a typo.
+ */
+export function notifyLinkDenied(href: string): void {
+    showToast({
+        type: "warning",
+        message: i18n.t("fileEditor.markdownLinkDenied", { href }),
+    });
+}
+
+/**
+ * Second resolution stage for any markdown link: the doc library.
+ *
+ * Runs **after** the workspace stage finds nothing (documents are delivered
+ * into the library, so a workspace file of the same name wins and the tab keeps
+ * its editing abilities). Outcome handling is here rather than at each call
+ * site so chat bubbles and the preview cannot drift apart on wording:
+ *
+ *   - `found`  → `openDocEntry`, which picks the text view or the byte viewer
+ *                by extension (a `.pdf` / `.pptx` opens as itself);
+ *   - `denied` → permission toast (the entry exists);
+ *   - anything else → "not found" toast (no fuzzy matching, no searching).
+ */
+export async function openDocLinkOrNotify(
+    href: string,
+    opts: { basePath?: string } = {},
+): Promise<void> {
+    const refs = opts.basePath ? docLinkRefs(opts.basePath, href) : docLinkRefs("", href);
+    let denied = false;
+    for (const ref of refs) {
+        const outcome = await resolveDocLink(ref);
+        if (outcome.status === "found") {
+            useFileEditorStore.getState().openDocEntry(outcome.entry);
+            return;
+        }
+        if (outcome.status === "denied") denied = true;
+    }
+    // 权限优先于「不存在」：条目确实在，文案应当指向「去申请权限」而不是让人
+    // 去找一个打错方向的错字。
+    if (denied) {
+        notifyLinkDenied(href);
+        return;
+    }
+    notifyLinkNotFound(href);
 }
 
 // ── Chat-surface markdown link handling ────────────────────────────────
@@ -357,33 +421,6 @@ function fileUrlToLocalPath(url: string): string | null {
     }
 }
 
-/** Parsed form of a chat markdown link that points at a local file. */
-export interface ChatLinkTarget {
-    /** The path part. URL-ified drive paths (`/D:/…`) lose the leading
-     *  slash so the workspace resolver can absorb the absolute path. */
-    path: string;
-    /** 1-based cursor line from a `#L42` / `#L42-L67` fragment, if any. */
-    line?: number;
-}
-
-/**
- * Split a chat markdown href into its path and optional `#L…` line
- * fragment, normalising the two shapes the resolver must accept:
- *   - `/D:/repo/a.md` — `file://` conversion leftovers and editors that
- *     URL-ify drive paths with a leading slash.
- *   - `D:/repo/a.md` — plain drive path, kept intact; the workspace
- *     resolver maps it back to a workspace-relative path via the
- *     workspace root prefix.
- * Relative paths (`docs/a.md`) pass through unchanged.
- */
-export function parseChatLinkHref(href: string): ChatLinkTarget {
-    const [rawPath, fragment = ""] = href.split("#", 2);
-    let path = rawPath;
-    if (/^\/[A-Za-z]:[/\\]/.test(path)) path = path.slice(1);
-    const m = fragment.match(/^L(\d+)(?:-L(\d+))?$/);
-    return { path, line: m ? parseInt(m[1], 10) : undefined };
-}
-
 /**
  * Click dispatch for markdown links inside chat surfaces (MessageBubble,
  * CompactionCard). Chat links have no file-of-origin context, so local
@@ -399,38 +436,47 @@ export function parseChatLinkHref(href: string): ChatLinkTarget {
  * never lets the webview navigate.
  */
 export function handleChatMarkdownLinkClick(href: string): void {
-    // In-page anchors (`#foo`) and empty hrefs have no workspace meaning.
-    if (!href || href.startsWith("#")) return;
+    // One classification for every markdown surface (`lib/linkResolver.ts`):
+    // anchors and pass-through schemes are not ours to handle.
+    const link = classifyMarkdownLink(href);
+    if (link.kind === "anchor" || link.kind === "passthrough") return;
 
     const agentId = useAgentStore.getState().selectedAgentId;
-    if (!agentId) return;
-
-    if (/^https?:\/\//i.test(href)) {
-        useFileEditorStore.getState().openUrl(agentId, href);
+    if (link.kind === "external") {
+        if (agentId) useFileEditorStore.getState().openUrl(agentId, link.url ?? href);
         return;
     }
 
-    const sessionId = useChatStore.getState().getActiveSessionId(agentId);
-    if (!sessionId) return;
-    const workspaceId = useWorkspaceStore.getState().getSessionWorkspaceId(sessionId);
+    // The workspace stage needs an agent and an active session; the doc-library
+    // stage needs neither (the doc proxy is Gateway-wide). So "no agent" is no
+    // longer a dead end — the click just skips straight to the library.
+    const path = link.path ?? href;
+    const sessionId = agentId ? useChatStore.getState().getActiveSessionId(agentId) : null;
+    const workspaceId = sessionId
+        ? useWorkspaceStore.getState().getSessionWorkspaceId(sessionId)
+        : "";
 
-    const { path, line } = parseChatLinkHref(href);
-    // `#L42` on a link means "show me that line", and the preview viewer has no
-    // line jump — so an anchored link stays on the source editor even for a
-    // format that would otherwise preview.
-    const action = line != null ? "openFile" : pickOpenActionForPath(path);
-
-    let candidates = resolveAssetAcrossWorkspaces(agentId, workspaceId, "", path);
-    if (candidates.length === 0 && path.startsWith("/")) {
-        // Legacy chat convention: a bare leading slash means
-        // "workspace-relative", not "POSIX absolute".
-        candidates = resolveAssetAcrossWorkspaces(agentId, workspaceId, "", path.slice(1));
+    if (agentId && sessionId) {
+        // `#L42` on a link means "show me that line", and the preview viewer has
+        // no line jump — so an anchored link stays on the source editor even for
+        // a format that would otherwise preview.
+        const line = link.line;
+        const action = line != null ? "openFile" : pickOpenActionForPath(path);
+        let candidates = resolveAssetAcrossWorkspaces(agentId, workspaceId, "", path);
+        if (candidates.length === 0 && path.startsWith("/")) {
+            // Legacy chat convention: a bare leading slash means
+            // "workspace-relative", not "POSIX absolute".
+            candidates = resolveAssetAcrossWorkspaces(agentId, workspaceId, "", path.slice(1));
+        }
+        if (candidates.length > 0) {
+            void openFirstResolved(agentId, candidates, action, line).then((result) => {
+                // A workspace miss is not the end of the road: the link may name
+                // a doc-library entry, which is the shape agents actually produce
+                // for their deliverables.
+                if (!result.opened) void openDocLinkOrNotify(path);
+            });
+            return;
+        }
     }
-    if (candidates.length === 0) {
-        notifyLinkNotFound(path);
-        return;
-    }
-    void openFirstResolved(agentId, candidates, action, line).then((result) => {
-        if (!result.opened) notifyLinkNotFound(path);
-    });
+    void openDocLinkOrNotify(path);
 }

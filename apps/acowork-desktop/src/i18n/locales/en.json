@@ -1760,7 +1760,8 @@
       "pointPrompt": "{{path}} @ ({{x}}, {{y}})",
       "regionPrompt": "{{path}} region ({{x}}, {{y}}) – ({{x2}}, {{y2}}), {{width}}×{{height}}"
     },
-    "markdownLinkNotFound": "File not found in any workspace: {{href}}",
+    "markdownLinkNotFound": "File not found in any workspace or in the document library: {{href}}",
+    "markdownLinkDenied": "No permission to open this document: {{href}}",
     "markdownImageClickHint": "Click to open preview",
     "loadingUrl": "Loading page...",
     "urlLoadError": "This page could not be loaded",
