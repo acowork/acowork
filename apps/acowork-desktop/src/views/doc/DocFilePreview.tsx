@@ -24,20 +24,20 @@ import { Suspense } from "react";
 import { Loader2 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useWorkspaceFileBlob } from "../../hooks/useWorkspaceFileBlob";
-import { docFileRef } from "../../lib/workspaceFileBlob";
+import { docFileRef } from "../../lib/docFileBlob";
+import { docEntryExt, type DocEntryRef } from "../../lib/docEntry";
 import { renderDocumentViewer } from "../../components/editor/documentViewer";
 import { ImageViewer } from "../../components/editor/ImageViewer";
 import { VisualAppPreview } from "../../components/editor/VisualAppPreview";
 import { isHostedPreviewCandidate, pickVisualApp, useHostedApps } from "../../components/editor/visualCanvas";
-import type { DocMeta } from "../../lib/doc-types";
 
 /** 文档库预览没有工作区路径，所以图像 viewer 的对话手势不可用。 */
 const IMAGE_EXT_RE = /^(?:png|jpe?g|gif|webp|bmp|svg)$/;
 
-export function DocFilePreview({ doc }: { doc: DocMeta }) {
+export function DocFilePreview({ entry }: { entry: DocEntryRef }) {
   const { t } = useTranslation();
-  const file = docFileRef(doc);
-  const ext = (doc.ext ?? "").toLowerCase();
+  const file = docFileRef(entry);
+  const ext = (docEntryExt(entry) ?? "").toLowerCase();
   const isImage = IMAGE_EXT_RE.test(ext);
   // null while `/apps` is in flight. Same two gates the editor tab uses: hold
   // the spinner only for formats an app could claim, then hand it the document.

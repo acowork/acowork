@@ -10,7 +10,8 @@ import { Loader2, AlertCircle } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { listApps, type AppDto } from "../../lib/apps-api";
 import { saveHostedAppFile } from "../../lib/workspaceFileSave";
-import { DOC_FILE_AGENT_ID, primeWorkspaceFileBlob } from "../../lib/workspaceFileBlob";
+import { DOC_FILE_AGENT_ID } from "../../lib/doc-api";
+import { primeDocFileBlobFromFileName } from "../../lib/docFileBlob";
 import { saveDocFile } from "../../lib/doc-api";
 import { useWorkspaceFileBlob } from "../../hooks/useWorkspaceFileBlob";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
@@ -72,7 +73,8 @@ export function VisualAppPreview({ file }: { file: VisualPreviewFile }) {
                 // The document library owns these bytes: save back onto the
                 // entry, not into a workspace the entry does not live in.
                 await saveDocFile(docId, bytes);
-                primeWorkspaceFileBlob(file.agentId, file.workspaceId, file.relPath, bytes);
+                // 缓存刷新由 doc 侧代劳：三元组怎么拼、key 怎么算，是它的契约。
+                primeDocFileBlobFromFileName(docId, file.fileName, bytes);
                 return;
             }
             await saveHostedAppFile({

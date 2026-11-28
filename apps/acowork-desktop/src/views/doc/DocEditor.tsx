@@ -35,6 +35,7 @@ import { registerMarkdownTableNavigation } from "../../components/markdown/edito
 import { cn } from "../../lib/utils";
 import { DocMarkdownView } from "./DocMarkdownView";
 import { DocFilePreview } from "./DocFilePreview";
+import { docEntryFromRead } from "../../lib/docEntry";
 // 仅类型引用（懒加载边界：DocRichEditor 运行时经动态 import() 进入）。
 import type { DocRichEditor } from "../../components/doc/editor/DocRichEditor";
 
@@ -222,7 +223,7 @@ export function DocEditor() {
   if (doc.meta.ext) {
     return (
       <div className="h-full min-h-0">
-        <DocFilePreview doc={doc.meta} />
+        <DocFilePreview entry={docEntryFromRead(doc)} />
       </div>
     );
   }

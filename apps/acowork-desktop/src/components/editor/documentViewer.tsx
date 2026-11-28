@@ -12,7 +12,8 @@
 // 包装而没有共享任何东西。共享的是那张表，不是一个壳。
 //
 // 文档库那条路复用它时传的是一组 `__doc__` 哨兵坐标（见
-// `lib/workspaceFileBlob.ts::docFileRef`），viewer 完全不知道字节来自文档服务。
+// `lib/docFileBlob.ts::docFileRef`，条目形状出自 `lib/docEntry.ts`），viewer
+// 完全不知道字节来自文档服务。
 
 import { lazy } from "react";
 import type { ReactNode } from "react";

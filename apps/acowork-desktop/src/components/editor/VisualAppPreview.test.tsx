@@ -53,9 +53,15 @@ vi.mock("../../lib/workspaceFileSave", () => ({
     saveHostedAppFile: h.saveHostedAppFile,
 }));
 
-vi.mock("../../lib/doc-api", () => ({
-    saveDocFile: h.saveDocFile,
-}));
+// Only the write path is faked. The URL constructor and the `__doc__` source
+// marker stay real: they are the doc domain's public contract (R1), and a
+// hand-copied constant in a mock silently rots the day the real one changes.
+vi.mock("../../lib/doc-api", async () => {
+    const actual = await vi.importActual<typeof import("../../lib/doc-api")>(
+        "../../lib/doc-api",
+    );
+    return { ...actual, saveDocFile: h.saveDocFile };
+});
 
 // The doc branch primes the viewer cache; the cache itself is jsdom-hostile
 // (object URLs), and what matters here is which endpoint got the bytes.

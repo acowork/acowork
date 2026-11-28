@@ -48,7 +48,12 @@ const WORDCRAFT = {
   nav_order: 1,
 };
 
-const DOC = { doc_id: "doc-7", name: "季度报告", ext: "docx" } as never;
+const ENTRY = {
+  docId: "doc-7",
+  path: "研发/季度报告.docx",
+  name: "季度报告",
+  ext: "docx",
+};
 
 beforeEach(() => {
   h.listApps.mockReset();
@@ -57,7 +62,7 @@ beforeEach(() => {
 describe("DocFilePreview", () => {
   it("hands a docx to the craft app that declares it — the workspace rule", async () => {
     h.listApps.mockResolvedValue([WORDCRAFT]);
-    render(<DocFilePreview doc={DOC} />);
+    render(<DocFilePreview entry={ENTRY} />);
     const app = await screen.findByTestId("visual-app");
     // The doc entry reaches the app through the same triple the viewers use:
     // the `__doc__` sentinel address its own bytes.
@@ -67,14 +72,14 @@ describe("DocFilePreview", () => {
 
   it("falls back to the built-in viewer when no app claims the format", async () => {
     h.listApps.mockResolvedValue([]);
-    render(<DocFilePreview doc={DOC} />);
+    render(<DocFilePreview entry={ENTRY} />);
     expect(await screen.findByTestId("builtin-viewer")).toBeTruthy();
     expect(screen.queryByTestId("visual-app")).toBeNull();
   });
 
   it("ignores a disabled app, even with the extension declared", async () => {
     h.listApps.mockResolvedValue([{ ...WORDCRAFT, enabled: false }]);
-    render(<DocFilePreview doc={DOC} />);
+    render(<DocFilePreview entry={ENTRY} />);
     expect(await screen.findByTestId("builtin-viewer")).toBeTruthy();
     expect(screen.queryByTestId("visual-app")).toBeNull();
   });

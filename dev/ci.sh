@@ -1316,15 +1316,16 @@ run_doc_addressing_redline() {
 run_doc_url_boundary_redline() {
     echo "Checking desktop doc-URL boundary red line (P-1 R1)..."
     local desk="$SCRIPT_DIR/../apps/acowork-desktop/src"
-    local offenders pending
+    local offenders
     offenders=$(grep -rn '/api/doc' --include='*.ts' --include='*.tsx' "$desk" \
         | grep -v '\.test\.' \
         | grep -vE ':[0-9]+:[[:space:]]*(\*|//|/\*)' \
         | grep -vE '/(doc-api|hostedMcpTools)\.ts:' || true)
-    # P2 摘除：文档库字节源当前寄生在 workspaceFileBlob.ts 的 `__doc__` 哨兵里。
-    # 打印出来而不是静默放行 —— 一条被忘记的白名单等于没有这条门。
-    pending=$(printf '%s\n' "$offenders" | grep -E '/workspaceFileBlob\.ts:' || true)
-    offenders=$(printf '%s\n' "$offenders" | grep -vE '/workspaceFileBlob\.ts:' || true)
+    # No whitelist, and that is deliberate (P2 closed the last entry): the byte
+    # cache no longer builds a doc URL itself — `workspaceFileBlob.ts` hands the
+    # `__doc__` source marker to `doc-api.ts::getDocFileUrl`. A whitelist entry
+    # that has been forgotten is a gate that is not there, so this list stays
+    # empty by construction.
     if [ -n "$offenders" ]; then
         echo "ERROR: a doc-library URL is being built outside lib/doc-api.ts (P-1 R1):"
         echo "$offenders"
@@ -1332,11 +1333,78 @@ run_doc_url_boundary_redline() {
         echo "       there instead of pasting a path."
         exit 1
     fi
-    if [ -n "$pending" ]; then
-        echo "NOTE: whitelisted until P2 (move the __doc__ byte source into lib/docFileBlob.ts):"
-        echo "$pending"
-    fi
     echo "Desktop doc-URL boundary red line: OK"
+}
+
+# Desktop doc-domain layering lock (P2 R2).
+#
+# The doc domain has a middleware layer anyone may use — `lib/doc-api.ts`
+# (URL), `lib/docEntry.ts` (entry shape + kind rule), `lib/docFileBlob.ts`
+# (bytes) — and a business layer that is nobody else's to import:
+# `views/doc/**` and `stores/doc/**`. Without this gate a chat card or a search
+# hit re-grows a private path into doc internals, which is exactly how the
+# "two open entries with different abilities" problem came back the last time.
+#
+# The importers are PINNED, not pattern-matched: a new business→doc-business
+# edge has to be added here on purpose, and the reason has to be written down.
+run_doc_layering_redline() {
+    echo "Checking desktop doc layering red line (P2 R2)..."
+    local desk="$SCRIPT_DIR/../apps/acowork-desktop/src"
+    local edges leaks file offenders=""
+
+    edges=$(grep -rnE "from \"[./]*(views|stores)/doc/" "$desk" \
+        --include='*.ts' --include='*.tsx' \
+        | grep -vE '\.(test|spec)\.' \
+        | grep -vE "^$desk/(views|stores)/doc/" || true)
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        file=${line%%:*}
+        case "$file" in
+            # The editor tab hosts the doc viewers — that IS the seam between
+            # the open intent (`openDocEntry`) and the doc business views.
+            "$desk/components/editor/FileEditorPanel.tsx") ;;
+            # Mounts the doc settings panel.
+            "$desk/components/layout/AppLayout.tsx") ;;
+            # The workspace tree shows doc-library nodes in place.
+            "$desk/components/workspace/FileTree/FileTree.tsx") ;;
+            # A search hit navigates to the doc VIEW (not a tab) — a product
+            # decision that needs the doc editor store directly.
+            "$desk/components/search/GlobalSearchDialog.tsx") ;;
+            # Middleware: folder events feed the doc tree store.
+            "$desk/lib/docFsEvents.ts") ;;
+            # The doc route shell itself.
+            "$desk/views/DocsView.tsx") ;;
+            *) offenders="$offenders$line
+" ;;
+        esac
+    done <<EOF
+$edges
+EOF
+    if [ -n "$offenders" ]; then
+        echo "ERROR: new business → doc-business import edge (P2 R2):"
+        printf '%s' "$offenders"
+        echo "       Use the doc middleware instead: lib/doc-api.ts / lib/docEntry.ts /"
+        echo "       lib/docFileBlob.ts, or fileEditorStore.openDocEntry for opening."
+        echo "       If the edge is genuinely right, pin it in run_doc_layering_redline."
+        exit 1
+    fi
+
+    # The `__doc__` source marker and the viewer coordinates belong to the
+    # middleware. A business module building them by hand is the shape of
+    # "reaction: nothing visible when clicked" — it addresses a route the
+    # domain does not own.
+    leaks=$(grep -rnE 'DOC_FILE_AGENT_ID|docFileRef\(' "$desk" \
+        --include='*.ts' --include='*.tsx' \
+        | grep -vE '\.(test|spec)\.' \
+        | grep -vE ':[0-9]+:[[:space:]]*(\*|//|/\*)' \
+        | grep -vE "^$desk/(lib|views/doc|components/editor)/" || true)
+    if [ -n "$leaks" ]; then
+        echo "ERROR: doc byte coordinates built outside the doc middleware (P2 R2):"
+        echo "$leaks"
+        echo "       Go through fileEditorStore.openDocEntry / lib/docFileBlob.ts."
+        exit 1
+    fi
+    echo "Desktop doc layering red line: OK"
 }
 
 run_all_redlines() {
@@ -1371,6 +1439,7 @@ run_all_redlines() {
     # doc 域地址收敛（技术方案 P-1）：命名唯一 + 边界唯一。
     run_doc_addressing_redline
     run_doc_url_boundary_redline
+    run_doc_layering_redline
 }
 
 run_clippy() {

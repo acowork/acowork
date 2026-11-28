@@ -29,7 +29,7 @@ const fetchWorkspaceFileBlob = vi.fn();
 const writeText = vi.fn();
 const openFile = vi.fn(async (..._args: unknown[]) => {});
 const openPreview = vi.fn(async (..._args: unknown[]) => {});
-const openDocPreview = vi.fn((..._args: unknown[]) => {});
+const openDocEntry = vi.fn((..._args: unknown[]) => {});
 
 vi.mock("../../lib/workspaceFileBlob", () => ({
   fetchWorkspaceFileBlobUrl: (...args: unknown[]) =>
@@ -37,7 +37,7 @@ vi.mock("../../lib/workspaceFileBlob", () => ({
   fetchWorkspaceFileBlob: (...args: unknown[]) => fetchWorkspaceFileBlob(...(args as [])),
 }));
 vi.mock("../../stores/fileEditorStore", () => ({
-  useFileEditorStore: { getState: () => ({ openFile, openPreview, openDocPreview }) },
+  useFileEditorStore: { getState: () => ({ openFile, openPreview, openDocEntry }) },
 }));
 vi.mock("../../i18n/useTranslation", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -215,7 +215,30 @@ describe("ChatDeliverablesRow", () => {
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(doc.path));
     // The copy is a sibling of the card: it must not also open the document.
-    expect(openDocPreview).not.toHaveBeenCalled();
+    expect(openDocEntry).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Clicking the card hands the store ONE shape (`DocEntryRef`) and lets it
+   * decide the view: the card knows a `docId` and a library path, not whether
+   * the entry has editable Markdown. Pinned because passing only
+   * `{docId, path, title}` was how a `.pptx` deliverable used to open as a
+   * blank Markdown editor.
+   */
+  it("opens a document through the shared entry shape", async () => {
+    const deck = { ...doc, docId: "doc-9", path: "项目管理/p-1/汇报/季度复盘.pptx", name: "季度复盘" };
+    render(<ChatDeliverablesRow message={docRow([deck])} agentId="a1" />);
+
+    fireEvent.click(screen.getByTitle(deck.path));
+
+    await waitFor(() =>
+      expect(openDocEntry).toHaveBeenCalledWith({
+        docId: "doc-9",
+        path: "项目管理/p-1/汇报/季度复盘.pptx",
+        name: "季度复盘",
+        ext: null,
+      }),
+    );
   });
 
   it("copies a workspace file's relative path", async () => {

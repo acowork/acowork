@@ -33,6 +33,8 @@ import {
 } from "../common/ContextMenu";
 import { MarkdownPreviewView } from "./MarkdownPreviewView";
 import { DocMarkdownView } from "../../views/doc/DocMarkdownView";
+import { DocFilePreview } from "../../views/doc/DocFilePreview";
+import { isImportedEntry } from "../../lib/docEntry";
 import { UrlPreviewView } from "./UrlPreviewView";
 import { usePreviewBridge } from "../../hooks/usePreviewBridge";
 import { closeAllPreviews, closePreview } from "../../lib/previewHost";
@@ -2088,10 +2090,14 @@ export function FileEditorPanel({ width }: { width: number }) {
                         }}
                     />
                 ) : activeFile.kind === "doc" ? (
-                    // Online doc-service document — fetched by `doc_id` through
-                    // the Gateway doc proxy (openDocPreview). Read-only Markdown:
-                    // there is no workspace to write back to, and the doc panel
-                    // owns editing. Reuses the same viewer the doc navigation uses.
+                    // Online doc-service entry — opened by `openDocEntry`, which
+                    // already decided the branch: an imported file (pdf / docx /
+                    // xlsx / pptx / image) has no editable body, so it gets the
+                    // byte viewer the doc panel and the workspace share; a
+                    // Markdown document gets the read-only render of the body
+                    // fetched through the doc proxy. Read-only either way: there
+                    // is no workspace to write back to, and the doc panel owns
+                    // editing.
                     activeFile.loading ? (
                         <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
                             <Loader2 className="h-4 w-4 animate-spin" />
@@ -2101,6 +2107,10 @@ export function FileEditorPanel({ width }: { width: number }) {
                         <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-xs text-text-tertiary">
                             <AlertCircle className="h-4 w-4" />
                             <span className="break-all">{activeFile.saveError}</span>
+                        </div>
+                    ) : activeFile.docEntry && isImportedEntry(activeFile.docEntry) ? (
+                        <div className="h-full min-h-0">
+                            <DocFilePreview entry={activeFile.docEntry} />
                         </div>
                     ) : (
                         <DocMarkdownView content={activeFile.content} />

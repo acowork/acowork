@@ -191,6 +191,37 @@ export function getDoc(docId: string): Promise<DocRead> {
   return request<DocRead>(`/docs/${encodeURIComponent(docId)}`);
 }
 
+/**
+ * 代表「这一份字节来自文档库」的来源标记。
+ *
+ * 字节缓存与 viewer 统一按工作区坐标 `(agentId, workspaceId, relPath)` 取字节
+ * （同一批 viewer、同一份 blob LRU，见 `lib/docFileBlob.ts`），而文档条目没有
+ * 工作区 —— 这个哨兵就是那个「没有工作区」的坐标值，和 `__agent_home__` 代表
+ * 「没有 workspace 的 home」同构。它住在 doc 的地址层（这里），因为谁要知道
+ * 「这份字节该走哪个路由」，答案就必须和路由常量在同一个模块里。
+ */
+export const DOC_FILE_AGENT_ID = "__doc__";
+
+/**
+ * 文档库条目的**字节**地址（`GET /api/doc/docs/{id}/file`）。
+ *
+ * 这是 `/api/doc` 字面量在桌面上的唯一构造处之一（R1）。它之所以必须住在这里
+ * 而不是在字节缓存里：字节缓存（`lib/workspaceFileBlob.ts`）服务的是**工作区
+ * 文件**，文档库只是它的一个外部来源；让缓存自己拼 doc 路由，等于把 doc 域的
+ * URL 知识散到中间件之外，改路由时就得靠 grep 找齐。
+ *
+ * 它返回的是**可以 fetch 的字符串**（`fetch` 拦截器会补 bearer），不是可以塞进
+ * `<img src>` / `<iframe src>` 的地址 —— 标签带不了 `Authorization` 头，那是
+ * 「白屏 401」那个 bug 的形状。渲染面拿 blob（或 `blob:` URL），不拿这个字符串。
+ */
+export function getDocFileUrl(docId: string): string {
+  // 与 `workspaceFileBlob` 的构造器同一条去尾斜杠规则：`getGatewayUrl()` 的
+  // 返回值在测试 / 反向代理配置里可能带尾斜杠，拼出 `//api/doc` 会被
+  // Axum 的路由当成不同的路径。
+  const base = getGatewayUrl().replace(/\/+$/g, "");
+  return `${base}/api/doc/docs/${encodeURIComponent(docId)}/file`;
+}
+
 /** `PUT /api/docs/:doc_id` — 直接更新（人类路径，带 base_version 乐观并发） */
 export function updateDoc(docId: string, input: UpdateDocInput): Promise<DocMeta> {
   return request<DocMeta>(`/docs/${encodeURIComponent(docId)}`, {

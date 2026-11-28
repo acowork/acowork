@@ -29,6 +29,8 @@ import type { ReactElement } from "react";
 
 const h = vi.hoisted(() => ({
   viewerProps: [] as Array<{ testid: string; props: Record<string, unknown> }>,
+  /** Entries the doc byte-viewer panel was asked to render. */
+  docPreviewEntries: [] as Array<Record<string, unknown>>,
   editorState: {
     openFiles: [] as Array<Record<string, unknown>>,
     activeFileId: null as string | null,
@@ -148,6 +150,17 @@ vi.mock("../common/tab", () => ({ TabItem: () => null }));
 vi.mock("../common/SetiIcon", () => ({ SetiIcon: () => null }));
 vi.mock("../common/Tooltip", () => ({ Tooltip: () => null }));
 vi.mock("../workspace/FileTree/fileIcons", () => ({ getFileIcon: () => null }));
+// The doc byte-viewer panel answers "which renderer owns an imported entry".
+// What it does internally is `DocFilePreview.test.tsx`'s concern.
+vi.mock("../../views/doc/DocFilePreview", () => ({
+  DocFilePreview: ({ entry }: { entry: Record<string, unknown> }) => {
+    h.docPreviewEntries.push(entry);
+    return <div data-testid="doc-file-preview" />;
+  },
+}));
+vi.mock("../../views/doc/DocMarkdownView", () => ({
+  DocMarkdownView: () => <div data-testid="doc-markdown-view" />,
+}));
 
 // The lazy document viewers → recording stubs. `vi.mock` also intercepts
 // the dynamic `import()` behind `React.lazy`, so the panel resolves to
@@ -228,6 +241,7 @@ const latest = () => h.viewerProps.at(-1) as { testid: string; props: Record<str
 beforeEach(() => {
   cleanup();
   h.viewerProps.length = 0;
+  h.docPreviewEntries.length = 0;
   h.agentState.selectedAgentId = null;
   h.editorState.openFiles = [];
   h.editorState.activeFileId = null;
@@ -329,5 +343,65 @@ describe("FileEditorPanel document preview branch", () => {
     renderWith(docFile("report.pdf", "docs/report.pdf", { mimeType: "application/pdf" }));
     expect(await screen.findByTestId("pdf-viewer")).toBeTruthy();
     expect(screen.queryByTestId("office-pdf-viewer")).toBeNull();
+  });
+});
+
+/**
+ * The `kind: "doc"` branch — an online doc-library entry opened as an editor
+ * tab (`fileEditorStore.openDocEntry`).
+ *
+ * Two shapes arrive here and they must NOT be served by the same renderer:
+ * a Markdown document has a fetched body, an imported file (pdf / docx /
+ * xlsx / pptx / image) has none — it renders through the doc preview panel,
+ * which fetches bytes and picks the viewer. Serving an imported entry with
+ * the Markdown renderer is precisely the reported "clicking a docx does
+ * nothing" bug: the pane is blank because `content` is empty by design.
+ */
+describe("FileEditorPanel doc-entry tab", () => {
+  it("renders an imported entry through the byte-viewer panel", async () => {
+    const entry = { docId: "doc-7", path: "研发/季度报告.docx", name: "季度报告", ext: "docx" };
+    renderWith({
+      id: "doc:doc-7",
+      agentId: "",
+      workspaceId: "",
+      relPath: "doc:研发/季度报告.docx",
+      fileName: "季度报告.docx",
+      content: "",
+      originalContent: "",
+      loading: false,
+      saving: false,
+      language: "plaintext",
+      dirty: false,
+      mode: "preview",
+      kind: "doc",
+      docId: "doc-7",
+      docEntry: entry,
+    });
+    expect(await screen.findByTestId("doc-file-preview")).toBeTruthy();
+    expect(h.docPreviewEntries.at(-1)).toEqual(entry);
+    // The Markdown renderer must be nowhere near an imported entry.
+    expect(screen.queryByTestId("doc-markdown-view")).toBeNull();
+  });
+
+  it("keeps a Markdown doc tab on the Markdown renderer", async () => {
+    renderWith({
+      id: "doc:doc-8",
+      agentId: "",
+      workspaceId: "",
+      relPath: "doc:研发/纪要.md",
+      fileName: "纪要.md",
+      content: "# 正文",
+      originalContent: "# 正文",
+      loading: false,
+      saving: false,
+      language: "markdown",
+      dirty: false,
+      mode: "preview",
+      kind: "doc",
+      docId: "doc-8",
+      docEntry: { docId: "doc-8", path: "研发/纪要.md", name: "纪要", ext: null },
+    });
+    expect(await screen.findByTestId("doc-markdown-view")).toBeTruthy();
+    expect(screen.queryByTestId("doc-file-preview")).toBeNull();
   });
 });

@@ -25,8 +25,6 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invokeM
 
 import {
     __resetWorkspaceFileBlobCache,
-    DOC_FILE_AGENT_ID,
-    docFileRef,
     fetchWorkspaceFileBlob,
     fetchWorkspaceFileBlobUrl,
     invalidateWorkspaceFileBlob,
@@ -253,31 +251,3 @@ describe("transfer helpers", () => {
     });
 });
 
-/**
- * The doc-library bridge: a `DocMeta` has no workspace, so `docFileRef` maps it
- * onto the viewers' `(agentId, workspaceId, relPath)` triple with a sentinel
- * agent id that routes to `GET /api/doc/docs/{doc_id}/file`. If this drifts, the
- * doc preview renders a 404 instead of the imported file — and every viewer
- * (pdf / docx / sheet / pptx / image) is affected at once.
- */
-describe("docFileRef — doc-library entries into the viewer triple", () => {
-    it("routes the sentinel agent id to the doc file route", () => {
-        const ref = docFileRef({ doc_id: "doc 1", name: "季度报告", ext: "pdf" });
-        expect(ref.agentId).toBe(DOC_FILE_AGENT_ID);
-        expect(ref.workspaceId).toBe("doc 1");
-        expect(ref.fileName).toBe("季度报告.pdf");
-        expect(workspaceFileUrlForRust(ref.agentId, ref.workspaceId, ref.relPath)).toBe(
-            "http://gateway:19876/api/doc/docs/doc%201/file",
-        );
-    });
-
-    it("fetches the doc route through the same blob cache", async () => {
-        const ref = docFileRef({ doc_id: "d1", name: "deck", ext: "pptx" });
-        await fetchWorkspaceFileBlob(ref.agentId, ref.workspaceId, ref.relPath);
-        expect(fetchMock).toHaveBeenCalledWith("http://gateway:19876/api/doc/docs/d1/file");
-    });
-
-    it("keeps a Markdown entry's own extension-less name as .md", () => {
-        expect(docFileRef({ doc_id: "d2", name: "笔记", ext: null }).fileName).toBe("笔记.md");
-    });
-});
