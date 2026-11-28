@@ -269,12 +269,6 @@ export const DOC_IMPORT_ACCEPT =
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet," +
   "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
-/** `GET /api/docs/:doc_id/path` — 相对路径 */
-export async function getDocPath(docId: string): Promise<string> {
-  const v = await request<{ path: string }>(`/docs/${encodeURIComponent(docId)}/path`);
-  return v.path;
-}
-
 // ── 更新请求（审核队列）──────────────────────────────────────────────
 
 /** `GET /api/requests?status=` — 请求列表（缺省全部；审核队列用 pending） */
