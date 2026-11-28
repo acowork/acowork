@@ -303,19 +303,53 @@ export function saveDocFile(docId: string, bytes: Uint8Array): Promise<DocMeta> 
 }
 
 /**
- * 上传对话框 / `<input type=file>` 共用的 accept 串。
+ * 可导入文件的扩展名 —— 桌面上**唯一**一份列表。
  *
- * 与服务端 `core/acowork-doc/src/types.rs::IMPORTABLE_EXTS` 同一张表：
- * 这里多列几个常见图片别名没关系（服务端仍会拒收），少列一个就是用户
- * 选不到支持的格式。
+ * 服务端的同一张表是 `core/acowork-doc/src/types.rs::IMPORTABLE_EXTS`（那里还带
+ * 每种格式的 MIME 与「是否按文本读」）。两份表由
+ * `docImportExts.consistency.test.ts` 逐项比对：多一个 / 少一个都会红 —— 因为
+ * 「服务端支持但用户选不到」和「用户选了但被拒收」是同一类静默错位，只能靠测试
+ * 兜住。
+ *
+ * 这里只放**扩展名**：MIME 是服务端知识，桌面除了 accept 串里的三个通配类型，
+ * 不再复述它。
  */
-export const DOC_IMPORT_ACCEPT =
-  ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.md,.markdown," +
-  ".png,.jpg,.jpeg,.gif,.webp,.svg,.bmp," +
-  "application/pdf,image/*,text/*," +
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document," +
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet," +
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+export const DOC_IMPORT_EXTS = [
+  "pdf",
+  "doc",
+  "docx",
+  "xls",
+  "xlsx",
+  "ppt",
+  "pptx",
+  "csv",
+  "md",
+  "markdown",
+  "txt",
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "svg",
+  "bmp",
+] as const;
+
+/**
+ * 上传对话框 / `<input type=file>` 的 accept 串，由 {@link DOC_IMPORT_EXTS} 派生。
+ *
+ * 后面那几个 MIME 通配是给人用的便利（`image/*` 让系统选择器按类型过滤），服务端
+ * 仍按扩展名判定，所以它们不会放宽任何东西。
+ */
+export const DOC_IMPORT_ACCEPT = [
+  ...DOC_IMPORT_EXTS.map((ext) => `.${ext}`),
+  "application/pdf",
+  "image/*",
+  "text/*",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+].join(",");
 
 // ── 更新请求（审核队列）──────────────────────────────────────────────
 

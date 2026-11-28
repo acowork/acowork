@@ -191,8 +191,10 @@ pub struct ImportKind {
 }
 
 /// The one extension table: what `POST /docs/import` accepts and how each
-/// kind is handled. Keep in sync with the Desktop's file picker `accept`
-/// list (`apps/acowork-desktop/src/lib/doc-types.ts`).
+/// kind is handled. Keep in sync with the Desktop's file picker list
+/// (`apps/acowork-desktop/src/lib/doc-api.ts::DOC_IMPORT_EXTS`); the desktop test
+/// `docImportExts.consistency.test.ts` compares the two tables item by item, so
+/// drift fails CI instead of silently hiding a format from the picker.
 pub const IMPORTABLE_EXTS: &[(&str, ImportKind)] = &[
     ("pdf", ImportKind { mime: "application/pdf", as_text: false }),
     ("doc", ImportKind { mime: "application/msword", as_text: false }),
