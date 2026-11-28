@@ -554,7 +554,7 @@ async fn import_kind_decides_entry_shape() {
         .collect();
 
     assert!(
-        text_exts.iter().any(|e| *e == "md") && file_exts.iter().any(|e| *e == "pdf"),
+        text_exts.contains(&"md") && file_exts.contains(&"pdf"),
         "扩展表至少要覆盖 markdown 与 pdf：{text_exts:?} / {file_exts:?}"
     );
     assert!(
