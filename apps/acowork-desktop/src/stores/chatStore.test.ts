@@ -363,6 +363,37 @@ describe("mergeMessageWindow: backend-authoritative ts ordering", () => {
     expect(result.messages[0].type).toBe("explore_stub");
   });
 
+  it("t-01412679: step 4 addresses cache rows by coordinate, not array index", () => {
+    // The cache already holds a stub for coordinate [0,3), so its later rows are
+    // NOT at `base + index`: array index 1 is coordinate 3, index 2 is 4. A
+    // second run's stub covers [3,5); the live row that arrived after it (at
+    // coordinate 5) must survive, and the two cached rows the stub covers must
+    // go. Off-by-one here would delete live rows or leave duplicates behind.
+    const cache: ChatMessage[] = [
+      {
+        id: "s1",
+        type: "explore_stub",
+        content: "",
+        timestamp: ts(100),
+        exploreStub: { start: 0, end: 3, rawCount: 3, steps: 2, tools: ["bash"], toolsTruncated: false },
+      },
+      msg("r2", ts(110), "thought"),
+      msg("r3", ts(120), "tool_call"),
+      msg("live", ts(200), "thought"),
+    ];
+    const server: ChatMessage[] = [
+      {
+        id: "r2",
+        type: "explore_stub",
+        content: "",
+        timestamp: ts(110),
+        exploreStub: { start: 3, end: 5, rawCount: 2, steps: 2, tools: ["bash"], toolsTruncated: false },
+      },
+    ];
+    const result = mergeMessageWindow(cache, server, 0);
+    expect(result.messages.map((m) => m.id)).toEqual(["s1", "r2", "live"]);
+  });
+
   it("t-01412679: the server's raw rows still replace a cached stub (same rule, other direction)", () => {
     // The mirror image: the cache holds the compressed row, the fresh page
     // carries the run raw (it is the trailing run again — a new turn started

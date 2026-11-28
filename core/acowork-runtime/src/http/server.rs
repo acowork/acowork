@@ -1711,10 +1711,14 @@ struct GetMessageDetailQuery {
     end: Option<u64>,
 }
 
-/// Upper bound on one detail window: the same ceiling `get_messages` clamps
-/// `limit` to, taken from the read contract rather than restated. A stub is
-/// produced from a single page, so a legitimate run fits comfortably; anything
-/// wider is a malformed (or hostile) request.
+/// Upper bound on ONE detail request: the same ceiling `get_messages` clamps
+/// `limit` to, taken from the read contract rather than restated.
+///
+/// A stub may legitimately be wider than this — pages are cut by RECORD, so a
+/// single long run can be a whole page — which is why the caller reads a wide
+/// run in slices of this size instead of one request. Rejecting (400) rather
+/// than truncating is deliberate: a truncated detail read would render a run
+/// that looks complete and is not.
 const MESSAGE_DETAIL_MAX_SPAN: u64 =
     crate::usecases::session_metadata::MESSAGES_PAGE_SPAN_MAX as u64;
 

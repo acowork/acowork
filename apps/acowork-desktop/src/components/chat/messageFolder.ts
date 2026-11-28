@@ -301,6 +301,33 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
 }
 
 /**
+ * The RAW coordinate of every row in a window whose first row sits at
+ * `baseOffset`.
+ *
+ * A row's position is NOT its array index: under `groups=stub` one row stands
+ * for a whole explore run, so the array is shorter than the coordinate span it
+ * covers. Walking the array with the stub spans is the only correct map — the
+ * same arithmetic [`blockIndexOfRawMessage`] does per block, available to
+ * callers that need a row's own coordinate (e.g. the store deciding which
+ * cached rows a freshly projected stub already speaks for).
+ */
+export function rowCoordinates(
+  messages: readonly ChatMessage[],
+  baseOffset: number,
+): number[] {
+  const coords: number[] = [];
+  let cursor = baseOffset;
+  for (const m of messages) {
+    coords.push(cursor);
+    cursor +=
+      m.type === "explore_stub" && m.exploreStub
+        ? m.exploreStub.end - m.exploreStub.start
+        : 1;
+  }
+  return coords;
+}
+
+/**
  * ADR-081 §4.2: index of the folded block containing the raw coordinate
  * `rawIdx`, or -1 when the target is not inside any block (e.g. a live-buffer
  * entry that predates the loaded window).

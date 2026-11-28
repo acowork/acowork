@@ -452,7 +452,7 @@ impl ConversationWriter {
     /// Returns the line's ADR-050 **data index** (its position among `Data`
     /// lines), or `None` when the line is blank / a legacy header — the coordinate
     /// ADR-106 D4 records in the round side table.
-    fn commit_appended_line(&self, offset: u64, len: u64) -> Option<u64> {
+    fn commit_appended_line(&self, offset: u64, len: u64, is_explore: bool) -> Option<u64> {
         let mut idx = match self.log.lock() {
             Ok(g) => g,
             Err(_) => return None,
@@ -468,6 +468,14 @@ impl ConversationWriter {
                 kind: LogLineKind::Data,
                 data_index: Some(data_index),
             });
+            // The record map is appended in the SAME breath as the span and the
+            // coordinate — the three are one row's three views. A fast path that
+            // advances `total_data` without it desyncs the map from the
+            // coordinates, and `snap_to_record_boundaries` then reads past its
+            // end (the record page returns 500 and the chat surface renders
+            // empty). `explore_rows.len()` is therefore an invariant of the
+            // index, not a hint.
+            idx.explore_rows.push(is_explore);
             idx.end = offset + len;
             Some(data_index)
         } else {
@@ -592,7 +600,8 @@ impl ConversationWriter {
                             // guarantees read_messages_since never sees a line count
                             // ahead of the actual file contents, and the index always
                             // backs a count a reader resolves against it.
-                            let data_index = self.commit_appended_line(start, len);
+                            let data_index = self
+                                .commit_appended_line(start, len, is_explore_entry(&entry));
                             self.committed_lines.fetch_add(1, Ordering::Relaxed);
                             // ADR-106 D4: record the round coordinate of the line we
                             // just committed while its position is exactly known.
@@ -629,7 +638,7 @@ impl ConversationWriter {
                             // A compaction marker is never part of a round (D4: the
                             // projection reads user / assistant rows only), so the
                             // returned coordinate is deliberately not folded.
-                            let _ = self.commit_appended_line(start, len);
+                            let _ = self.commit_appended_line(start, len, is_explore_entry(&entry));
                             self.committed_lines.fetch_add(1, Ordering::Relaxed);
                             if let Some(abs) = abs_offset {
                                 if let Ok(mut guard) = self.last_compaction_offset.lock() {
@@ -4294,16 +4303,22 @@ fn window_for(total: u64, offset: u64, limit: u32, from_tail: bool) -> (u64, u64
 /// collapses the page to that one record, which is small on the wire (one stub)
 /// and therefore self-limiting.
 fn snap_to_record_boundaries(explore: &[bool], start: u64, end: u64) -> (u64, u64) {
+    // `explore` is an index over a file another process can rewrite, so a
+    // disagreement about the row count is treated as "no such row" — the page
+    // then keeps its requested edges instead of failing the whole read. The
+    // length is still an invariant of a freshly reconciled index (see
+    // `LogIndex::explore_rows`), which is where a desync must be fixed.
+    let is_explore = |i: u64| explore.get(i as usize).copied().unwrap_or(false);
     let total = explore.len() as u64;
     let mut s = start.min(total);
     let mut e = end.min(total);
     if s >= e {
         return (s, e);
     }
-    while s > 0 && explore[s as usize] && explore[(s - 1) as usize] {
+    while s > 0 && is_explore(s) && is_explore(s - 1) {
         s -= 1;
     }
-    while e < total && explore[(e - 1) as usize] && explore[e as usize] {
+    while e < total && is_explore(e - 1) && is_explore(e) {
         e += 1;
     }
     (s, e)
@@ -4391,6 +4406,17 @@ pub fn read_messages_paginated_indexed(
     let (start_idx, end_idx, effective_offset) = match unit {
         PageUnit::Rows => (start_idx, end_idx, requested_offset),
         PageUnit::Records => {
+            if idx.explore_rows.len() as u64 != total {
+                // Should be impossible: every site that assigns a coordinate
+                // appends the row's classification in the same breath. Say so
+                // loudly, because the consequence (a page that cuts runs) is
+                // otherwise indistinguishable from a normal one.
+                tracing::warn!(
+                    total,
+                    explore_rows = idx.explore_rows.len(),
+                    "log index: record map out of sync with coordinates; page not snapped"
+                );
+            }
             let (s, e) = snap_to_record_boundaries(&idx.explore_rows, start_idx, end_idx);
             (s, e, s)
         }
@@ -4459,7 +4485,7 @@ fn is_explore_log_row(body: &[u8]) -> bool {
         .and_then(|m| m.get(META_KEY_INTERNAL))
         .and_then(|v| v.as_bool())
         == Some(true);
-    !internal && matches!(probe.role.as_str(), "thought" | "tool_call" | "tool_result")
+    is_explore_role(&probe.role, internal)
 }
 
 /// Whether an entry belongs to an explore run (the rows the frontend folds
@@ -4471,10 +4497,19 @@ fn is_explore_log_row(body: &[u8]) -> bool {
 /// (attachments / context_ref) — *breaks* a run, which is what the frontend
 /// does too. If either side changes, both must change together.
 pub fn is_explore_entry(entry: &ConversationEntry) -> bool {
-    if entry.is_internal() {
-        return false;
-    }
-    matches!(entry.role.as_str(), "thought" | "tool_call" | "tool_result")
+    is_explore_role(&entry.role, entry.is_internal())
+}
+
+/// The ONE definition of "this row belongs to an explore run": the role set plus
+/// the internal-row exclusion.
+///
+/// Both the byte-level probe the index scan uses ([`is_explore_log_row`]) and
+/// the entry-level predicate the projection uses ([`is_explore_entry`]) go
+/// through here. Two copies would let the record boundary and the collapse
+/// disagree about what a run is — the page would then be widened for a run the
+/// collapse does not fold, or fold half of one the boundary drew too short.
+fn is_explore_role(role: &str, internal: bool) -> bool {
+    !internal && matches!(role, "thought" | "tool_call" | "tool_result")
 }
 
 /// Collapse contiguous explore runs in a page into lightweight stub rows
@@ -5068,6 +5103,77 @@ mod tests {
             parts[1].chars().all(|c| c.is_ascii_digit()),
             "Time should be digits"
         );
+    }
+
+    #[test]
+    fn writer_fast_path_keeps_the_record_map_in_sync() {
+        // Regression: the writer's append fast path advanced the coordinate
+        // count without appending the row's classification, so the record map
+        // fell behind the coordinates and the next `groups=stub` page read went
+        // out of bounds — the request 500'd and the chat surface rendered with
+        // no rows at all (reported: "switching sessions shows nothing").
+        let temp_dir = TempDir::new().unwrap();
+        let work_dir = temp_dir.path();
+        let session_id = generate_session_id();
+        let (session, _cfg, _state) = ConversationSession::new(
+            work_dir,
+            &session_id,
+            SessionConfig {
+                agent_id: "com.test.agent".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        session.append_message("user", "go", None);
+        session.append_message("thought", "looking around", None);
+        session.append_message(
+            "tool_call",
+            "{}",
+            Some(serde_json::json!({"tool_name": "bash", "tool_call_id": "c1"})),
+        );
+        session.append_message(
+            "tool_result",
+            "ok",
+            Some(serde_json::json!({"tool_call_id": "c1"})),
+        );
+        session.append_message("assistant", "done", None);
+
+        let file_path = work_dir
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
+        // The writer is a thread; wait until every row is on disk AND indexed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let Ok(page) = read_messages_paginated_indexed(
+                &file_path,
+                0,
+                50,
+                false,
+                PageUnit::Records,
+            ) else {
+                continue;
+            };
+            if page.total == 5 {
+                assert_eq!(page.offset, 0);
+                assert_eq!(page.limit, 5);
+                let reaches_tail = page.reaches_log_tail();
+                let records = collapse_explore_runs(page.messages, reaches_tail);
+                assert_eq!(records.len(), 3, "user + one stub + assistant");
+                let meta = records[1].metadata.as_ref().expect("stub metadata");
+                assert_eq!(meta["start"], 1);
+                assert_eq!(meta["end"], 4);
+                assert_eq!(meta["steps"], 2, "thought + tool_call, result folds in");
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async { session.close().await.unwrap() });
+                return;
+            }
+        }
+        panic!("writer never published 5 rows of index");
     }
 
     #[test]
@@ -10094,6 +10200,69 @@ mod tests {
         assert_eq!(snap_to_record_boundaries(&explore, 0, 8), (0, 8));
         // Empty window is not widened.
         assert_eq!(snap_to_record_boundaries(&explore, 4, 4), (4, 4));
+    }
+
+    #[test]
+    fn paging_through_the_log_never_splits_a_run() {
+        // The property the whole record-page design exists for: walk the log one
+        // page at a time and every run must arrive as exactly ONE stub whose span
+        // is one of the real runs. A partial run — the shape that painted one run
+        // as two chips — cannot appear, and the offsets chain without a gap or an
+        // overlap.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let row = |id: &str, i: usize, role: &str| {
+            format!(
+                r#"{{"id":"{id}","ts":"2026-01-01T12:00:{i:02}.000Z","role":"{role}","content":"x"}}"#
+            )
+        };
+        let lines = vec![
+            row("r0", 0, "user"),
+            row("r1", 1, "thought"),     // run A = [1,4)
+            row("r2", 2, "tool_call"),
+            row("r3", 3, "tool_result"),
+            row("r4", 4, "assistant"),
+            row("r5", 5, "thought"),     // run B = [5,8)
+            row("r6", 6, "tool_call"),
+            row("r7", 7, "tool_result"),
+            row("r8", 8, "assistant"),
+        ];
+        std::fs::write(&path, lines.join("
+") + "
+").unwrap();
+
+        let mut offset = 0u64;
+        let mut seen: Vec<(u64, u64)> = Vec::new();
+        let mut stubs: Vec<(u64, u64)> = Vec::new();
+        while offset < 9 {
+            let page = read_messages_paginated_indexed(&path, offset, 2, false, PageUnit::Records)
+                .unwrap();
+            assert!(page.limit > 0, "paging must make progress at offset {offset}");
+            assert_eq!(page.offset, offset, "pages chain without a gap");
+            let span = page.limit as u64;
+            seen.push((page.offset, page.offset + span));
+            // The projection the reader gets (see `get_messages`'s Stub branch).
+            let reaches_tail = page.reaches_log_tail();
+            let records = collapse_explore_runs(page.messages, reaches_tail);
+            for e in &records {
+                if e.kind.as_deref() != Some(ENTRY_KIND_EXPLORE_STUB) {
+                    continue;
+                }
+                let meta = e.metadata.as_ref().unwrap();
+                stubs.push((
+                    meta["start"].as_u64().unwrap(),
+                    meta["end"].as_u64().unwrap(),
+                ));
+            }
+            offset = page.offset + span;
+        }
+        assert_eq!(offset, 9, "the walk covers the whole log");
+        assert_eq!(seen, vec![(0, 4), (4, 8), (8, 9)], "no gap, no overlap");
+        assert_eq!(
+            stubs,
+            vec![(1, 4), (5, 8)],
+            "each run arrives once, as a whole"
+        );
     }
 
     #[test]

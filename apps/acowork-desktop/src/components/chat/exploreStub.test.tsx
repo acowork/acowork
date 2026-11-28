@@ -15,7 +15,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { convertConversationEntry } from "../../stores/chatStore";
-import { blockIndexOfRawMessage, foldMessages } from "./messageFolder";
+import { blockIndexOfRawMessage, foldMessages, rowCoordinates } from "./messageFolder";
 import { ExploreBlock } from "./ExploreBlock";
 import type { ChatMessage, ConversationEntry, ExploreStubMeta } from "../../lib/types";
 
@@ -104,6 +104,15 @@ describe("foldMessages — lazy explore blocks", () => {
     // Each closed by the next block, exactly like two raw runs.
     expect(blocks[1].hasFollowUpReply).toBe(false);
     expect(blocks[2].hasFollowUpReply).toBe(true);
+  });
+});
+
+describe("rowCoordinates — array index is not a coordinate", () => {
+  it("advances a stub row by the span it advertises", () => {
+    const user: ChatMessage = { id: "u1", type: "user", content: "go", timestamp: 900 };
+    // Window base 10: user=10, stub covers [11,15), answer=15.
+    const coords = rowCoordinates([user, stubRow(11, 15), { id: "a1", type: "assistant", content: "ok", timestamp: 1100 }], 10);
+    expect(coords).toEqual([10, 11, 15]);
   });
 });
 
